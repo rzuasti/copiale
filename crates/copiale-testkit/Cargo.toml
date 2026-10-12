@@ -1,0 +1,11 @@
+[package]
+name = "copiale-testkit"
+description = "Fake Signal backend and fixtures for Copiale tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+copiale-core.workspace = true

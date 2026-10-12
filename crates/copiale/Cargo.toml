@@ -1,0 +1,12 @@
+[package]
+name = "copiale"
+description = "A fast, minimalist native desktop client for Signal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+copiale-core.workspace = true
+copiale-ui.workspace = true

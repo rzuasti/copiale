@@ -17,26 +17,20 @@
 
     # Nixpkgs instantiated for supported system types.
     pkgsBySystem = forEachSystem (system: import nixpkgs {inherit system;});
+
+    # The Nix package targets Linux; macOS ships as a notarized .dmg.
+    forEachLinuxSystem = nixpkgs.lib.genAttrs (builtins.filter (nixpkgs.lib.hasSuffix "-linux") supportedSystems);
   in {
+    packages = forEachLinuxSystem (system: rec {
+      copiale = pkgsBySystem.${system}.callPackage ./nix/package.nix {};
+      default = copiale;
+    });
+
     # Development shell to build and test the app locally
     devShells = forEachSystem (system: let
       pkgs = pkgsBySystem.${system};
 
-      # Libraries the UI toolkits (GPUI, iced/winit) dlopen at runtime.
-      linuxRuntimeLibs = with pkgs; [
-        wayland
-        libxkbcommon
-        vulkan-loader
-        libGL
-        libx11
-        libxcursor
-        libxi
-        libxrandr
-        libxcb
-        fontconfig
-        freetype
-        dbus
-      ];
+      linuxRuntimeLibs = import ./nix/runtime-libs.nix pkgs;
 
       # fcitx5 with Japanese and Chinese input, for manual IME testing.
       fcitx5 = pkgs.qt6Packages.fcitx5-with-addons.override {

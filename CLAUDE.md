@@ -89,5 +89,5 @@ went unsolved until 2011.
 
 ## Status
 
-Pre-development. UI toolkit chosen and MVP planned (`docs/mvp.md`); macOS and
-Windows spike checks pending. Next: workspace scaffold (M0).
+Pre-development. MVP planned (`docs/mvp.md`, Codeberg issues #1–#28);
+workspace scaffolded. Next: SQLCipher store spike (#2).
