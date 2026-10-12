@@ -1,0 +1,18 @@
+[package]
+name = "spike-iced"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+publish = false
+description = "UI toolkit spike: chat prototype on iced"
+
+[dependencies]
+arboard = { version = "3", default-features = false, features = ["image-data", "wayland-data-control"] }
+fixtures = { path = "../fixtures" }
+iced = { version = "0.14", features = ["advanced", "image", "tokio"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
+tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
+
+[dev-dependencies]
+iced_test = "0.14"
