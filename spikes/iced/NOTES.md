@@ -88,13 +88,18 @@ Problems:
 - Japanese full-width comma (、) rendered oddly in one bubble; keycap emoji
   (1️⃣) is a box, as in GPUI.
 
-## Manual checks still to do
+## Manual checks
 
-- [ ] Select and copy within a bubble; click a link.
-- [ ] Paste text; paste an image (status line shows dimensions).
-- [ ] IME: fcitx5 and IBus (Linux), Japanese (macOS), Microsoft Pinyin
+Scrolling feels noticeably less smooth than GPUI (hands-on, Linux).
+
+- [x] Select and copy within a bubble (works).
+- [x] Click a link: opens in the default browser.
+- [x] Paste text; paste an image (status line shows dimensions). (works)
+- [x] IME: fcitx5 on Wayland works; looks slightly worse than GPUI.
+- [ ] IME: IBus (Linux), Japanese (macOS), Microsoft Pinyin
       (Windows).
-- [ ] System dark/light switch while running.
-- [ ] Fractional scaling: Wayland 125% and 150%, Windows 150%, macOS Retina.
+- [x] System dark/light switch while running (portal color-scheme): works.
+- [x] Fractional scaling on Wayland at 1.25, 1.5 and 1.6: looks fine.
+- [ ] Fractional scaling: Windows 150%, macOS Retina.
 - [ ] X11 session; Wayland CSD vs SSD.
 - [ ] macOS and Windows builds and measurements.

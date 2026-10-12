@@ -80,13 +80,18 @@ Problems:
 - `Textarea` has no `.id()` for test lookup; tests focus it via its state.
 - Binary is large (icons, GPUI Kit's full component set).
 
-## Manual checks still to do
+## Manual checks
 
-- [ ] Select and copy across bubbles; click a link.
-- [ ] Paste text; paste an image (status line shows the format).
-- [ ] IME: fcitx5 and IBus (Linux), Japanese (macOS), Microsoft Pinyin
+Scrolling feels much smoother than iced (hands-on, Linux).
+
+- [x] Select and copy across bubbles (works).
+- [x] Click a link: opens in the default browser.
+- [x] Paste text; paste an image (status line shows the format). (works)
+- [x] IME: fcitx5 on Wayland works; looks slightly better than iced.
+- [ ] IME: IBus (Linux), Japanese (macOS), Microsoft Pinyin
       (Windows).
-- [ ] System dark/light switch while running.
-- [ ] Fractional scaling: Wayland 125% and 150%, Windows 150%, macOS Retina.
+- [x] System dark/light switch while running (portal color-scheme): works.
+- [x] Fractional scaling on Wayland at 1.25, 1.5 and 1.6: looks fine.
+- [ ] Fractional scaling: Windows 150%, macOS Retina.
 - [ ] X11 session; Wayland CSD vs SSD.
 - [ ] macOS and Windows builds and measurements.

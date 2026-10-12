@@ -37,7 +37,56 @@
         freetype
         dbus
       ];
+
+      # fcitx5 with Japanese and Chinese input, for manual IME testing.
+      fcitx5 = pkgs.qt6Packages.fcitx5-with-addons.override {
+        addons = [pkgs.fcitx5-mozc pkgs.qt6Packages.fcitx5-chinese-addons];
+      };
+
+      # Runs fcitx5 with a throwaway profile: the given keyboard layout plus
+      # one input method; Ctrl+Space toggles between them.
+      imeTest = pkgs.writeShellApplication {
+        name = "ime-test";
+        runtimeInputs = [fcitx5];
+        text = ''
+          case "''${1:-}" in
+            ja) im=mozc ;;
+            zh) im=pinyin ;;
+            *) echo "usage: ime-test ja|zh [fcitx5-keyboard, default keyboard-us]" >&2; exit 2 ;;
+          esac
+          keyboard="''${2:-keyboard-us}"
+          config=$(mktemp -d)
+          trap 'rm -rf "$config"' EXIT
+          mkdir -p "$config/fcitx5"
+          cat > "$config/fcitx5/profile" <<EOF
+          [Groups/0]
+          Name=Default
+          Default Layout=''${keyboard#keyboard-}
+          DefaultIM=$im
+
+          [Groups/0/Items/0]
+          Name=$keyboard
+          Layout=
+
+          [Groups/0/Items/1]
+          Name=$im
+          Layout=
+
+          [GroupOrder]
+          0=Default
+          EOF
+          echo "fcitx5 running with $im; Ctrl+Space toggles it. Ctrl+C to stop."
+          XDG_CONFIG_HOME="$config" fcitx5 --replace
+        '';
+      };
     in {
+      # Default shell plus fcitx5: `nix develop .#ime`, then `ime-test ja|zh`.
+      ime = pkgs.mkShell {
+        inputsFrom = [self.devShells.${system}.default];
+        packages = [imeTest];
+        inherit (self.devShells.${system}.default) DEV_SHELL RUST_SRC_PATH RUST_BACKTRACE LD_LIBRARY_PATH;
+      };
+
       default = pkgs.mkShell {
         DEV_SHELL = "copiale";
 
