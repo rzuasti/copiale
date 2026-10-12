@@ -35,11 +35,13 @@ went unsolved until 2011.
   - `copiale-ui`: views and theming.
   - `copiale-testkit`: fake Signal backend and fixtures (dev-dependency).
   - `copiale`: binary.
-  - Core runs as an actor on its own tokio runtime; UI talks to it via
+  - Core runs as an actor on its own thread (current-thread tokio runtime
+    plus `LocalSet`; presage futures are not `Send`); UI talks to it via
     `Command`/`Event` channels.
 - **Security:**
-  - One SQLCipher database (presage store plus app tables), key in the OS
-    keychain (`keyring`); Argon2id passphrase fallback without a keychain.
+  - One SQLCipher database (presage store plus app tables), raw key in the
+    OS keychain (`keyring`); Argon2id passphrase fallback without a
+    keychain. See `docs/spike-sqlcipher-results.md`.
   - No telemetry.
   - Never log message content, phone numbers or keys; log redacted
     identifiers only.
@@ -90,4 +92,4 @@ went unsolved until 2011.
 ## Status
 
 Pre-development. MVP planned (`docs/mvp.md`, Codeberg issues #1–#28);
-workspace scaffolded. Next: SQLCipher store spike (#2).
+workspace scaffolded; storage spike done. Next: core actor (#3).

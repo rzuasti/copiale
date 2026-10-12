@@ -145,7 +145,8 @@ crates/
 
 ### Core
 
-- Runs as an actor on its own tokio runtime thread.
+- Runs as an actor on its own thread: current-thread tokio runtime with a
+  `LocalSet`, since presage's futures are not `Send`.
 - UI sends `Command`s and receives `Event`s over async channels; the UI side
   drains events with `cx.spawn`.
 - A `SignalBackend` trait wraps presage's `Manager`; `copiale-testkit`
@@ -156,10 +157,14 @@ crates/
 ### Storage
 
 - One SQLCipher database holding presage's SQLite store
-  (`presage-store-sqlite`) and Copiale's own tables.
-- Key: random 256-bit key stored in the OS keychain (`keyring`).
+  (`presage-store-sqlite`) and Copiale's own tables
+  (`docs/spike-sqlcipher-results.md`).
+- Copiale's migrations are tracked in `_copiale_migrations`, apart from
+  presage's `_sqlx_migrations`.
+- Key: random 256-bit key stored in the OS keychain (`keyring`), passed to
+  SQLCipher as a raw key.
 - No keychain available: prompt for a passphrase at startup and derive the
-  key with Argon2id; the salt is stored next to the database.
+  raw key with Argon2id; the salt is stored next to the database.
 - Tests use temporary databases; never real Signal servers.
 
 ### Platform
@@ -179,10 +184,8 @@ crates/
 
 ## Risks to verify early
 
-- sqlx with SQLCipher: `presage-store-sqlite` on `libsqlite3-sys`
-  `bundled-sqlcipher` (or system SQLCipher via Nix).
-- presage coverage of edits, deletes, receipts, typing, disappearing timers
-  and contact sync on the pinned version.
+- presage has no Storage Service support: a linked device learns about a
+  group only when a message arrives in it.
 - GPUI: transparent/blurred window background and client-side decorations per
   platform.
 - Wayland focus stealing: `--toggle` needs an `xdg-activation` token to raise

@@ -1,0 +1,22 @@
+[package]
+name = "spike-sqlcipher"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+publish = false
+description = "Storage spike: presage SQLite store on SQLCipher, shared with app tables"
+
+# Standalone; not part of the root workspace.
+[workspace]
+
+[dependencies]
+presage = { git = "https://github.com/whisperfish/presage", rev = "94b3978f5456469cfd4d9f72351a5eff93715f81" }
+presage-store-sqlite = { git = "https://github.com/whisperfish/presage", rev = "94b3978f5456469cfd4d9f72351a5eff93715f81" }
+sqlx = { version = "0.9.0", default-features = false, features = ["sqlite", "migrate", "macros", "runtime-tokio"] }
+tokio = { version = "1.48", features = ["rt-multi-thread", "macros"] }
+rand = "0.9"
+hex = "0.4"
+
+# Same fork presage uses for its SQLCipher build.
+[patch.crates-io]
+libsqlite3-sys = { git = "https://github.com/whisperfish/rusqlite", rev = "2a42b3354c9194700d08aa070f70a131a470e7dc" }
