@@ -21,6 +21,8 @@ went unsolved until 2011.
 - **License:** AGPL-3.0 (required by libsignal/presage).
 - **UI:**
   - Custom-drawn; native feel, not native widgets.
+  - Minimalist, keyboard-first "terminal on steroids"; one adaptive window
+    for full-screen and quick widget-style use. Details in `docs/mvp.md`.
   - No web-based or Electron-style frameworks.
   - User-themeable: TOML themes, base16 import, follows system dark/light and
     accent.
@@ -31,12 +33,17 @@ went unsolved until 2011.
 - **Workspace:**
   - `copiale-core`: Signal, models, storage, async; no UI dependencies.
   - `copiale-ui`: views and theming.
+  - `copiale-testkit`: fake Signal backend and fixtures (dev-dependency).
   - `copiale`: binary.
+  - Core runs as an actor on its own tokio runtime; UI talks to it via
+    `Command`/`Event` channels.
 - **Security:**
-  - SQLCipher database, key in the OS keychain (`keyring`).
+  - One SQLCipher database (presage store plus app tables), key in the OS
+    keychain (`keyring`); Argon2id passphrase fallback without a keychain.
   - No telemetry.
   - Never log message content, phone numbers or keys; log redacted
     identifiers only.
+- **MVP scope:** text-only 1:1 and group chats; see `docs/mvp.md`.
 - **v1 scope:**
   - In: 1:1 and group chats, attachments, reactions, replies.
   - Out: calls, voice notes, stickers; accessibility after v1.
@@ -82,5 +89,5 @@ went unsolved until 2011.
 
 ## Status
 
-Pre-development. UI toolkit chosen; macOS and Windows spike checks pending.
-Next: workspace scaffold.
+Pre-development. UI toolkit chosen and MVP planned (`docs/mvp.md`); macOS and
+Windows spike checks pending. Next: workspace scaffold (M0).
