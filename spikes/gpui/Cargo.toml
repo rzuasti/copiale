@@ -1,0 +1,17 @@
+[package]
+name = "spike-gpui"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+publish = false
+description = "UI toolkit spike: chat prototype on GPUI + GPUI Kit"
+
+[dependencies]
+fixtures = { path = "../fixtures" }
+gpui-kit = "0.7.3"
+image = { version = "0.25", default-features = false, features = ["png"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
+
+[dev-dependencies]
+gpui-kit = { version = "0.7.3", features = ["test-support"] }
