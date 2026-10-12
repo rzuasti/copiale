@@ -1,0 +1,12 @@
+[package]
+name = "fixtures"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+publish = false
+description = "Deterministic fake chat data and themes for the UI toolkit spike"
+
+[dependencies]
+png = "0.18"
+serde = { version = "1", features = ["derive"] }
+toml = "1"

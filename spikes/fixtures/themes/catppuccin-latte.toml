@@ -1,0 +1,18 @@
+name = "Catppuccin Latte"
+appearance = "light"
+
+[colors]
+background = "#eff1f5"
+sidebar = "#e6e9ef"
+surface = "#ccd0da"
+border = "#bcc0cc"
+text = "#4c4f69"
+text_muted = "#6c6f85"
+accent = "#8839ef"
+accent_text = "#eff1f5"
+bubble_incoming = "#ccd0da"
+bubble_incoming_text = "#4c4f69"
+bubble_outgoing = "#1e66f5"
+bubble_outgoing_text = "#eff1f5"
+link = "#1e66f5"
+selection = "#acb0be"

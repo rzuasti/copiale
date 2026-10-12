@@ -1,0 +1,18 @@
+name = "Catppuccin Mocha"
+appearance = "dark"
+
+[colors]
+background = "#1e1e2e"
+sidebar = "#181825"
+surface = "#313244"
+border = "#45475a"
+text = "#cdd6f4"
+text_muted = "#a6adc8"
+accent = "#cba6f7"
+accent_text = "#11111b"
+bubble_incoming = "#313244"
+bubble_incoming_text = "#cdd6f4"
+bubble_outgoing = "#89b4fa"
+bubble_outgoing_text = "#11111b"
+link = "#89dceb"
+selection = "#585b70"

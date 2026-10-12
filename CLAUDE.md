@@ -61,7 +61,7 @@ went unsolved until 2011.
 - `spikes/` is exempt from testing rules.
 - After any change, run all tests and do not continue until they pass.
 - Run the linter after adding a significant chunk of code.
-- Commands:
+- Commands (run inside `nix develop`):
   - Format: `cargo fmt --all`
   - Lint: `cargo clippy --all-targets --all-features -- -D warnings`
   - Test: `cargo test --workspace`
