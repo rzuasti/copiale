@@ -24,8 +24,10 @@ went unsolved until 2011.
   - No web-based or Electron-style frameworks.
   - User-themeable: TOML themes, base16 import, follows system dark/light and
     accent.
-- **UI toolkit:** GPUI or iced, pending spike (`docs/spike-ui-toolkit.md`). Keep
-  the UI swappable.
+- **UI toolkit:** GPUI with GPUI Kit (`gpui-kit`, pinned exactly); see
+  `docs/spike-ui-toolkit-results.md`.
+  - Known gap: wrapped RTL text renders incorrectly; accepted until RTL
+    locales are targeted.
 - **Workspace:**
   - `copiale-core`: Signal, models, storage, async; no UI dependencies.
   - `copiale-ui`: views and theming.
@@ -80,4 +82,5 @@ went unsolved until 2011.
 
 ## Status
 
-Pre-development. Next: UI toolkit spike.
+Pre-development. UI toolkit chosen; macOS and Windows spike checks pending.
+Next: workspace scaffold.
