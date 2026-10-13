@@ -3,11 +3,15 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use copiale_core::{BackendError, Command, Event, StorageFailure};
+use copiale_core::{
+    BackendError, Command, ConversationId, ConversationSummary, Direction, Event, Message,
+    MessageBody, MessageId, MessageStatus, Peer, ServiceId, StorageFailure, Timestamp,
+};
 use copiale_ui::onboarding::Screen;
 use copiale_ui::{APP_ID, CoreSink, Shell, main_window_options};
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{AnyWindowHandle, AppContext as _, Entity, TestAppContext};
+use uuid::Uuid;
 
 const URL: &str = "sgnl://linkdevice?uuid=AbCdEfGhIjKlMnOp&pub_key=BQ%2B1YW3pPq0xg9Hk3sR8r5D7";
 
@@ -67,8 +71,9 @@ impl Ui {
             .unwrap();
     }
 
-    fn click(&self, id: &'static str, cx: &mut TestAppContext) {
-        cx.update_window(self.window, |_, window, cx| window.click(id, cx))
+    fn click(&self, id: impl Into<gpui_kit::ElementId>, cx: &mut TestAppContext) {
+        let id = id.into();
+        cx.update_window(self.window, |_, window, cx| window.click(id.clone(), cx))
             .unwrap();
         self.frame(cx);
     }
@@ -86,6 +91,62 @@ impl Ui {
 
     fn screen(&self, cx: &mut TestAppContext) -> Screen {
         cx.update(|cx| self.shell.read(cx).screen().clone())
+    }
+
+    /// Ready, with Alice (unread) and Bob in the chat list.
+    fn ready(cx: &mut TestAppContext) -> Self {
+        let ui = Self::open(cx);
+        ui.event(Event::Ready, cx);
+        assert!(matches!(
+            ui.core.take().as_slice(),
+            [Command::LoadConversations]
+        ));
+        ui.event(
+            Event::Conversations(vec![summary(1, "Alice", 1), summary(2, "Bob", 0)]),
+            cx,
+        );
+        ui
+    }
+
+    fn open_alice(&self, cx: &mut TestAppContext) {
+        self.click(("conversation", 1u64), cx);
+        self.core.take();
+        self.event(
+            Event::Messages {
+                conversation: ConversationId::new(1),
+                before: None,
+                messages: vec![message(10, Direction::Incoming, None)],
+            },
+            cx,
+        );
+    }
+}
+
+fn summary(id: i64, name: &str, unread: u32) -> ConversationSummary {
+    ConversationSummary {
+        id: ConversationId::new(id),
+        peer: Peer::Contact(peer(id)),
+        title: Some(name.into()),
+        last_activity: Some(Timestamp::from_millis(1_000 - id as u64)),
+        unread,
+        last_message: None,
+    }
+}
+
+fn peer(id: i64) -> ServiceId {
+    ServiceId::new(Uuid::from_u128(id as u128))
+}
+
+fn message(id: i64, direction: Direction, status: Option<MessageStatus>) -> Message {
+    Message {
+        id: MessageId::new(id),
+        conversation: ConversationId::new(1),
+        direction,
+        sent_at: Timestamp::from_millis(id as u64 * 1000),
+        received_at: Timestamp::from_millis(id as u64 * 1000),
+        body: MessageBody::new(format!("*message* {id}")),
+        read: true,
+        status,
     }
 }
 
@@ -231,4 +292,120 @@ fn retry_after_storage_failure(cx: &mut TestAppContext) {
     ui.click("retry", cx);
 
     assert!(matches!(ui.core.take().as_slice(), [Command::Retry]));
+}
+
+// Chats
+
+#[gpui_kit::test]
+fn opening_a_chat_loads_it_and_marks_it_read(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+
+    ui.click(("conversation", 1u64), cx);
+
+    let commands = ui.core.take();
+    assert!(
+        matches!(
+            commands.as_slice(),
+            [
+                Command::LoadMessages { conversation, before: None, .. },
+                Command::MarkRead(read),
+            ] if *conversation == ConversationId::new(1) && *read == ConversationId::new(1)
+        ),
+        "{commands:?}"
+    );
+}
+
+#[gpui_kit::test]
+fn composer_sends_to_the_open_chat(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.open_alice(cx);
+
+    // Opening focuses the composer; Enter on nothing sends nothing.
+    ui.press("enter", cx);
+    ui.type_text("hello", cx);
+    ui.press("shift-enter", cx);
+    ui.type_text("there", cx);
+    ui.press("enter", cx);
+
+    let commands = ui.core.take();
+    assert!(
+        matches!(
+            commands.as_slice(),
+            [Command::SendText { recipient, body }]
+                if *recipient == peer(1) && body.as_str() == "hello\nthere"
+        ),
+        "{commands:?}"
+    );
+    let composer = cx.update(|cx| {
+        ui.shell
+            .read(cx)
+            .chat()
+            .unwrap()
+            .read(cx)
+            .composer()
+            .clone()
+    });
+    assert!(cx.update(|cx| composer.read(cx).value().is_empty()));
+}
+
+#[gpui_kit::test]
+fn failed_message_can_be_retried(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.open_alice(cx);
+    let pending = message(11, Direction::Outgoing, Some(MessageStatus::Pending));
+    ui.event(Event::MessageAdded(pending.clone()), cx);
+
+    ui.event(
+        Event::SendFailed {
+            message: Message {
+                status: Some(MessageStatus::Failed),
+                ..pending
+            },
+            error: BackendError::new("offline"),
+        },
+        cx,
+    );
+    ui.click(("retry", 11u64), cx);
+
+    let commands = ui.core.take();
+    assert!(
+        matches!(commands.as_slice(), [Command::RetrySend(id)] if *id == MessageId::new(11)),
+        "{commands:?}"
+    );
+}
+
+#[gpui_kit::test]
+fn search_filters_and_enter_opens_the_match(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    let search = cx.update(|cx| ui.shell.read(cx).chat().unwrap().read(cx).search().clone());
+    cx.update_window(ui.window, |_, window, cx| {
+        search.update(cx, |search, cx| search.focus(window, cx));
+    })
+    .unwrap();
+
+    ui.type_text("bo", cx);
+    ui.press("enter", cx);
+
+    let open = cx.update(|cx| {
+        let chat = ui.shell.read(cx).chat().unwrap().read(cx).chat();
+        assert_eq!(chat.conversations().count(), 1);
+        chat.open_id()
+    });
+    assert_eq!(open, Some(ConversationId::new(2)));
+}
+
+#[gpui_kit::test]
+fn offline_status_reconnects_on_click(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.event(
+        Event::Disconnected {
+            error: None,
+            retry_in: std::time::Duration::from_secs(8),
+        },
+        cx,
+    );
+
+    ui.click("connection", cx);
+
+    assert!(matches!(ui.core.take().as_slice(), [Command::Reconnect]));
 }

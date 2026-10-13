@@ -1,5 +1,6 @@
 //! Views and theming for Copiale.
 
+pub mod chat;
 pub mod onboarding;
 mod qr;
 mod shell;

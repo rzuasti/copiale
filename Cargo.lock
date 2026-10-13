@@ -1347,10 +1347,12 @@ dependencies = [
 name = "copiale-ui"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "copiale-core",
  "gpui-kit",
  "qrcode",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

@@ -10,13 +10,16 @@ use gpui_kit::{
 };
 
 use crate::CoreSink;
+use crate::chat::ChatView;
 use crate::onboarding::{Onboarding, Screen, describe};
 use crate::qr::{QrMatrix, qr_code};
 
-/// Root view of the main window: onboarding until the core is ready.
+/// Root view of the main window: onboarding until the core is ready, then
+/// the chats.
 pub struct Shell {
     core: Rc<dyn CoreSink>,
     onboarding: Onboarding,
+    chat: Option<Entity<ChatView>>,
     passphrase: Entity<InputState>,
     confirmation: Entity<InputState>,
     device_name: Entity<InputState>,
@@ -58,6 +61,7 @@ impl Shell {
         Self {
             core,
             onboarding: Onboarding::default(),
+            chat: None,
             passphrase,
             confirmation,
             device_name,
@@ -102,9 +106,22 @@ impl Shell {
             Screen::Linking { url } if self.qr.as_ref().is_none_or(|(cached, _)| cached != url) => {
                 self.qr = Some((url.clone(), QrMatrix::encode(url)));
             }
+            Screen::Ready => {
+                let core = self.core.clone();
+                let chat = self
+                    .chat
+                    .get_or_insert_with(|| cx.new(|cx| ChatView::new(core, window, cx)))
+                    .clone();
+                chat.update(cx, |chat, cx| chat.on_event(event, window, cx));
+            }
             _ => {}
         }
         cx.notify();
+    }
+
+    /// The chats, once the core is ready.
+    pub fn chat(&self) -> Option<&Entity<ChatView>> {
+        self.chat.as_ref()
     }
 
     pub fn screen(&self) -> &Screen {
@@ -173,12 +190,8 @@ impl Shell {
                 cx,
             )
             .into_any_element(),
-            Screen::Ready => card(
-                "Linked",
-                "This device is linked. Conversations will appear here.".into(),
-                cx,
-            )
-            .into_any_element(),
+            // Shown by the chat view instead.
+            Screen::Ready => status("Loading…", cx),
             Screen::Passphrase { new, error, busy } => self.render_passphrase(new, error, busy, cx),
             Screen::StorageFailed {
                 failure,
@@ -320,6 +333,9 @@ impl Shell {
 
 impl Render for Shell {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let (Screen::Ready, Some(chat)) = (self.onboarding.screen(), &self.chat) {
+            return div().size_full().child(chat.clone());
+        }
         div()
             .size_full()
             .flex()

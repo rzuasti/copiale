@@ -105,5 +105,5 @@ went unsolved until 2011.
 
 Pre-development. MVP planned (`docs/mvp.md`, Codeberg issues #1–#28);
 M0 (foundations) done; linking (#7) and receiving 1:1 text (#8) work end to
-end; sending 1:1 text (#9) is done in the core, its UI comes with the app
-shell. Next: app shell (#10).
+end; sending 1:1 text (#9) and the app shell (#10) are done, pending a manual
+end-to-end check. Next: dark and light themes (#11).

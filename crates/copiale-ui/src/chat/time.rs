@@ -1,0 +1,141 @@
+//! Local times for display: message times, day labels, chat list ages.
+
+use chrono::{DateTime, Datelike as _, FixedOffset, Local, NaiveDate, NaiveDateTime, Utc};
+use copiale_core::Timestamp;
+
+/// Converts timestamps to local time: the system's, or a fixed one in tests.
+#[derive(Clone, Copy, Debug)]
+pub struct Clock {
+    fixed: Option<(FixedOffset, Timestamp)>,
+}
+
+impl Clock {
+    pub fn system() -> Self {
+        Self { fixed: None }
+    }
+
+    /// Always `now`, in a fixed time zone.
+    pub fn fixed(offset: FixedOffset, now: Timestamp) -> Self {
+        Self {
+            fixed: Some((offset, now)),
+        }
+    }
+
+    pub fn now(&self) -> Timestamp {
+        match self.fixed {
+            Some((_, now)) => now,
+            None => Timestamp::now(),
+        }
+    }
+
+    pub fn local(&self, timestamp: Timestamp) -> NaiveDateTime {
+        let utc = DateTime::<Utc>::from_timestamp_millis(millis(timestamp)).unwrap_or_default();
+        match self.fixed {
+            Some((offset, _)) => utc.with_timezone(&offset).naive_local(),
+            None => utc.with_timezone(&Local).naive_local(),
+        }
+    }
+
+    pub fn day(&self, timestamp: Timestamp) -> NaiveDate {
+        self.local(timestamp).date()
+    }
+
+    /// "14:05".
+    pub fn time(&self, timestamp: Timestamp) -> String {
+        self.local(timestamp).format("%H:%M").to_string()
+    }
+
+    /// "Today", "Yesterday", "Mon 12 Oct", or with the year if not this one.
+    pub fn day_label(&self, day: NaiveDate) -> String {
+        let today = self.day(self.now());
+        if day == today {
+            "Today".into()
+        } else if today.pred_opt() == Some(day) {
+            "Yesterday".into()
+        } else if day.year() == today.year() {
+            day.format("%a %-d %b").to_string()
+        } else {
+            day.format("%a %-d %b %Y").to_string()
+        }
+    }
+
+    /// Compact age for the chat list: "now", "5m", "3h", "2d", then the
+    /// date: "12 Oct", or "Oct 2025" for other years.
+    pub fn age(&self, timestamp: Timestamp) -> String {
+        let now = self.now();
+        let minutes = now.as_millis().saturating_sub(timestamp.as_millis()) / 60_000;
+        match minutes {
+            0 => "now".into(),
+            1..60 => format!("{minutes}m"),
+            60..1440 => format!("{}h", minutes / 60),
+            1440..10_080 => format!("{}d", minutes / 1440),
+            _ => {
+                let day = self.day(timestamp);
+                if day.year() == self.day(now).year() {
+                    day.format("%-d %b").to_string()
+                } else {
+                    day.format("%b %Y").to_string()
+                }
+            }
+        }
+    }
+}
+
+fn millis(timestamp: Timestamp) -> i64 {
+    i64::try_from(timestamp.as_millis()).unwrap_or(i64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 2026-10-13 14:05 at UTC+2.
+    const NOW: u64 = 1_791_893_100_000;
+    const MINUTE: u64 = 60_000;
+    const DAY: u64 = 1440 * MINUTE;
+
+    fn clock() -> Clock {
+        Clock::fixed(
+            FixedOffset::east_opt(2 * 3600).unwrap(),
+            Timestamp::from_millis(NOW),
+        )
+    }
+
+    fn ago(millis: u64) -> Timestamp {
+        Timestamp::from_millis(NOW - millis)
+    }
+
+    #[test]
+    fn times_are_local_and_24_hour() {
+        assert_eq!(clock().time(Timestamp::from_millis(NOW)), "14:05");
+        assert_eq!(clock().time(ago(14 * 60 * MINUTE)), "00:05");
+    }
+
+    #[test]
+    fn day_labels() {
+        let clock = clock();
+        let label = |at| clock.day_label(clock.day(at));
+        assert_eq!(label(ago(0)), "Today");
+        // 00:05 local is still today; 23:55 the evening before is not.
+        assert_eq!(label(ago(14 * 60 * MINUTE)), "Today");
+        assert_eq!(label(ago(14 * 60 * MINUTE + 10 * MINUTE)), "Yesterday");
+        assert_eq!(label(ago(3 * DAY)), "Sat 10 Oct");
+        assert_eq!(label(ago(365 * DAY)), "Mon 13 Oct 2025");
+    }
+
+    #[test]
+    fn ages() {
+        let clock = clock();
+        assert_eq!(clock.age(ago(30_000)), "now");
+        assert_eq!(clock.age(ago(5 * MINUTE)), "5m");
+        assert_eq!(clock.age(ago(3 * 60 * MINUTE)), "3h");
+        assert_eq!(clock.age(ago(2 * DAY)), "2d");
+        assert_eq!(clock.age(ago(8 * DAY)), "5 Oct");
+        assert_eq!(clock.age(ago(400 * DAY)), "Sep 2025");
+    }
+
+    #[test]
+    fn future_times_are_now() {
+        assert_eq!(clock().age(Timestamp::from_millis(NOW + MINUTE)), "now");
+    }
+}
