@@ -29,3 +29,23 @@ To drop it once the PR is merged:
 To re-vendor at a new revision: take `presage-store-sqlite/` from that
 revision, apply the patch with `git apply`, and repeat the `Cargo.toml`
 change above.
+
+## libsignal-service-rs
+
+- **Base:** [whisperfish/libsignal-service-rs](https://github.com/whisperfish/libsignal-service-rs)
+  at `fb92b13c82fde40ba4d10696cf79aa4f36ce25f1`, the revision presage pins.
+  Copied without `.github/` and `examples/`.
+- **Patch:** `patches/libsignal-service-contacts-bounds.patch`. Parsing a
+  contacts sync whose avatar length runs past the end of the data panicked
+  (`copy_to_bytes`), killing the receive connection mid-batch: messages
+  already decrypted but not yet acknowledged came back and failed to decrypt
+  again. The patch ends the contact list with
+  `ParseContactError::Truncated` instead, keeps the contacts parsed so far,
+  and logs sizes only (no contact data) to help find the cause.
+- **Upstream PR:** pending.
+- **Used via:** `[patch."https://github.com/whisperfish/libsignal-service-rs"]`
+  in the root `Cargo.toml`.
+
+To drop it once upstream has the fix and presage pins a revision with it:
+remove the patch entry and this directory, then add the libsignal-service
+git hash back to `nix/package.nix`.

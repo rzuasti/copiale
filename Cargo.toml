@@ -40,9 +40,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = "1"
 zeroize = "1"
 
-# Adds SqliteStore::close until upstream merges it; see vendor/README.md.
+# Patched until upstream merges the changes; see vendor/README.md.
 [patch."https://github.com/whisperfish/presage"]
 presage-store-sqlite = { path = "vendor/presage-store-sqlite" }
+
+[patch."https://github.com/whisperfish/libsignal-service-rs"]
+libsignal-service = { path = "vendor/libsignal-service-rs" }
 
 # Same SQLCipher-enabled fork presage uses.
 [patch.crates-io]

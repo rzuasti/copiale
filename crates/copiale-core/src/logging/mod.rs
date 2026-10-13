@@ -36,8 +36,30 @@ pub fn init() {
     };
     // Also routes `log` records into tracing.
     let installed = subscriber(&options, std::io::stderr).try_init().is_ok();
-    if installed && options.unsafe_dependencies {
+    if !installed {
+        return;
+    }
+    install_panic_hook();
+    if options.unsafe_dependencies {
         tracing::warn!("{UNSAFE_ENV} is set: dependency logs may contain message contents");
+    }
+}
+
+/// Sends panics through the logger, and its scrubbing, instead of raw
+/// stderr. [`init`] calls this.
+pub fn install_panic_hook() {
+    std::panic::set_hook(Box::new(log_panic));
+}
+
+/// The backtrace is included when `RUST_BACKTRACE` asks for one.
+fn log_panic(info: &std::panic::PanicHookInfo<'_>) {
+    let thread = std::thread::current();
+    let thread = thread.name().unwrap_or("unnamed");
+    let backtrace = std::backtrace::Backtrace::capture();
+    if backtrace.status() == std::backtrace::BacktraceStatus::Captured {
+        tracing::error!(thread, "panic: {info}\n{backtrace}");
+    } else {
+        tracing::error!(thread, "panic: {info}");
     }
 }
 
