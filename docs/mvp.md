@@ -117,17 +117,44 @@ Scope, UI design, architecture and work items for the first usable release.
 
 ### Settings
 
-`config.toml` in the platform config dir is the source of truth. The
-settings UI edits it with `toml_edit`, preserving comments; external edits
-apply live.
+`config.toml` in the platform config dir (`~/.config/copiale/` on Linux) is
+the source of truth (`copiale_core::config`).
 
-| Group | Knobs |
+- The settings UI edits it with `toml_edit`, keeping comments and order;
+  writes are atomic and go through symlinks (dotfile managers).
+- External edits apply live.
+- A bad value falls back to its default with a warning naming the setting;
+  a syntax error means all defaults. Loading never fails.
+
+```toml
+[appearance]
+theme = "system"          # system | dark | light
+
+[typography]
+# ui_font, mono_font, body_font: font names; unset = built-in default
+size = 14                 # px, 9-32
+line_height = 1.4         # 1.0-2.0
+
+[layout]
+density = "cozy"          # compact | cozy | roomy
+message_style = "log"     # log | blocks | bubbles
+timestamps = "always"     # always | hover | never
+clock = "24h"             # 24h | 12h
+avatars = false
+
+[window]
+opacity = 1.0             # background, 0.5-1.0
+blur = false              # compositor-dependent
+
+[notifications]
+content = "name"          # off | name | message
+```
+
+The settings UI also shows account settings, which live with the account,
+not in the file:
+
+| Group | Settings |
 |---|---|
-| Appearance | Theme: system / dark / light |
-| Typography | UI, mono and body fonts; base size; line height |
-| Layout | Density (compact, cozy, roomy); message style; timestamp format and visibility; avatars on/off |
-| Window | Background opacity; blur (compositor-dependent) |
-| Notifications | Off / name only / name and message |
 | Privacy | Read receipts and typing indicators (mirror account settings) |
 | Account | Device name, unlink and wipe |
 

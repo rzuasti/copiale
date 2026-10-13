@@ -4,6 +4,8 @@
 
 mod actor;
 mod backend;
+pub mod config;
+mod dirs;
 mod model;
 pub mod storage;
 

@@ -12,12 +12,14 @@ argon2.workspace = true
 directories.workspace = true
 futures.workspace = true
 keyring.workspace = true
+notify.workspace = true
 presage.workspace = true
 presage-store-sqlite.workspace = true
 rand.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "macros"] }
+toml_edit.workspace = true
 uuid.workspace = true
 zeroize.workspace = true
 

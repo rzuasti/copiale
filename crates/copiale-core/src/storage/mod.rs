@@ -36,8 +36,7 @@ impl StoragePaths {
 
     /// Platform data dir, e.g. `~/.local/share/copiale` on Linux.
     pub fn platform() -> Option<Self> {
-        let dirs = directories::ProjectDirs::from("page.codeberg", "korba", "Copiale")?;
-        Some(Self::in_dir(dirs.data_dir()))
+        Some(Self::in_dir(crate::dirs::project_dirs()?.data_dir()))
     }
 
     fn dir(&self) -> &Path {

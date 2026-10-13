@@ -97,5 +97,5 @@ went unsolved until 2011.
 ## Status
 
 Pre-development. MVP planned (`docs/mvp.md`, Codeberg issues #1–#28);
-workspace scaffolded; storage spike, core actor and encrypted store done.
-Next: config file (#5).
+workspace scaffolded; storage spike, core actor, encrypted store and config
+file done. Next: logging (#6).
