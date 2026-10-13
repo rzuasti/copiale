@@ -104,4 +104,5 @@ went unsolved until 2011.
 ## Status
 
 Pre-development. MVP planned (`docs/mvp.md`, Codeberg issues #1–#28);
-M0 (foundations) done. Next: M1, starting with linking (#7).
+M0 (foundations) done; linking works end to end (#7). Next: receiving 1:1
+text (#8).

@@ -67,6 +67,17 @@ fn default_filter_shows_copiale_info_and_dependency_warnings() {
 }
 
 #[test]
+fn default_filter_hides_zbus_warnings() {
+    let out = logged(DEFAULT_FILTER, false, || {
+        tracing::warn!(target: "zbus::proxy", "zbus-warn");
+        tracing::error!(target: "zbus::proxy", "zbus-error");
+    });
+
+    assert!(!out.contains("zbus-warn"));
+    assert!(out.contains("zbus-error"));
+}
+
+#[test]
 fn dependencies_stay_capped_at_warn_even_with_trace_filter() {
     let out = logged("trace", false, || {
         tracing::debug!(target: "copiale_core::actor", "core-debug");

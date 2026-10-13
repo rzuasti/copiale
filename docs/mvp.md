@@ -209,7 +209,8 @@ crates/
 - Logging (`copiale_core::logging`): `tracing` to stderr only, never to
   disk.
   - `COPIALE_LOG` sets the filter; default `info` for Copiale, `warn` for
-    dependencies.
+    dependencies (`error` for `zbus`, which warns about missing D-Bus
+    services on minimal desktops).
   - Dependencies are capped at `warn` regardless: presage and libsignal log
     message contents at `debug`. `COPIALE_UNSAFE_LOG=1` lifts the cap, for
     test accounts only.

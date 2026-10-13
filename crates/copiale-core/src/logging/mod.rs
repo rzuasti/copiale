@@ -22,7 +22,9 @@ use tracing_subscriber::{Layer as _, Registry};
 
 pub const FILTER_ENV: &str = "COPIALE_LOG";
 pub const UNSAFE_ENV: &str = "COPIALE_UNSAFE_LOG";
-pub const DEFAULT_FILTER: &str = "warn,copiale=info,copiale_core=info,copiale_ui=info";
+/// `zbus` warns about missing D-Bus services (no keyring, no portal), which
+/// is expected on minimal desktops.
+pub const DEFAULT_FILTER: &str = "warn,zbus=error,copiale=info,copiale_core=info,copiale_ui=info";
 
 /// Installs the global logger from the environment, including `log` records
 /// from dependencies. Does nothing if a logger is already installed.
