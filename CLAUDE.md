@@ -42,6 +42,8 @@ went unsolved until 2011.
   - One SQLCipher database (presage store plus app tables), raw key in the
     OS keychain (`keyring`); Argon2id passphrase fallback without a
     keychain. See `docs/spike-sqlcipher-results.md`.
+  - Messages live in app tables only; presage's message saving is disabled
+    through a delegating `Store` wrapper.
   - No telemetry.
   - Never log message content, phone numbers or keys; log redacted
     identifiers only.
@@ -88,9 +90,12 @@ went unsolved until 2011.
 
 - Never use "Signal" in the product name, branding or package names (Signal
   trademark policy). Describe it as "a client for Signal" only.
+- App ID: `page.codeberg.korba.Copiale` (`copiale_core::APP_ID`): Wayland app
+  ID, macOS bundle ID, keychain service, Flatpak ID. Changing it means
+  migrating user data.
 
 ## Status
 
 Pre-development. MVP planned (`docs/mvp.md`, Codeberg issues #1–#28);
-workspace scaffolded; storage spike and core actor done. Next: encrypted
-store (#4).
+workspace scaffolded; storage spike, core actor and encrypted store done.
+Next: config file (#5).

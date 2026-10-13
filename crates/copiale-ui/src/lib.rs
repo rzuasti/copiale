@@ -8,8 +8,7 @@ use gpui_kit::{
     App, AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size,
 };
 
-/// Application ID: Wayland app ID and X11 `WM_CLASS`.
-pub const APP_ID: &str = "copiale";
+pub use copiale_core::APP_ID;
 
 /// Runs the UI event loop with the main window open; returns on quit.
 pub fn run() {

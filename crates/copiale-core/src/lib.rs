@@ -5,6 +5,11 @@
 mod actor;
 mod backend;
 mod model;
+pub mod storage;
+
+/// Reverse-DNS application ID: Wayland app ID, macOS bundle ID, keychain
+/// service, Flatpak ID.
+pub const APP_ID: &str = "page.codeberg.korba.Copiale";
 
 pub use actor::{Command, CoreHandle, CoreStopped, Event, Events, spawn};
 pub use backend::{BackendError, Incoming, SignalBackend};

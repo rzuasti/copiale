@@ -8,11 +8,20 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+argon2.workspace = true
+directories.workspace = true
 futures.workspace = true
+keyring.workspace = true
+presage.workspace = true
+presage-store-sqlite.workspace = true
+rand.workspace = true
+sqlx.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "macros"] }
 uuid.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 copiale-testkit.workspace = true
+tempfile.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }

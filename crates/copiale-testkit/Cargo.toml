@@ -12,3 +12,4 @@ copiale-core.workspace = true
 futures.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 uuid.workspace = true
+zeroize.workspace = true

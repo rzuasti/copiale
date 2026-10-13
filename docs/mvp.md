@@ -164,8 +164,15 @@ crates/
 - Key: random 256-bit key stored in the OS keychain (`keyring`), passed to
   SQLCipher as a raw key.
 - No keychain available: prompt for a passphrase at startup and derive the
-  raw key with Argon2id; the salt is stored next to the database.
-- Tests use temporary databases; never real Signal servers.
+  raw key with Argon2id (64 MiB, 3 passes, 4 lanes); salt and parameters live
+  in `copiale.key` next to the database, which also marks passphrase mode.
+- Files: `copiale.db` and `copiale.key` in the platform data dir
+  (`~/.local/share/copiale` on Linux), restricted to the user.
+- Messages live in Copiale's tables only, with edits, deletes and expiry
+  applied. presage's own message saving (`thread_messages`) is turned off by
+  a delegating `Store` wrapper.
+- Tests use temporary databases and an in-memory keychain; never real Signal
+  servers or the OS keychain.
 
 ### Platform
 
