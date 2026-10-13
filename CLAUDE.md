@@ -49,7 +49,8 @@ went unsolved until 2011.
   - No telemetry.
   - Never log message content, phone numbers or keys; log redacted
     identifiers only (`ServiceId`, `PhoneNumber`, `GroupId`). Dependency
-    logs are capped at `warn` (`copiale_core::logging`).
+    logs are capped at `warn`, and all output is scrubbed of UUIDs, long
+    hex runs and phone numbers (`copiale_core::logging`).
   - Close every database connection before exit (`Database::close`):
     SQLCipher frees its global state at exit, crashing connections still
     closing (core dumps could hold keys).

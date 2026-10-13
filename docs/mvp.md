@@ -215,6 +215,8 @@ crates/
     test accounts only.
   - Identifiers go through redacting types (`ServiceId`, `PhoneNumber`,
     `GroupId`); bodies, keys and passphrases never print.
+  - Backstop for dependency logs: all output is scrubbed of UUIDs, runs of
+    32+ hex digits and E.164 numbers (kept: last 4 or 2 digits).
   - SQLCipher's own logging is off (`cipher_log_level = NONE`).
 
 ### UI

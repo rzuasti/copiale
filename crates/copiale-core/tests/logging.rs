@@ -156,3 +156,23 @@ fn identifiers_and_secrets_are_redacted_in_logs() {
         assert!(!out.contains(secret), "{secret:?} leaked in: {out}");
     }
 }
+
+#[test]
+fn dependency_output_is_scrubbed() {
+    let out = logged(DEFAULT_FILTER, false, || {
+        tracing::warn!(
+            target: "presage::manager::registered",
+            thread = "Thread(contact=0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0)",
+            ts = 1_700_000_000_123u64,
+            "could not find message to delete in thread"
+        );
+        tracing::warn!(target: "libsignal_service::models", "bad number +14155550123");
+    });
+
+    assert!(out.contains("could not find message to delete"));
+    assert!(out.contains("…e1f0"));
+    assert!(out.contains("1700000000123"), "timestamps survive: {out}");
+    assert!(out.contains("+…23"));
+    assert!(!out.contains("0f1e2d3c"), "{out}");
+    assert!(!out.contains("4155550"), "{out}");
+}

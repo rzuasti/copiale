@@ -8,7 +8,10 @@
 //!
 //! Copiale's own logs carry identifiers only through redacting types
 //! ([`ServiceId`](crate::ServiceId), [`PhoneNumber`](crate::PhoneNumber),
-//! [`GroupId`](crate::GroupId)).
+//! [`GroupId`](crate::GroupId)). As a backstop, all output is scrubbed of
+//! UUIDs, long hex runs and phone numbers, which dependencies do print.
+
+mod scrub;
 
 use tracing::{Level, Subscriber};
 use tracing_subscriber::filter::{EnvFilter, filter_fn};
@@ -56,7 +59,7 @@ where
         unsafe_dependencies || is_copiale(metadata.target()) || *metadata.level() <= Level::WARN
     });
     let layer = tracing_subscriber::fmt::layer()
-        .with_writer(writer)
+        .with_writer(scrub::Scrubbing(writer))
         .with_filter(filter)
         .with_filter(cap);
     Registry::default().with(layer)
