@@ -1308,6 +1308,7 @@ name = "copiale-core"
 version = "0.1.0"
 dependencies = [
  "argon2 0.6.0",
+ "chrono",
  "copiale-testkit",
  "directories",
  "futures",

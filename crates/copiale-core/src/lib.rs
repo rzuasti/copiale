@@ -8,6 +8,7 @@ pub mod config;
 mod dirs;
 pub mod logging;
 mod model;
+pub mod signal;
 pub mod storage;
 
 /// Reverse-DNS application ID: Wayland app ID, macOS bundle ID, keychain
