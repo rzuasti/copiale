@@ -10,3 +10,4 @@ publish.workspace = true
 [dependencies]
 copiale-core.workspace = true
 copiale-ui.workspace = true
+tracing.workspace = true
