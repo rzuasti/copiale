@@ -2,6 +2,7 @@
 //! thread, and walks through startup (unlock, then link) before serving.
 
 mod outbox;
+mod probe;
 mod run;
 
 use std::sync::Arc;
@@ -16,6 +17,10 @@ use crate::model::{
     ConversationId, ConversationSummary, Message, MessageBody, MessageId, ServiceId,
 };
 use crate::storage::{Passphrase, SecretStore, Storage};
+
+/// Stack for the core thread. Generating Kyber prekeys while linking
+/// overflows the 2 MiB default in debug builds.
+pub(crate) const STACK_SIZE: usize = 16 * 1024 * 1024;
 
 /// Request from the UI to the core. Ignored when it doesn't fit the
 /// current state.
@@ -172,6 +177,15 @@ pub struct CoreOptions {
     /// First reconnect delay; doubles per failure up to `reconnect_max`.
     pub reconnect_initial: Duration,
     pub reconnect_max: Duration,
+    /// How long connecting, or asking the phone for contacts, may take.
+    pub connect_timeout: Duration,
+    /// Time between connection checks; a check unanswered within
+    /// `probe_timeout` reconnects.
+    pub probe_interval: Duration,
+    pub probe_timeout: Duration,
+    /// How long an outgoing message may wait for a connection before it
+    /// fails.
+    pub send_timeout: Duration,
 }
 
 impl Default for CoreOptions {
@@ -179,6 +193,10 @@ impl Default for CoreOptions {
         Self {
             reconnect_initial: Duration::from_secs(1),
             reconnect_max: Duration::from_secs(60),
+            connect_timeout: Duration::from_secs(30),
+            probe_interval: Duration::from_secs(20),
+            probe_timeout: Duration::from_secs(10),
+            send_timeout: Duration::from_secs(600),
         }
     }
 }
@@ -217,6 +235,7 @@ where
     let (event_tx, event_rx) = unbounded_channel();
     let thread = std::thread::Builder::new()
         .name("copiale-core".into())
+        .stack_size(STACK_SIZE)
         .spawn(move || {
             let core = run::Core {
                 storage,

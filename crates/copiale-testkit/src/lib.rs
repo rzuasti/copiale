@@ -25,16 +25,13 @@ pub fn service_id(n: u128) -> ServiceId {
 /// Creates a fake backend and the network controller that scripts it.
 pub fn fake_backend() -> (FakeBackend, FakeNetwork) {
     let state = Arc::new(Mutex::new(State::default()));
-    let (sends_paused, _) = watch::channel(false);
-    let sends_paused = Arc::new(sends_paused);
+    let (link, _) = watch::channel(Link::default());
+    let link = Arc::new(link);
     let backend = FakeBackend {
         state: state.clone(),
-        sends_paused: sends_paused.clone(),
+        link: link.clone(),
     };
-    let network = FakeNetwork {
-        state,
-        sends_paused,
-    };
+    let network = FakeNetwork { state, link };
     (backend, network)
 }
 
@@ -44,6 +41,13 @@ pub struct SentText {
     pub recipient: ServiceId,
     pub body: MessageBody,
     pub timestamp: Timestamp,
+}
+
+#[derive(Clone, Copy, Default)]
+struct Link {
+    sends_paused: bool,
+    offline: bool,
+    connections_stalled: bool,
 }
 
 #[derive(Default)]
@@ -62,26 +66,39 @@ struct State {
 /// new connection, replacing any previous one.
 pub struct FakeBackend {
     state: Arc<Mutex<State>>,
-    sends_paused: Arc<watch::Sender<bool>>,
+    link: Arc<watch::Sender<Link>>,
 }
 
 impl SignalBackend for FakeBackend {
-    async fn receive(&mut self) -> Result<LocalBoxStream<'static, Incoming>, BackendError> {
-        let mut state = self.state.lock().unwrap();
-        if let Some(error) = state.receive_failures.pop_front() {
-            return Err(error);
+    /// Opens once connections aren't stalled.
+    fn receive(
+        &mut self,
+    ) -> LocalBoxFuture<'static, Result<LocalBoxStream<'static, Incoming>, BackendError>> {
+        let state = self.state.clone();
+        let mut link = self.link.subscribe();
+        async move {
+            link.wait_for(|link| !link.connections_stalled).await.ok();
+            if link.borrow().offline {
+                return Err(BackendError::network("offline"));
+            }
+            let mut state = state.lock().unwrap();
+            if let Some(error) = state.receive_failures.pop_front() {
+                return Err(error);
+            }
+            let (tx, rx) = unbounded_channel();
+            state.connection = Some(tx);
+            state.connections += 1;
+            let stream = futures::stream::unfold(rx, |mut rx| async move {
+                let item = rx.recv().await?;
+                Some((item, rx))
+            });
+            Ok(stream.boxed_local())
         }
-        let (tx, rx) = unbounded_channel();
-        state.connection = Some(tx);
-        state.connections += 1;
-        let stream = futures::stream::unfold(rx, |mut rx| async move {
-            let item = rx.recv().await?;
-            Some((item, rx))
-        });
-        Ok(stream.boxed_local())
+        .boxed_local()
     }
 
-    /// Counts as started at once; completes when sends aren't paused.
+    /// Counts as started at once; completes when sends aren't paused and
+    /// the network is up.
     fn send_text(
         &mut self,
         recipient: ServiceId,
@@ -94,10 +111,12 @@ impl SignalBackend for FakeBackend {
             state.send_failures.pop_front()
         };
         let state = self.state.clone();
-        let mut paused = self.sends_paused.subscribe();
+        let mut link = self.link.subscribe();
         async move {
             // Fails only once the network is gone; then nothing pauses.
-            paused.wait_for(|paused| !paused).await.ok();
+            link.wait_for(|link| !link.sends_paused && !link.offline)
+                .await
+                .ok();
             if let Some(error) = failure {
                 return Err(error);
             }
@@ -106,6 +125,16 @@ impl SignalBackend for FakeBackend {
                 body,
                 timestamp,
             });
+            Ok(())
+        }
+        .boxed_local()
+    }
+
+    /// Answers unless the network is down.
+    fn probe(&mut self) -> LocalBoxFuture<'static, Result<(), BackendError>> {
+        let mut link = self.link.subscribe();
+        async move {
+            link.wait_for(|link| !link.offline).await.ok();
             Ok(())
         }
         .boxed_local()
@@ -120,7 +149,7 @@ impl SignalBackend for FakeBackend {
 /// Scripts what the [`FakeBackend`] receives and how sends behave.
 pub struct FakeNetwork {
     state: Arc<Mutex<State>>,
-    sends_paused: Arc<watch::Sender<bool>>,
+    link: Arc<watch::Sender<Link>>,
 }
 
 impl FakeNetwork {
@@ -156,11 +185,27 @@ impl FakeNetwork {
     /// Holds sends in flight until [`Self::resume_sends`], like a slow
     /// network.
     pub fn pause_sends(&self) {
-        self.sends_paused.send_replace(true);
+        self.link.send_modify(|link| link.sends_paused = true);
     }
 
     pub fn resume_sends(&self) {
-        self.sends_paused.send_replace(false);
+        self.link.send_modify(|link| link.sends_paused = false);
+    }
+
+    /// Drops all traffic, like a lost network: the open connection stays
+    /// open but probes and sends hang, and new connections fail.
+    pub fn go_offline(&self) {
+        self.link.send_modify(|link| link.offline = true);
+    }
+
+    pub fn go_online(&self) {
+        self.link.send_modify(|link| link.offline = false);
+    }
+
+    /// Holds connection attempts until called with `false`.
+    pub fn stall_connections(&self, stall: bool) {
+        self.link
+            .send_modify(|link| link.connections_stalled = stall);
     }
 
     /// Texts sent successfully so far, oldest first.

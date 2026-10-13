@@ -25,10 +25,14 @@ const CHEAP_KDF: KdfParams = KdfParams {
 
 const RETRY: Duration = Duration::from_millis(10);
 
-fn fast_reconnect() -> CoreOptions {
+/// Quick reconnects and connection checks.
+fn fast() -> CoreOptions {
     CoreOptions {
         reconnect_initial: RETRY,
         reconnect_max: RETRY * 4,
+        probe_interval: RETRY,
+        probe_timeout: RETRY * 2,
+        ..CoreOptions::default()
     }
 }
 
@@ -40,7 +44,7 @@ struct Running {
 }
 
 fn start(dir: &Path, secrets: &MemorySecretStore, linked: bool) -> Running {
-    start_with(dir, secrets, linked, fast_reconnect(), |_| {})
+    start_with(dir, secrets, linked, fast(), |_| {})
 }
 
 /// `script` prepares the network before the core starts using it.
@@ -512,7 +516,9 @@ async fn sends_go_out_one_at_a_time_in_order() {
 #[tokio::test]
 async fn one_failure_does_not_stop_later_sends() {
     let (_dir, mut running) = ready().await;
-    running.network.fail_next_send(BackendError::new("offline"));
+    running
+        .network
+        .fail_next_send(BackendError::new("rejected"));
     running.network.pause_sends();
 
     send_text(&running, 2, "fails");
@@ -561,6 +567,187 @@ async fn sends_interrupted_by_quitting_fail_on_restart() {
     stop(running).await;
 }
 
+/// The next event other than reconnect attempts.
+async fn skip_disconnects(events: &mut Events) -> Event {
+    loop {
+        match next_event(events).await {
+            Event::Disconnected { .. } => {}
+            event => break event,
+        }
+    }
+}
+
+/// Waits for queued commands to be handled.
+async fn sync(running: &mut Running) {
+    send(running, Command::LoadConversations);
+    loop {
+        if let Event::Conversations(_) = skip_disconnects(&mut running.events).await {
+            break;
+        }
+    }
+}
+
+#[tokio::test]
+async fn messages_wait_for_the_connection() {
+    let (_dir, mut running) = ready().await;
+    running.network.go_offline();
+    expect_disconnected(&mut running.events, RETRY).await;
+
+    send_text(&running, 2, "later");
+    let Event::MessageAdded(pending) = skip_disconnects(&mut running.events).await else {
+        panic!("expected MessageAdded");
+    };
+    sync(&mut running).await;
+    assert_eq!(running.network.sends_started(), 0);
+
+    running.network.go_online();
+    assert_eq!(
+        skip_disconnects(&mut running.events).await,
+        Event::Connected
+    );
+    let sent = message_updated(&mut running.events).await;
+    assert_eq!(sent.id, pending.id);
+    assert_eq!(sent.status, Some(MessageStatus::Sent));
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn send_cut_off_by_a_dead_connection_is_resent() {
+    let (_dir, mut running) = ready().await;
+    running.network.pause_sends();
+    send_text(&running, 2, "stuck");
+    let pending = pending_added(&mut running.events).await;
+    sync(&mut running).await;
+    assert_eq!(running.network.sends_started(), 1);
+
+    running.network.go_offline();
+    expect(
+        &mut running.events,
+        Event::Disconnected {
+            error: Some(BackendError::network("no answer from the server")),
+            retry_in: RETRY,
+        },
+    )
+    .await;
+    running.network.resume_sends();
+    running.network.go_online();
+
+    assert_eq!(
+        skip_disconnects(&mut running.events).await,
+        Event::Connected
+    );
+    assert_eq!(message_updated(&mut running.events).await.id, pending.id);
+    assert_eq!(running.network.sends_started(), 2);
+    assert_eq!(
+        running.network.sent(),
+        [SentText {
+            recipient: service_id(2),
+            body: MessageBody::new("stuck"),
+            timestamp: pending.sent_at,
+        }]
+    );
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn network_error_while_sending_reconnects_and_resends() {
+    let (_dir, mut running) = ready().await;
+    let error = BackendError::network("connection reset");
+    running.network.fail_next_send(error.clone());
+
+    send_text(&running, 2, "again");
+    let pending = pending_added(&mut running.events).await;
+
+    expect(
+        &mut running.events,
+        Event::Disconnected {
+            error: Some(error),
+            retry_in: RETRY,
+        },
+    )
+    .await;
+    expect(&mut running.events, Event::Connected).await;
+    let sent = message_updated(&mut running.events).await;
+    assert_eq!(sent.id, pending.id);
+    assert_eq!(sent.status, Some(MessageStatus::Sent));
+    assert_eq!(running.network.sends_started(), 2);
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn messages_waiting_too_long_fail() {
+    let dir = tempfile::tempdir().unwrap();
+    let options = CoreOptions {
+        send_timeout: Duration::from_millis(100),
+        ..fast()
+    };
+    let mut running = start_with(
+        dir.path(),
+        &MemorySecretStore::default(),
+        true,
+        options,
+        |_| {},
+    );
+    expect(&mut running.events, Event::Ready).await;
+    expect(&mut running.events, Event::Connected).await;
+    running.network.go_offline();
+
+    send_text(&running, 2, "too late");
+    let Event::MessageAdded(pending) = skip_disconnects(&mut running.events).await else {
+        panic!("expected MessageAdded");
+    };
+    assert!(matches!(
+        skip_disconnects(&mut running.events).await,
+        Event::ConversationUpdated(_)
+    ));
+    let Event::SendFailed { message, error } = skip_disconnects(&mut running.events).await else {
+        panic!("expected SendFailed");
+    };
+    assert_eq!(message.id, pending.id);
+    assert_eq!(message.status, Some(MessageStatus::Failed));
+    assert_eq!(error, BackendError::new("timed out"));
+    assert!(running.network.sent().is_empty());
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn stalled_connection_times_out_while_commands_are_served() {
+    let dir = tempfile::tempdir().unwrap();
+    let options = CoreOptions {
+        connect_timeout: Duration::from_millis(100),
+        ..fast()
+    };
+    let mut running = start_with(
+        dir.path(),
+        &MemorySecretStore::default(),
+        true,
+        options,
+        |network| network.stall_connections(true),
+    );
+    expect(&mut running.events, Event::Ready).await;
+
+    send(&running, Command::LoadConversations);
+    assert_eq!(
+        next_event(&mut running.events).await,
+        Event::Conversations(Vec::new())
+    );
+    expect(
+        &mut running.events,
+        Event::Disconnected {
+            error: Some(BackendError::network("timed out connecting")),
+            retry_in: RETRY,
+        },
+    )
+    .await;
+
+    running.network.stall_connections(false);
+    assert_eq!(
+        skip_disconnects(&mut running.events).await,
+        Event::Connected
+    );
+    stop(running).await;
+}
+
 #[tokio::test]
 async fn reports_receive_failure_and_keeps_serving_commands() {
     let dir = tempfile::tempdir().unwrap();
@@ -568,7 +755,7 @@ async fn reports_receive_failure_and_keeps_serving_commands() {
         dir.path(),
         &MemorySecretStore::default(),
         true,
-        fast_reconnect(),
+        fast(),
         |network| network.fail_receive(BackendError::new("unauthorized")),
     );
 
@@ -618,7 +805,7 @@ async fn reconnect_backs_off_and_resets_once_synced() {
         dir.path(),
         &MemorySecretStore::default(),
         true,
-        fast_reconnect(),
+        fast(),
         |network| {
             for _ in 0..4 {
                 network.fail_receive(BackendError::new("offline"));
@@ -649,6 +836,7 @@ async fn reconnect_command_skips_the_wait() {
     let slow = CoreOptions {
         reconnect_initial: Duration::from_secs(600),
         reconnect_max: Duration::from_secs(600),
+        ..CoreOptions::default()
     };
     let mut running = start_with(
         dir.path(),

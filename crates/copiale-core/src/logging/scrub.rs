@@ -3,6 +3,8 @@
 //! - UUIDs (`8-4-4-4-12` hex) and runs of 32+ hex digits become `…` plus
 //!   the last 4 digits, matching `ServiceId`'s `Debug`.
 //! - `+` followed by 7–15 digits (E.164) becomes `+…` plus the last 2.
+//! - `Debug`-formatted byte lists of 16+ bytes (raw IDs, server responses)
+//!   become `[N bytes]`.
 //!
 //! Bare digit runs are kept: they are mostly timestamps.
 
@@ -13,6 +15,7 @@ use tracing_subscriber::fmt::MakeWriter;
 const HEX_RUN_MIN: usize = 32;
 const UUID_GROUPS: [usize; 5] = [8, 4, 4, 4, 12];
 const PHONE_DIGITS: std::ops::RangeInclusive<usize> = 7..=15;
+const BYTE_LIST_MIN: usize = 16;
 
 /// Wraps a [`MakeWriter`] so every write is scrubbed first.
 pub(super) struct Scrubbing<W>(pub(super) W);
@@ -55,6 +58,11 @@ pub(crate) fn scrub(text: &str) -> String {
             } else {
                 out.push_str(token);
             }
+            i = end;
+        } else if bytes[i] == b'['
+            && let Some((end, count)) = byte_list_end(bytes, i)
+        {
+            out.push_str(&format!("[{count} bytes]"));
             i = end;
         } else if bytes[i] == b'+'
             && let Some(end) = phone_end(bytes, i)
@@ -111,6 +119,39 @@ fn phone_end(bytes: &[u8], start: usize) -> Option<usize> {
     (PHONE_DIGITS.contains(&digits) && !next_is_word).then_some(end)
 }
 
+/// End and length of a list of at least [`BYTE_LIST_MIN`] numbers up to
+/// 255 starting with the `[` at `start`, in compact or pretty `Debug` form.
+fn byte_list_end(bytes: &[u8], start: usize) -> Option<(usize, usize)> {
+    let skip_space = |i: usize| {
+        i + bytes[i..]
+            .iter()
+            .take_while(|byte| byte.is_ascii_whitespace())
+            .count()
+    };
+    let mut i = skip_space(start + 1);
+    let mut count = 0;
+    loop {
+        let digits = bytes[i..]
+            .iter()
+            .take_while(|byte| byte.is_ascii_digit())
+            .count();
+        if digits == 0 {
+            break;
+        }
+        std::str::from_utf8(&bytes[i..i + digits])
+            .ok()?
+            .parse::<u8>()
+            .ok()?;
+        count += 1;
+        i = skip_space(i + digits);
+        if bytes.get(i) != Some(&b',') {
+            break;
+        }
+        i = skip_space(i + 1);
+    }
+    (bytes.get(i) == Some(&b']') && count >= BYTE_LIST_MIN).then_some((i + 1, count))
+}
+
 fn utf8_len(first: u8) -> usize {
     match first {
         0xf0.. => 4,
@@ -156,6 +197,29 @@ mod tests {
     fn scrubs_phone_numbers() {
         assert_eq!(scrub("from +14155550123: hi"), "from +…23: hi");
         assert_eq!(scrub("+447700900123"), "+…23");
+    }
+
+    #[test]
+    fn scrubs_byte_lists() {
+        let body: Vec<u8> = br#"{"number":"+14155550123"}"#.to_vec();
+        assert_eq!(
+            scrub(&format!("body: Some({body:?}) }}")),
+            "body: Some([25 bytes]) }"
+        );
+        let id = [7u8; 16];
+        assert_eq!(scrub(&format!("{id:#?}")), "[16 bytes]");
+    }
+
+    #[test]
+    fn keeps_short_and_non_byte_lists() {
+        for text in [
+            "[1, 2, 3]",
+            "[]",
+            "[300, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]",
+            "headers: [\"Content-Type:application/json\"]",
+        ] {
+            assert_eq!(scrub(text), text);
+        }
     }
 
     #[test]

@@ -14,6 +14,8 @@ use presage::libsignal_service::content::{Content, ContentBody};
 use presage::libsignal_service::proto::sync_message::{Content as SyncContent, Sent};
 use presage::libsignal_service::proto::{DataMessage, SyncMessage};
 use presage::libsignal_service::protocol::{Aci, ServiceId as SignalServiceId};
+use presage::libsignal_service::push_service::ServiceError;
+use presage::libsignal_service::sender::MessageSenderError;
 use presage::manager::Registered;
 use presage::model::messages::Received;
 use presage::store::StateStore as _;
@@ -39,7 +41,7 @@ impl Linker for PresageLinker {
         }
         let manager = Manager::load_registered(store)
             .await
-            .map_err(backend_error)?;
+            .map_err(presage_error)?;
         Ok(Some(PresageBackend::new(manager)))
     }
 
@@ -63,7 +65,7 @@ impl Linker for PresageLinker {
             }
         };
         let (manager, ()) = futures::join!(link, forward_url);
-        let manager = manager.map_err(backend_error)?;
+        let manager = manager.map_err(presage_error)?;
         tracing::info!("linked as a secondary device");
         Ok(PresageBackend::new(manager))
     }
@@ -95,7 +97,9 @@ impl Drop for PresageBackend {
 impl SignalBackend for PresageBackend {
     /// Receives on a clone of the manager in a local task, so sending
     /// doesn't wait for the stream. Must run inside a `LocalSet`.
-    async fn receive(&mut self) -> Result<LocalBoxStream<'static, Incoming>, BackendError> {
+    fn receive(
+        &mut self,
+    ) -> LocalBoxFuture<'static, Result<LocalBoxStream<'static, Incoming>, BackendError>> {
         let mut manager = self.manager.clone();
         let (opened_tx, opened_rx) = oneshot::channel();
         let (items_tx, items_rx) = mpsc::unbounded_channel();
@@ -106,7 +110,7 @@ impl SignalBackend for PresageBackend {
                     stream
                 }
                 Err(error) => {
-                    opened_tx.send(Err(backend_error(error))).ok();
+                    opened_tx.send(Err(presage_error(error))).ok();
                     return;
                 }
             };
@@ -122,15 +126,17 @@ impl SignalBackend for PresageBackend {
         if let Some(previous) = self.receiver.replace(receiver) {
             previous.abort();
         }
-        opened_rx
-            .await
-            .map_err(|_| BackendError::new("receiver stopped"))??;
-
-        let stream = futures::stream::unfold(items_rx, |mut items| async move {
-            let item = items.recv().await?;
-            Some((item, items))
-        });
-        Ok(stream.boxed_local())
+        async move {
+            opened_rx
+                .await
+                .map_err(|_| BackendError::new("receiver stopped"))??;
+            let stream = futures::stream::unfold(items_rx, |mut items| async move {
+                let item = items.recv().await?;
+                Some((item, items))
+            });
+            Ok(stream.boxed_local())
+        }
+        .boxed_local()
     }
 
     /// Sends on a clone of the manager; libsignal-service adds the sync
@@ -151,18 +157,52 @@ impl SignalBackend for PresageBackend {
             manager
                 .send_message(Aci::from(recipient.uuid()), message, timestamp.as_millis())
                 .await
-                .map_err(backend_error)
+                .map_err(presage_error)
+        }
+        .boxed_local()
+    }
+
+    /// Asks who this account is, over the connection receiving messages.
+    fn probe(&mut self) -> LocalBoxFuture<'static, Result<(), BackendError>> {
+        let manager = self.manager.clone();
+        async move {
+            manager.whoami().await.map_err(presage_error)?;
+            Ok(())
         }
         .boxed_local()
     }
 
     async fn request_contact_sync(&mut self) -> Result<(), BackendError> {
-        self.manager.request_contacts().await.map_err(backend_error)
+        self.manager.request_contacts().await.map_err(presage_error)
     }
 }
 
-fn backend_error(error: impl std::fmt::Display) -> BackendError {
-    BackendError::new(error.to_string())
+/// Marks connection failures as network errors.
+fn presage_error<S: std::error::Error>(error: presage::Error<S>) -> BackendError {
+    let network = match &error {
+        presage::Error::ServiceError(error) => is_network(error),
+        presage::Error::MessageSenderError(error) => {
+            matches!(&**error, MessageSenderError::ServiceError(error) if is_network(error))
+        }
+        presage::Error::IoError(_) | presage::Error::Timeout(_) => true,
+        _ => false,
+    };
+    if network {
+        BackendError::network(error.to_string())
+    } else {
+        BackendError::new(error.to_string())
+    }
+}
+
+fn is_network(error: &ServiceError) -> bool {
+    matches!(
+        error,
+        ServiceError::Timeout { .. }
+            | ServiceError::SendError { .. }
+            | ServiceError::IO(_)
+            | ServiceError::WsError(_)
+            | ServiceError::WsClosing { .. }
+    )
 }
 
 /// What the core cares about so far; everything else is dropped.
@@ -426,5 +466,43 @@ mod tests {
         assert_eq!(store.messages(&thread, ..).await.unwrap().count(), 0);
         assert!(!store.is_registered().await);
         db.close().await;
+    }
+
+    #[test]
+    fn connection_failures_are_network_errors() {
+        type Error = presage::Error<std::io::Error>;
+        let closing = || ServiceError::WsClosing { reason: "gone" };
+
+        assert!(presage_error(Error::ServiceError(closing())).is_network());
+        assert!(
+            presage_error(Error::from(MessageSenderError::ServiceError(closing()))).is_network()
+        );
+        assert!(!presage_error(Error::ServiceError(ServiceError::Unauthorized)).is_network());
+        assert!(
+            !presage_error(Error::from(MessageSenderError::MaximumRetriesLimitExceeded))
+                .is_network()
+        );
+    }
+
+    /// Linking generates Kyber prekeys deep in async frames; leave them
+    /// three quarters of the core stack.
+    #[test]
+    fn kyber_prekeys_fit_on_the_core_stack() {
+        use presage::libsignal_service::protocol::{IdentityKeyPair, KyberPreKeyRecord, kem};
+
+        std::thread::Builder::new()
+            .stack_size(crate::actor::STACK_SIZE / 4)
+            .spawn(|| {
+                let identity = IdentityKeyPair::generate(&mut rand::rng());
+                KyberPreKeyRecord::generate(
+                    kem::KeyType::Kyber1024,
+                    1.into(),
+                    identity.private_key(),
+                )
+                .unwrap();
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 }

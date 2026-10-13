@@ -184,11 +184,18 @@ crates/
 - Startup: unlock storage, load or link the account, then serve.
 - Serving keeps the connection open, reconnecting with backoff (1 s doubling
   to 60 s; reset once the queue drains); `Reconnect` retries at once.
+  Connecting runs in the background and gives up after 30 s.
+- A dead network can leave the connection looking open for minutes, so the
+  core asks the server who it is every 20 s and reconnects if there is no
+  answer within 10 s.
 - Sending stores the message as pending, then sends in a background task,
   one message at a time and in order, so receiving never waits on it.
-  Failed sends are retried on request with the same timestamp; sends cut off
-  by quitting are marked failed on the next start. libsignal-service copies
-  each sent message to the account's other devices.
+  Messages wait while disconnected; a network error mid-send reconnects and
+  sends again with the same timestamp, so recipients drop duplicates. Other
+  errors, or 10 minutes without sending, mark the message failed; failed
+  sends are retried on request. Sends cut off by quitting are marked failed
+  on the next start. libsignal-service copies each sent message to the
+  account's other devices.
 - Messages, including those sent from the phone, are stored once: Signal
   identifies a message by author and sent timestamp, so redeliveries are
   ignored. Order is by sent time; the chat list by local receive time.
@@ -231,7 +238,8 @@ crates/
   - Identifiers go through redacting types (`ServiceId`, `PhoneNumber`,
     `GroupId`); bodies, keys and passphrases never print.
   - Backstop for dependency logs: all output is scrubbed of UUIDs, runs of
-    32+ hex digits and E.164 numbers (kept: last 4 or 2 digits).
+    32+ hex digits and E.164 numbers (kept: last 4 or 2 digits), and of
+    `Debug` byte lists of 16+ bytes, such as server responses.
   - SQLCipher's own logging is off (`cipher_log_level = NONE`).
 
 ### UI

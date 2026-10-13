@@ -2,6 +2,7 @@
 //! the right.
 
 use std::rc::Rc;
+use std::time::Duration;
 
 use copiale_core::{
     Command, ConversationId, ConversationSummary, Direction, Event, MessageId, MessageStatus,
@@ -15,8 +16,8 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, AppContext as _, Context, Entity, FollowMode, InteractiveElement as _, IntoElement,
     ListAlignment, ListState, ParentElement as _, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, TestSupportExt as _, Window, div,
-    list, px, rems,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Task, TestSupportExt as _, Window,
+    div, list, px, rems,
 };
 
 use super::model::{Chat, Connection, Effects, LogChange, Row, title};
@@ -34,6 +35,8 @@ pub struct ChatView {
     log: ListState,
     search: Entity<InputState>,
     composer: Entity<TextareaState>,
+    /// Redraws the reconnect countdown.
+    countdown: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -65,6 +68,7 @@ impl ChatView {
             log: ListState::new(0, ListAlignment::Top, px(1000.)),
             search,
             composer,
+            countdown: None,
             _subscriptions: subscriptions,
         }
     }
@@ -84,6 +88,29 @@ impl ChatView {
     pub fn on_event(&mut self, event: &Event, window: &mut Window, cx: &mut Context<Self>) {
         let effects = self.chat.apply(event, window.is_window_active());
         self.run(effects, cx);
+        if let Event::Disconnected { .. } = event {
+            self.start_countdown(cx);
+        }
+    }
+
+    fn start_countdown(&mut self, cx: &mut Context<Self>) {
+        self.countdown = Some(cx.spawn(async move |view, cx| {
+            loop {
+                let Ok(Some(delay)) = view.read_with(cx, |view, _| {
+                    let chat = &view.chat;
+                    chat.connection_label_changes_in(chat.clock().now())
+                }) else {
+                    break;
+                };
+                // A little late, so the label has changed by then.
+                cx.background_executor()
+                    .timer(delay + Duration::from_millis(10))
+                    .await;
+                if view.update(cx, |_, cx| cx.notify()).is_err() {
+                    break;
+                }
+            }
+        }));
     }
 
     pub fn open(&mut self, id: ConversationId, window: &mut Window, cx: &mut Context<Self>) {
@@ -269,16 +296,12 @@ impl ChatView {
     }
 
     fn render_status(&self, cx: &mut Context<Self>) -> AnyElement {
-        let (dot, text, color) = match self.chat.connection() {
-            Connection::Connecting => ("○", "connecting…".to_string(), cx.theme().muted_foreground),
-            Connection::Syncing => ("○", "syncing…".to_string(), cx.theme().muted_foreground),
-            Connection::Online => ("●", "online".to_string(), cx.theme().success),
-            Connection::Offline { retry_in } => (
-                "●",
-                format!("offline · retrying in {}s", retry_in.as_secs().max(1)),
-                cx.theme().danger,
-            ),
+        let (dot, color) = match self.chat.connection() {
+            Connection::Connecting | Connection::Syncing => ("○", cx.theme().muted_foreground),
+            Connection::Online => ("●", cx.theme().success),
+            Connection::Offline { .. } => ("●", cx.theme().danger),
         };
+        let text = self.chat.connection_label(self.chat.clock().now());
         let offline = matches!(self.chat.connection(), Connection::Offline { .. });
         h_flex()
             .id("connection")

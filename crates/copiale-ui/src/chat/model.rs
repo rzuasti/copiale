@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use copiale_core::{
     BackendError, Command, ConversationId, ConversationSummary, Direction, Event, Message,
-    MessageBody, MessageId, MessageStatus, Peer, ServiceId,
+    MessageBody, MessageId, MessageStatus, Peer, ServiceId, Timestamp,
 };
 
 use super::time::Clock;
@@ -25,7 +25,7 @@ pub enum Connection {
     Syncing,
     Online,
     Offline {
-        retry_in: Duration,
+        retry_at: Timestamp,
     },
 }
 
@@ -110,6 +110,38 @@ impl Chat {
 
     pub fn connection(&self) -> &Connection {
         &self.connection
+    }
+
+    /// "online", or "offline · retrying in 5s" counting down to
+    /// "offline · retrying…".
+    pub fn connection_label(&self, now: Timestamp) -> String {
+        match self.connection {
+            Connection::Connecting => "connecting…".into(),
+            Connection::Syncing => "syncing…".into(),
+            Connection::Online => "online".into(),
+            Connection::Offline { .. } => match self.retry_millis(now) {
+                0 => "offline · retrying…".into(),
+                millis => format!("offline · retrying in {}s", millis.div_ceil(1000)),
+            },
+        }
+    }
+
+    /// Time until [`Self::connection_label`] next changes by itself, while
+    /// counting down.
+    pub fn connection_label_changes_in(&self, now: Timestamp) -> Option<Duration> {
+        match self.retry_millis(now) {
+            0 => None,
+            millis => Some(Duration::from_millis((millis - 1) % 1000 + 1)),
+        }
+    }
+
+    fn retry_millis(&self, now: Timestamp) -> u64 {
+        match self.connection {
+            Connection::Offline { retry_at } => {
+                retry_at.as_millis().saturating_sub(now.as_millis())
+            }
+            _ => 0,
+        }
     }
 
     /// Whether any conversations exist, regardless of the search.
@@ -206,8 +238,11 @@ impl Chat {
             Event::Connected => self.connection = Connection::Syncing,
             Event::Synced => self.connection = Connection::Online,
             Event::Disconnected { retry_in, .. } => {
+                let retry_in = u64::try_from(retry_in.as_millis()).unwrap_or(u64::MAX);
                 self.connection = Connection::Offline {
-                    retry_in: *retry_in,
+                    retry_at: Timestamp::from_millis(
+                        self.clock.now().as_millis().saturating_add(retry_in),
+                    ),
                 };
             }
             _ => {}
@@ -396,7 +431,6 @@ fn unknown(peer: ServiceId) -> String {
 #[cfg(test)]
 mod tests {
     use chrono::FixedOffset;
-    use copiale_core::Timestamp;
     use uuid::Uuid;
 
     use super::*;
@@ -410,6 +444,10 @@ mod tests {
             FixedOffset::east_opt(2 * 3600).unwrap(),
             Timestamp::from_millis(NOW),
         ))
+    }
+
+    fn later(millis: u64) -> Timestamp {
+        Timestamp::from_millis(NOW + millis)
     }
 
     fn peer(n: u128) -> ServiceId {
@@ -775,6 +813,7 @@ mod tests {
         assert_eq!(chat.connection(), &Connection::Syncing);
         chat.apply(&Event::Synced, true);
         assert_eq!(chat.connection(), &Connection::Online);
+        assert_eq!(chat.connection_label(later(0)), "online");
         chat.apply(
             &Event::Disconnected {
                 error: None,
@@ -785,8 +824,37 @@ mod tests {
         assert_eq!(
             chat.connection(),
             &Connection::Offline {
-                retry_in: Duration::from_secs(4)
+                retry_at: later(4000)
             }
         );
+    }
+
+    #[test]
+    fn retry_counts_down() {
+        let mut chat = chat();
+        chat.apply(
+            &Event::Disconnected {
+                error: None,
+                retry_in: Duration::from_secs(16),
+            },
+            true,
+        );
+
+        let label = |millis| chat.connection_label(later(millis));
+        assert_eq!(label(0), "offline · retrying in 16s");
+        assert_eq!(label(500), "offline · retrying in 16s");
+        assert_eq!(label(1000), "offline · retrying in 15s");
+        assert_eq!(label(15_999), "offline · retrying in 1s");
+        assert_eq!(label(16_000), "offline · retrying…");
+        assert_eq!(label(20_000), "offline · retrying…");
+
+        let changes_in = |millis| chat.connection_label_changes_in(later(millis));
+        assert_eq!(changes_in(0), Some(Duration::from_secs(1)));
+        assert_eq!(changes_in(500), Some(Duration::from_millis(500)));
+        assert_eq!(changes_in(15_999), Some(Duration::from_millis(1)));
+        assert_eq!(changes_in(16_000), None);
+
+        chat.apply(&Event::Connected, true);
+        assert_eq!(chat.connection_label_changes_in(later(0)), None);
     }
 }

@@ -3,13 +3,15 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures::StreamExt as _;
+use futures::future::LocalBoxFuture;
 use futures::stream::LocalBoxStream;
+use futures::{FutureExt as _, StreamExt as _};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
 use tokio::time::Instant;
 
-use super::outbox::Outbox;
+use super::outbox::{Outbox, Outcome};
+use super::probe::{Check, Probe};
 use super::{Command, CoreOptions, Event, StorageFailure};
 use crate::backend::{BackendError, Incoming, Linker, SignalBackend};
 use crate::model::{
@@ -219,32 +221,38 @@ impl Core {
             Err(error) => self.database_error(error),
         }
         // Contact names title conversations; ask the phone if there are none.
-        if (linked_now || !db.has_contacts().await.unwrap_or(false))
-            && let Err(error) = backend.request_contact_sync().await
-        {
-            tracing::warn!(%error, "requesting contacts failed");
+        if linked_now || !db.has_contacts().await.unwrap_or(false) {
+            let request = backend.request_contact_sync();
+            match tokio::time::timeout(self.options.connect_timeout, request).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => tracing::warn!(%error, "requesting contacts failed"),
+                Err(_) => tracing::warn!("requesting contacts timed out"),
+            }
         }
 
         let mut incoming: Option<LocalBoxStream<'static, Incoming>> = None;
+        let mut connecting: Option<LocalBoxFuture<'static, Connecting>> = None;
         let mut retry_at = Some(Instant::now());
         let mut delay = self.options.reconnect_initial;
-        let mut outbox = Outbox::default();
+        let mut outbox = Outbox::new(self.options.send_timeout);
+        let mut probe = Probe::new(self.options.probe_interval, self.options.probe_timeout);
         loop {
-            if incoming.is_none() && retry_at.is_some_and(|at| at <= Instant::now()) {
+            if retry_at.is_some_and(|at| at <= Instant::now()) {
                 retry_at = None;
-                match backend.receive().await {
-                    Ok(stream) => {
-                        incoming = Some(stream);
-                        self.emit(Event::Connected);
-                    }
-                    Err(error) => {
-                        tracing::warn!(%error, "connection failed");
-                        retry_at = Some(self.disconnected(Some(error), &mut delay));
-                    }
-                }
-                continue;
+                let receive = tokio::time::timeout(self.options.connect_timeout, backend.receive());
+                connecting = Some(
+                    receive
+                        .map(|result| {
+                            result.unwrap_or_else(|_| {
+                                Err(BackendError::network("timed out connecting"))
+                            })
+                        })
+                        .boxed_local(),
+                );
             }
             let wait = retry_at.unwrap_or_else(Instant::now);
+            // Set when the connection turns out to be gone, with the reason.
+            let mut lost = None;
 
             tokio::select! {
                 command = self.commands.recv() => match command {
@@ -259,7 +267,9 @@ impl Core {
                         Ok(None) => tracing::debug!(message = id.get(), "nothing to retry"),
                         Err(error) => self.database_error(error),
                     },
-                    Some(Command::Reconnect) if incoming.is_none() => retry_at = Some(Instant::now()),
+                    Some(Command::Reconnect) if incoming.is_none() && connecting.is_none() => {
+                        retry_at = Some(Instant::now());
+                    }
                     Some(Command::LoadConversations) => self.send_conversations(db).await,
                     Some(Command::LoadMessages { conversation, before, limit }) => {
                         match db.messages(conversation, before, limit.min(MAX_PAGE)).await {
@@ -275,6 +285,21 @@ impl Core {
                     Some(Command::Shutdown) | None => break,
                     Some(other) => ignored(&other),
                 },
+                result = maybe(&mut connecting) => {
+                    connecting = None;
+                    match result {
+                        Ok(stream) => {
+                            incoming = Some(stream);
+                            self.emit(Event::Connected);
+                            probe.start();
+                            outbox.connected(&mut backend);
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "connection failed");
+                            retry_at = Some(self.disconnected(Some(error), &mut delay));
+                        }
+                    }
+                }
                 item = next_incoming(&mut incoming) => match item {
                     Some(Incoming::QueueEmpty) => {
                         // Healthy again: the next failure retries quickly.
@@ -296,15 +321,39 @@ impl Core {
                     }
                     None => {
                         tracing::info!("connection closed");
-                        incoming = None;
-                        retry_at = Some(self.disconnected(None, &mut delay));
+                        lost = Some(None);
                     }
                 },
-                (id, result) = outbox.finished() => {
-                    self.send_finished(db, id, result).await;
-                    outbox.start_next(&mut backend);
-                }
-                () = tokio::time::sleep_until(wait), if incoming.is_none() && retry_at.is_some() => {}
+                check = probe.next() => match check {
+                    Check::Due => probe.run(&mut backend),
+                    Check::Failed(error) => {
+                        tracing::info!(%error, "connection check failed");
+                        lost = Some(Some(error));
+                    }
+                },
+                outcome = outbox.finished() => match outcome {
+                    Outcome::Sent(id) => {
+                        self.send_finished(db, id, Ok(())).await;
+                        outbox.start_next(&mut backend);
+                    }
+                    Outcome::Failed(id, error) => {
+                        self.send_finished(db, id, Err(error)).await;
+                        outbox.start_next(&mut backend);
+                    }
+                    Outcome::Interrupted(error) => {
+                        tracing::info!(%error, "send interrupted");
+                        if incoming.is_some() {
+                            lost = Some(Some(error));
+                        }
+                    }
+                },
+                () = tokio::time::sleep_until(wait), if retry_at.is_some() => {}
+            }
+            if let Some(error) = lost {
+                incoming = None;
+                probe.stop();
+                outbox.disconnected();
+                retry_at = Some(self.disconnected(error, &mut delay));
             }
         }
     }
@@ -442,6 +491,17 @@ async fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) 
 }
 
 /// Next item from the stream; never resolves without one.
+/// A connection attempt's result.
+type Connecting = Result<LocalBoxStream<'static, Incoming>, BackendError>;
+
+/// The future's output; never resolves while there is none.
+async fn maybe<T>(future: &mut Option<LocalBoxFuture<'static, T>>) -> T {
+    match future {
+        Some(future) => future.await,
+        None => std::future::pending().await,
+    }
+}
+
 async fn next_incoming(stream: &mut Option<LocalBoxStream<'static, Incoming>>) -> Option<Incoming> {
     match stream {
         Some(stream) => stream.next().await,

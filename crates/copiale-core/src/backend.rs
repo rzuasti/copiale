@@ -21,12 +21,30 @@ pub enum Incoming {
 
 /// Backend failure, as text for display. Must not contain message content.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("{0}")]
-pub struct BackendError(String);
+#[error("{message}")]
+pub struct BackendError {
+    message: String,
+    network: bool,
+}
 
 impl BackendError {
     pub fn new(message: impl Into<String>) -> Self {
-        Self(message.into())
+        Self {
+            message: message.into(),
+            network: false,
+        }
+    }
+
+    /// The connection failed; trying again later may work.
+    pub fn network(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            network: true,
+        }
+    }
+
+    pub fn is_network(&self) -> bool {
+        self.network
     }
 }
 
@@ -37,7 +55,12 @@ impl BackendError {
 #[allow(async_fn_in_trait)]
 pub trait SignalBackend {
     /// Opens the connection and streams incoming content until it closes.
-    async fn receive(&mut self) -> Result<LocalBoxStream<'static, Incoming>, BackendError>;
+    ///
+    /// The future doesn't borrow the backend, so the core can keep serving
+    /// while it connects.
+    fn receive(
+        &mut self,
+    ) -> LocalBoxFuture<'static, Result<LocalBoxStream<'static, Incoming>, BackendError>>;
 
     /// Sends a text message to one account, with a copy to this account's
     /// other devices.
@@ -50,6 +73,10 @@ pub trait SignalBackend {
         body: MessageBody,
         timestamp: Timestamp,
     ) -> LocalBoxFuture<'static, Result<(), BackendError>>;
+
+    /// Checks the open connection with a round trip to the server. The core
+    /// times it out.
+    fn probe(&mut self) -> LocalBoxFuture<'static, Result<(), BackendError>>;
 
     /// Asks the phone to send its contacts; they arrive as
     /// [`Incoming::ContactsSynced`].
