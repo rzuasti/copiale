@@ -14,7 +14,7 @@ each one once its patch is merged and the pin is updated.
   closing and can crash (see `docs/spike-sqlcipher-results.md`).
 - **Other change:** `Cargo.toml` depends on upstream `presage` by git
   revision instead of `../presage`.
-- **Upstream PR:** pending.
+- **Upstream PR:** [whisperfish/presage#457](https://github.com/whisperfish/presage/pull/457).
 - **Used via:** `[patch."https://github.com/whisperfish/presage"]` in the
   root `Cargo.toml`.
 
