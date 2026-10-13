@@ -26,6 +26,49 @@ impl fmt::Debug for ServiceId {
     }
 }
 
+/// E.164 phone number. `Debug` shows only the last 2 digits; no `Display`,
+/// so it can't reach a log by accident.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct PhoneNumber(String);
+
+impl PhoneNumber {
+    pub fn new(e164: impl Into<String>) -> Self {
+        Self(e164.into())
+    }
+
+    /// The full number, for display to the user.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for PhoneNumber {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let tail = self.0.len().saturating_sub(2);
+        write!(f, "PhoneNumber(…{})", self.0.get(tail..).unwrap_or(""))
+    }
+}
+
+/// Signal group identifier. `Debug` shows only the last 2 bytes.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GroupId([u8; 32]);
+
+impl GroupId {
+    pub fn new(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for GroupId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "GroupId(…{:02x}{:02x})", self.0[30], self.0[31])
+    }
+}
+
 /// Message text. `Debug` shows only its length.
 #[derive(Clone, PartialEq, Eq)]
 pub struct MessageBody(String);
@@ -83,6 +126,23 @@ mod tests {
     fn service_id_debug_shows_only_last_digits() {
         let uuid = Uuid::parse_str("0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0").unwrap();
         assert_eq!(format!("{:?}", ServiceId::new(uuid)), "ServiceId(…e1f0)");
+    }
+
+    #[test]
+    fn phone_number_debug_shows_only_last_digits() {
+        assert_eq!(
+            format!("{:?}", PhoneNumber::new("+14155550123")),
+            "PhoneNumber(…23)"
+        );
+        assert_eq!(format!("{:?}", PhoneNumber::new("")), "PhoneNumber(…)");
+    }
+
+    #[test]
+    fn group_id_debug_shows_only_last_bytes() {
+        let mut bytes = [0x11; 32];
+        bytes[30] = 0xab;
+        bytes[31] = 0xcd;
+        assert_eq!(format!("{:?}", GroupId::new(bytes)), "GroupId(…abcd)");
     }
 
     #[test]

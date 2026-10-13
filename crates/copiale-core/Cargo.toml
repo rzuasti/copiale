@@ -20,10 +20,14 @@ sqlx.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "macros"] }
 toml_edit.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
 uuid.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
 copiale-testkit.workspace = true
+log.workspace = true
 tempfile.workspace = true
+tracing-log.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }

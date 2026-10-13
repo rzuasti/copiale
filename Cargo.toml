@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
-exclude = ["spikes"]
+exclude = ["spikes", "vendor"]
 
 [workspace.package]
 version = "0.1.0"
@@ -20,6 +20,7 @@ futures = "0.3"
 # GPUI snapshots may break the API between releases; upgrade deliberately.
 gpui-kit = "=0.7.3"
 keyring = "4.2"
+log = "0.4"
 notify = "8"
 # Not on crates.io; upgrade deliberately.
 presage = { git = "https://github.com/whisperfish/presage", rev = "94b3978f5456469cfd4d9f72351a5eff93715f81" }
@@ -30,8 +31,15 @@ tempfile = "3"
 thiserror = "2"
 tokio = "1"
 toml_edit = "0.25"
+tracing = "0.1"
+tracing-log = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = "1"
 zeroize = "1"
+
+# Adds SqliteStore::close until upstream merges it; see vendor/README.md.
+[patch."https://github.com/whisperfish/presage"]
+presage-store-sqlite = { path = "vendor/presage-store-sqlite" }
 
 # Same SQLCipher-enabled fork presage uses.
 [patch.crates-io]

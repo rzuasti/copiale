@@ -107,6 +107,7 @@ impl Storage {
     /// there before the database exists.
     pub fn find_key(&self, secrets: &impl SecretStore) -> Result<KeyLookup, StorageError> {
         if self.paths.key_file.exists() {
+            tracing::info!("database is passphrase-encrypted");
             return Ok(KeyLookup::NeedsPassphrase);
         }
         if self.paths.database.exists() {
@@ -125,8 +126,14 @@ impl Storage {
         }
         let key = DatabaseKey::generate();
         match secrets.set(key.as_bytes()) {
-            Ok(()) => Ok(KeyLookup::Found(key)),
-            Err(SecretError::Unavailable(_)) => Ok(KeyLookup::NeedsNewPassphrase),
+            Ok(()) => {
+                tracing::info!("new database key stored in the keychain");
+                Ok(KeyLookup::Found(key))
+            }
+            Err(SecretError::Unavailable(error)) => {
+                tracing::info!(%error, "no keychain; a passphrase is needed");
+                Ok(KeyLookup::NeedsNewPassphrase)
+            }
             Err(SecretError::Failed(error)) => Err(StorageError::Keychain(error)),
         }
     }

@@ -35,6 +35,8 @@ went unsolved until 2011.
   - `copiale-ui`: views and theming.
   - `copiale-testkit`: fake Signal backend and fixtures (dev-dependency).
   - `copiale`: binary.
+  - `vendor/`: temporary patched dependencies, excluded from the workspace;
+    see `vendor/README.md`. Don't reformat or lint them.
   - Core runs as an actor on its own thread (current-thread tokio runtime
     plus `LocalSet`; presage futures are not `Send`); UI talks to it via
     `Command`/`Event` channels.
@@ -46,7 +48,11 @@ went unsolved until 2011.
     through a delegating `Store` wrapper.
   - No telemetry.
   - Never log message content, phone numbers or keys; log redacted
-    identifiers only.
+    identifiers only (`ServiceId`, `PhoneNumber`, `GroupId`). Dependency
+    logs are capped at `warn` (`copiale_core::logging`).
+  - Close every database connection before exit (`Database::close`):
+    SQLCipher frees its global state at exit, crashing connections still
+    closing (core dumps could hold keys).
 - **MVP scope:** text-only 1:1 and group chats; see `docs/mvp.md`.
 - **v1 scope:**
   - In: 1:1 and group chats, attachments, reactions, replies.
@@ -97,5 +103,4 @@ went unsolved until 2011.
 ## Status
 
 Pre-development. MVP planned (`docs/mvp.md`, Codeberg issues #1–#28);
-workspace scaffolded; storage spike, core actor, encrypted store and config
-file done. Next: logging (#6).
+M0 (foundations) done. Next: M1, starting with linking (#7).

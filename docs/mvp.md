@@ -206,8 +206,16 @@ crates/
 - Config file watching: `notify`.
 - Single-instance IPC: Unix socket / named pipe (`interprocess`).
 - Notifications: `notify-rust` (Linux/macOS), WinRT toasts (Windows).
-- Logging: `tracing` with redacted identifiers only; no message content,
-  phone numbers or keys.
+- Logging (`copiale_core::logging`): `tracing` to stderr only, never to
+  disk.
+  - `COPIALE_LOG` sets the filter; default `info` for Copiale, `warn` for
+    dependencies.
+  - Dependencies are capped at `warn` regardless: presage and libsignal log
+    message contents at `debug`. `COPIALE_UNSAFE_LOG=1` lifts the cap, for
+    test accounts only.
+  - Identifiers go through redacting types (`ServiceId`, `PhoneNumber`,
+    `GroupId`); bodies, keys and passphrases never print.
+  - SQLCipher's own logging is off (`cipher_log_level = NONE`).
 
 ### UI
 

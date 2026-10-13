@@ -114,9 +114,11 @@ async fn run<B: SignalBackend>(
         events.send(event).ok();
     };
 
+    tracing::info!("core started");
     let mut incoming = match backend.receive().await {
         Ok(stream) => Some(stream),
         Err(error) => {
+            tracing::warn!(%error, "connection failed");
             emit(Event::Disconnected { error: Some(error) });
             None
         }
@@ -129,7 +131,10 @@ async fn run<B: SignalBackend>(
                     let timestamp = Timestamp::now();
                     let event = match backend.send_text(recipient, &body, timestamp).await {
                         Ok(()) => Event::MessageSent { recipient, timestamp },
-                        Err(error) => Event::SendFailed { recipient, timestamp, error },
+                        Err(error) => {
+                            tracing::warn!(?recipient, %error, "send failed");
+                            Event::SendFailed { recipient, timestamp, error }
+                        }
                     };
                     emit(event);
                 }
@@ -139,12 +144,14 @@ async fn run<B: SignalBackend>(
                 Some(Incoming::QueueEmpty) => emit(Event::Synced),
                 Some(Incoming::Message(message)) => emit(Event::MessageReceived(message)),
                 None => {
+                    tracing::info!("connection closed");
                     incoming = None;
                     emit(Event::Disconnected { error: None });
                 }
             },
         }
     }
+    tracing::info!("core stopped");
     emit(Event::Stopped);
 }
 

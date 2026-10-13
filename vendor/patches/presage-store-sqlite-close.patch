@@ -1,0 +1,62 @@
+From 7364b9ccbf7cea76b068643942ff489d17db8ee1 Mon Sep 17 00:00:00 2001
+From: Ricardo Zuasti <rzuasti@pm.me>
+Date: Tue, 13 Oct 2026 08:25:52 -0400
+Subject: [PATCH] feat(store-sqlite): add SqliteStore::close
+
+Dropping the store closes pooled connections in the background. With
+SQLCipher, whose atexit handler frees its global state, a connection
+still closing at process exit can crash (use-after-free in
+sqlite3FreeCodecArg). close() lets applications close the pool and wait
+for every connection before exiting.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ presage-store-sqlite/src/lib.rs | 28 ++++++++++++++++++++++++++++
+ 1 file changed, 28 insertions(+)
+
+diff --git a/presage-store-sqlite/src/lib.rs b/presage-store-sqlite/src/lib.rs
+index 8195096..9f31218 100644
+--- a/presage-store-sqlite/src/lib.rs
++++ b/presage-store-sqlite/src/lib.rs
+@@ -70,6 +70,17 @@ impl SqliteStore {
+             trust_new_identities,
+         })
+     }
++
++    /// Closes the connection pool and waits until every connection is closed.
++    ///
++    /// Call this before the process exits. Dropping the store closes
++    /// connections in the background, and SQLCipher frees its global state
++    /// at exit, so a connection still closing then can crash the process.
++    ///
++    /// The store and its clones can't be used afterwards.
++    pub async fn close(&self) {
++        self.db.close().await;
++    }
+ }
+ 
+ impl Store for SqliteStore {
+@@ -278,3 +289,20 @@ impl StateStore for SqliteStore {
+         Ok(())
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[tokio::test]
++    async fn close_closes_the_pool() {
++        let store = SqliteStore::open(":memory:", OnNewIdentity::Trust)
++            .await
++            .unwrap();
++        let clone = store.clone();
++
++        store.close().await;
++
++        assert!(clone.db.is_closed());
++    }
++}
+-- 
+2.55.0
+
