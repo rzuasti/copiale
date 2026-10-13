@@ -10,8 +10,9 @@ use futures::stream::LocalBoxStream;
 use presage::Manager;
 use presage::libsignal_service::configuration::SignalServers;
 use presage::libsignal_service::content::{Content, ContentBody};
-use presage::libsignal_service::proto::DataMessage;
-use presage::libsignal_service::protocol::Aci;
+use presage::libsignal_service::proto::sync_message::{Content as SyncContent, Sent};
+use presage::libsignal_service::proto::{DataMessage, SyncMessage};
+use presage::libsignal_service::protocol::{Aci, ServiceId as SignalServiceId};
 use presage::manager::Registered;
 use presage::model::messages::Received;
 use presage::store::StateStore as _;
@@ -19,7 +20,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::backend::{BackendError, Incoming, Linker, SignalBackend};
-use crate::model::{IncomingMessage, MessageBody, ServiceId, Timestamp};
+use crate::model::{IncomingMessage, MessageBody, SentMessage, ServiceId, Timestamp};
 use crate::storage::Database;
 use store::AppStore;
 
@@ -147,6 +148,10 @@ impl SignalBackend for PresageBackend {
             .await
             .map_err(backend_error)
     }
+
+    async fn request_contact_sync(&mut self) -> Result<(), BackendError> {
+        self.manager.request_contacts().await.map_err(backend_error)
+    }
 }
 
 fn backend_error(error: impl std::fmt::Display) -> BackendError {
@@ -157,8 +162,10 @@ fn backend_error(error: impl std::fmt::Display) -> BackendError {
 fn incoming(received: Received) -> Option<Incoming> {
     match received {
         Received::QueueEmpty => Some(Incoming::QueueEmpty),
-        Received::Content(content) => text_message(&content).map(Incoming::Message),
-        Received::Contacts => None,
+        Received::Content(content) => text_message(&content)
+            .map(Incoming::Message)
+            .or_else(|| sent_text(&content).map(Incoming::Sent)),
+        Received::Contacts => Some(Incoming::ContactsSynced),
         Received::DecryptionError(_) => {
             tracing::warn!("a message could not be decrypted");
             None
@@ -182,6 +189,44 @@ fn text_message(content: &Content) -> Option<IncomingMessage> {
     Some(IncomingMessage {
         sender: ServiceId::new(content.metadata.sender.raw_uuid()),
         timestamp: Timestamp::from_millis(timestamp),
+        body: MessageBody::new(body.clone()),
+    })
+}
+
+/// A 1:1 text message this account sent from another device.
+fn sent_text(content: &Content) -> Option<SentMessage> {
+    let ContentBody::SynchronizeMessage(SyncMessage {
+        content: Some(SyncContent::Sent(sent)),
+        ..
+    }) = &content.body
+    else {
+        return None;
+    };
+    let Sent {
+        message:
+            Some(DataMessage {
+                body: Some(body),
+                group_v2: None,
+                ..
+            }),
+        timestamp: Some(timestamp),
+        ..
+    } = sent
+    else {
+        return None;
+    };
+    let recipient = sent
+        .destination_service_id_binary
+        .as_deref()
+        .and_then(SignalServiceId::parse_from_service_id_binary)
+        .or_else(|| {
+            sent.destination_service_id
+                .as_deref()
+                .and_then(SignalServiceId::parse_from_service_id_string)
+        })?;
+    Some(SentMessage {
+        recipient: ServiceId::new(recipient.raw_uuid()),
+        timestamp: Timestamp::from_millis(*timestamp),
         body: MessageBody::new(body.clone()),
     })
 }
@@ -263,13 +308,81 @@ mod tests {
     }
 
     #[test]
-    fn maps_queue_empty_and_drops_the_rest() {
+    fn maps_queue_empty_and_contacts_and_drops_the_rest() {
         assert_eq!(incoming(Received::QueueEmpty), Some(Incoming::QueueEmpty));
-        assert_eq!(incoming(Received::Contacts), None);
+        assert_eq!(incoming(Received::Contacts), Some(Incoming::ContactsSynced));
         assert_eq!(
             incoming(Received::DecryptionError(Aci::from(SENDER).into())),
             None
         );
+    }
+
+    const RECIPIENT: Uuid = Uuid::from_u128(0x5678);
+
+    fn sent(sent: Sent) -> ContentBody {
+        ContentBody::SynchronizeMessage(SyncMessage {
+            content: Some(SyncContent::Sent(sent)),
+            ..Default::default()
+        })
+    }
+
+    fn sent_data(body: &str, group: bool) -> Option<DataMessage> {
+        Some(DataMessage {
+            body: Some(body.into()),
+            group_v2: group.then(GroupContextV2::default),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn maps_text_sent_from_the_phone() {
+        let recipient: SignalServiceId = Aci::from(RECIPIENT).into();
+        let body = sent(Sent {
+            destination_service_id_binary: Some(recipient.service_id_binary()),
+            timestamp: Some(77),
+            message: sent_data("from phone", false),
+            ..Default::default()
+        });
+
+        assert_eq!(
+            incoming(Received::Content(Box::new(content(body)))),
+            Some(Incoming::Sent(SentMessage {
+                recipient: ServiceId::new(RECIPIENT),
+                timestamp: Timestamp::from_millis(77),
+                body: MessageBody::new("from phone"),
+            }))
+        );
+    }
+
+    #[test]
+    fn sent_recipient_can_be_a_string() {
+        let body = sent(Sent {
+            destination_service_id: Some(RECIPIENT.to_string()),
+            timestamp: Some(77),
+            message: sent_data("x", false),
+            ..Default::default()
+        });
+
+        let sent = sent_text(&content(body)).unwrap();
+        assert_eq!(sent.recipient, ServiceId::new(RECIPIENT));
+    }
+
+    #[test]
+    fn skips_sent_group_messages_and_missing_recipients() {
+        let group = sent(Sent {
+            destination_service_id: Some(RECIPIENT.to_string()),
+            timestamp: Some(77),
+            message: sent_data("x", true),
+            ..Default::default()
+        });
+        let no_recipient = sent(Sent {
+            timestamp: Some(77),
+            message: sent_data("x", false),
+            ..Default::default()
+        });
+
+        assert_eq!(sent_text(&content(group)), None);
+        assert_eq!(sent_text(&content(no_recipient)), None);
     }
 
     #[tokio::test]

@@ -118,6 +118,101 @@ pub struct IncomingMessage {
     pub body: MessageBody,
 }
 
+/// A text message this account sent from another device (the phone).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SentMessage {
+    pub recipient: ServiceId,
+    pub timestamp: Timestamp,
+    pub body: MessageBody,
+}
+
+/// Local ID of a conversation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ConversationId(i64);
+
+impl ConversationId {
+    pub fn new(id: i64) -> Self {
+        Self(id)
+    }
+
+    pub fn get(self) -> i64 {
+        self.0
+    }
+}
+
+/// Local ID of a stored message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct MessageId(i64);
+
+impl MessageId {
+    pub fn new(id: i64) -> Self {
+        Self(id)
+    }
+
+    pub fn get(self) -> i64 {
+        self.0
+    }
+}
+
+/// Who a conversation is with. Groups come with #12.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Peer {
+    Contact(ServiceId),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Direction {
+    Incoming,
+    /// Sent by this account, from any of its devices.
+    Outgoing,
+}
+
+/// A stored message.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Message {
+    pub id: MessageId,
+    pub conversation: ConversationId,
+    pub direction: Direction,
+    /// The sender's timestamp; with the author, Signal's message identity.
+    pub sent_at: Timestamp,
+    /// When this device stored it, by the local clock.
+    pub received_at: Timestamp,
+    pub body: MessageBody,
+    pub read: bool,
+}
+
+/// A conversation as the chat list shows it. `Debug` hides the title.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ConversationSummary {
+    pub id: ConversationId,
+    pub peer: Peer,
+    /// Synced contact name, if known.
+    pub title: Option<String>,
+    /// Local time of the newest message.
+    pub last_activity: Option<Timestamp>,
+    pub unread: u32,
+    pub last_message: Option<MessagePreview>,
+}
+
+impl fmt::Debug for ConversationSummary {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ConversationSummary")
+            .field("id", &self.id)
+            .field("peer", &self.peer)
+            .field("titled", &self.title.is_some())
+            .field("last_activity", &self.last_activity)
+            .field("unread", &self.unread)
+            .field("last_message", &self.last_message)
+            .finish()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MessagePreview {
+    pub direction: Direction,
+    pub body: MessageBody,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

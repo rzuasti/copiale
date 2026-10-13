@@ -15,6 +15,12 @@ pub mod storage;
 /// service, Flatpak ID.
 pub const APP_ID: &str = "page.codeberg.korba.Copiale";
 
-pub use actor::{Command, CoreHandle, CoreStopped, Event, Events, StorageFailure, spawn};
+pub use actor::{
+    Command, CoreHandle, CoreOptions, CoreStopped, Event, Events, StorageFailure, spawn,
+    spawn_with_options,
+};
 pub use backend::{BackendError, Incoming, Linker, SignalBackend};
-pub use model::{GroupId, IncomingMessage, MessageBody, PhoneNumber, ServiceId, Timestamp};
+pub use model::{
+    ConversationId, ConversationSummary, Direction, GroupId, IncomingMessage, Message, MessageBody,
+    MessageId, MessagePreview, Peer, PhoneNumber, SentMessage, ServiceId, Timestamp,
+};

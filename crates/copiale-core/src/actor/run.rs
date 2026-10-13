@@ -1,20 +1,23 @@
 //! The core's phases: unlock storage, set up the account, serve.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures::StreamExt as _;
 use futures::stream::LocalBoxStream;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
+use tokio::time::Instant;
 
-use super::{Command, Event, StorageFailure};
+use super::{Command, CoreOptions, Event, StorageFailure};
 use crate::backend::{BackendError, Incoming, Linker, SignalBackend};
-use crate::model::Timestamp;
+use crate::model::{ConversationId, Direction, MessageBody, ServiceId, Timestamp};
 use crate::storage::{Database, KeyLookup, SecretStore, Storage, StorageError};
 
 pub(super) struct Core {
     pub(super) storage: Storage,
     pub(super) secrets: Arc<dyn SecretStore + Send + Sync>,
+    pub(super) options: CoreOptions,
     pub(super) commands: UnboundedReceiver<Command>,
     pub(super) events: UnboundedSender<Event>,
 }
@@ -32,9 +35,9 @@ impl Core {
     pub(super) async fn run<L: Linker>(mut self, mut linker: L) {
         tracing::info!("core started");
         if let Some(db) = self.unlock().await {
-            if let Some(backend) = self.set_up_account(&db, &mut linker).await {
+            if let Some((backend, linked_now)) = self.set_up_account(&db, &mut linker).await {
                 self.emit(Event::Ready);
-                self.serve(backend).await;
+                self.serve(&db, backend, linked_now).await;
             }
             // Before `Stopped`: the process may exit right after it.
             db.close().await;
@@ -144,9 +147,9 @@ impl Core {
         &mut self,
         db: &Database,
         linker: &mut L,
-    ) -> Option<L::Backend> {
+    ) -> Option<(L::Backend, bool)> {
         match linker.load(db).await {
-            Ok(Some(backend)) => return Some(backend),
+            Ok(Some(backend)) => return Some((backend, false)),
             Ok(None) => {}
             Err(error) => {
                 tracing::warn!(%error, "loading the account failed");
@@ -165,7 +168,7 @@ impl Core {
                 }
             };
             match self.link(db, linker, &name).await {
-                Step::Done(Ok(backend)) => return Some(backend),
+                Step::Done(Ok(backend)) => return Some((backend, true)),
                 Step::Done(Err(error)) => {
                     tracing::warn!(%error, "linking failed");
                     self.emit(Event::LinkFailed(error));
@@ -205,17 +208,35 @@ impl Core {
         }
     }
 
-    async fn serve<B: SignalBackend>(&mut self, mut backend: B) {
-        let mut incoming = match backend.receive().await {
-            Ok(stream) => Some(stream),
-            Err(error) => {
-                tracing::warn!(%error, "connection failed");
-                self.emit(Event::Disconnected { error: Some(error) });
-                None
-            }
-        };
+    /// Keeps a connection open, stores messages and answers queries.
+    async fn serve<B: SignalBackend>(&mut self, db: &Database, mut backend: B, linked_now: bool) {
+        // Contact names title conversations; ask the phone if there are none.
+        if (linked_now || !db.has_contacts().await.unwrap_or(false))
+            && let Err(error) = backend.request_contact_sync().await
+        {
+            tracing::warn!(%error, "requesting contacts failed");
+        }
 
+        let mut incoming: Option<LocalBoxStream<'static, Incoming>> = None;
+        let mut retry_at = Some(Instant::now());
+        let mut delay = self.options.reconnect_initial;
         loop {
+            if incoming.is_none() && retry_at.is_some_and(|at| at <= Instant::now()) {
+                retry_at = None;
+                match backend.receive().await {
+                    Ok(stream) => {
+                        incoming = Some(stream);
+                        self.emit(Event::Connected);
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "connection failed");
+                        retry_at = Some(self.disconnected(Some(error), &mut delay));
+                    }
+                }
+                continue;
+            }
+            let wait = retry_at.unwrap_or_else(Instant::now);
+
             tokio::select! {
                 command = self.commands.recv() => match command {
                     Some(Command::SendText { recipient, body }) => {
@@ -229,20 +250,98 @@ impl Core {
                         };
                         self.emit(event);
                     }
+                    Some(Command::Reconnect) if incoming.is_none() => retry_at = Some(Instant::now()),
+                    Some(Command::LoadConversations) => self.send_conversations(db).await,
+                    Some(Command::LoadMessages { conversation, before, limit }) => {
+                        match db.messages(conversation, before, limit.min(MAX_PAGE)).await {
+                            Ok(messages) => self.emit(Event::Messages { conversation, before, messages }),
+                            Err(error) => self.database_error(error),
+                        }
+                    }
+                    Some(Command::MarkRead(conversation)) => match db.mark_read(conversation).await {
+                        Ok(true) => self.send_conversation(db, conversation).await,
+                        Ok(false) => {}
+                        Err(error) => self.database_error(error),
+                    },
                     Some(Command::Shutdown) | None => break,
                     Some(other) => ignored(&other),
                 },
                 item = next_incoming(&mut incoming) => match item {
-                    Some(Incoming::QueueEmpty) => self.emit(Event::Synced),
-                    Some(Incoming::Message(message)) => self.emit(Event::MessageReceived(message)),
+                    Some(Incoming::QueueEmpty) => {
+                        // Healthy again: the next failure retries quickly.
+                        delay = self.options.reconnect_initial;
+                        self.emit(Event::Synced);
+                    }
+                    Some(Incoming::Message(message)) => {
+                        self.store(db, message.sender, Direction::Incoming, message.timestamp, &message.body).await;
+                    }
+                    Some(Incoming::Sent(message)) => {
+                        self.store(db, message.recipient, Direction::Outgoing, message.timestamp, &message.body).await;
+                    }
+                    Some(Incoming::ContactsSynced) => {
+                        match db.contact_count().await {
+                            Ok(count) => tracing::info!(count, "contacts synced"),
+                            Err(error) => self.database_error(error),
+                        }
+                        self.send_conversations(db).await;
+                    }
                     None => {
                         tracing::info!("connection closed");
                         incoming = None;
-                        self.emit(Event::Disconnected { error: None });
+                        retry_at = Some(self.disconnected(None, &mut delay));
                     }
                 },
+                () = tokio::time::sleep_until(wait), if incoming.is_none() && retry_at.is_some() => {}
             }
         }
+    }
+
+    /// Reports the disconnect and returns when to retry; backs off.
+    fn disconnected(&self, error: Option<BackendError>, delay: &mut Duration) -> Instant {
+        let retry_in = *delay;
+        self.emit(Event::Disconnected { error, retry_in });
+        *delay = (*delay * 2).min(self.options.reconnect_max);
+        Instant::now() + retry_in
+    }
+
+    async fn store(
+        &self,
+        db: &Database,
+        peer: ServiceId,
+        direction: Direction,
+        sent_at: Timestamp,
+        body: &MessageBody,
+    ) {
+        match db.add_message(peer, direction, sent_at, body).await {
+            Ok(Some(message)) => {
+                let conversation = message.conversation;
+                tracing::debug!(conversation = conversation.get(), "message stored");
+                self.emit(Event::MessageAdded(message));
+                self.send_conversation(db, conversation).await;
+            }
+            Ok(None) => tracing::debug!("duplicate message ignored"),
+            Err(error) => self.database_error(error),
+        }
+    }
+
+    async fn send_conversation(&self, db: &Database, conversation: ConversationId) {
+        match db.conversation(conversation).await {
+            Ok(Some(summary)) => self.emit(Event::ConversationUpdated(summary)),
+            Ok(None) => {}
+            Err(error) => self.database_error(error),
+        }
+    }
+
+    async fn send_conversations(&self, db: &Database) {
+        match db.conversations().await {
+            Ok(conversations) => self.emit(Event::Conversations(conversations)),
+            Err(error) => self.database_error(error),
+        }
+    }
+
+    fn database_error(&self, error: StorageError) {
+        tracing::error!(%error, "database error");
+        self.emit(Event::DatabaseError(error.to_string()));
     }
 }
 
@@ -254,6 +353,9 @@ fn failure(error: StorageError) -> StorageFailure {
         other => StorageFailure::Other(other.to_string()),
     }
 }
+
+/// Largest page [`Command::LoadMessages`] returns.
+const MAX_PAGE: u32 = 500;
 
 fn ignored(command: &Command) {
     tracing::debug!(?command, "command ignored in the current state");

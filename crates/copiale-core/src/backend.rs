@@ -3,7 +3,7 @@
 use futures::stream::LocalBoxStream;
 use tokio::sync::oneshot;
 
-use crate::model::{IncomingMessage, MessageBody, ServiceId, Timestamp};
+use crate::model::{IncomingMessage, MessageBody, SentMessage, ServiceId, Timestamp};
 use crate::storage::Database;
 
 /// Content delivered by the backend.
@@ -12,6 +12,10 @@ pub enum Incoming {
     /// Queued messages have been delivered; later ones arrive live.
     QueueEmpty,
     Message(IncomingMessage),
+    /// Sent by this account from another device.
+    Sent(SentMessage),
+    /// Contacts synced from the phone are now in the store.
+    ContactsSynced,
 }
 
 /// Backend failure, as text for display. Must not contain message content.
@@ -41,6 +45,10 @@ pub trait SignalBackend {
         body: &MessageBody,
         timestamp: Timestamp,
     ) -> Result<(), BackendError>;
+
+    /// Asks the phone to send its contacts; they arrive as
+    /// [`Incoming::ContactsSynced`].
+    async fn request_contact_sync(&mut self) -> Result<(), BackendError>;
 }
 
 /// Account setup: presage in the app, a fake in tests.

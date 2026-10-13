@@ -19,7 +19,7 @@ presage-store-sqlite.workspace = true
 rand.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["rt", "sync", "macros"] }
+tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }
 toml_edit.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

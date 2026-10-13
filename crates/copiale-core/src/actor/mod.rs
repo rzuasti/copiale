@@ -5,12 +5,15 @@ mod run;
 
 use std::sync::Arc;
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::task::LocalSet;
 
 use crate::backend::{BackendError, Linker};
-use crate::model::{IncomingMessage, MessageBody, ServiceId, Timestamp};
+use crate::model::{
+    ConversationId, ConversationSummary, Message, MessageBody, MessageId, ServiceId, Timestamp,
+};
 use crate::storage::{Passphrase, SecretStore, Storage};
 
 /// Request from the UI to the core. Ignored when it doesn't fit the
@@ -34,6 +37,19 @@ pub enum Command {
         recipient: ServiceId,
         body: MessageBody,
     },
+    /// Reconnects now instead of waiting for the next retry.
+    Reconnect,
+    /// Answered with [`Event::Conversations`].
+    LoadConversations,
+    /// Up to `limit` messages before `before` (or the newest); answered
+    /// with [`Event::Messages`].
+    LoadMessages {
+        conversation: ConversationId,
+        before: Option<MessageId>,
+        limit: u32,
+    },
+    /// Marks incoming messages read; [`Event::ConversationUpdated`] follows.
+    MarkRead(ConversationId),
     /// Stops the core; [`Event::Stopped`] follows.
     Shutdown,
 }
@@ -60,9 +76,24 @@ pub enum Event {
     LinkFailed(BackendError),
     /// Storage is open and the account linked; messaging events follow.
     Ready,
+    /// Connected to Signal; queued messages follow, then [`Event::Synced`].
+    Connected,
     /// Queued messages have been delivered; the core is live.
     Synced,
-    MessageReceived(IncomingMessage),
+    /// A new message was stored; [`Event::ConversationUpdated`] follows.
+    MessageAdded(Message),
+    ConversationUpdated(ConversationSummary),
+    /// All conversations, most recently active first. Answers
+    /// [`Command::LoadConversations`]; also sent when names change.
+    Conversations(Vec<ConversationSummary>),
+    /// A page of messages, oldest first. Answers [`Command::LoadMessages`].
+    Messages {
+        conversation: ConversationId,
+        before: Option<MessageId>,
+        messages: Vec<Message>,
+    },
+    /// Reading or writing local data failed while running.
+    DatabaseError(String),
     MessageSent {
         recipient: ServiceId,
         timestamp: Timestamp,
@@ -72,9 +103,11 @@ pub enum Event {
         timestamp: Timestamp,
         error: BackendError,
     },
-    /// The connection failed to open (`Some`) or closed (`None`).
+    /// The connection failed to open (`Some`) or closed (`None`); the next
+    /// attempt is in `retry_in`.
     Disconnected {
         error: Option<BackendError>,
+        retry_in: Duration,
     },
     /// Last event: the core has stopped and closed storage.
     Stopped,
@@ -128,7 +161,24 @@ impl Events {
     }
 }
 
-/// Starts the core on its own thread.
+/// Core tuning; the defaults suit the app.
+#[derive(Clone, Debug)]
+pub struct CoreOptions {
+    /// First reconnect delay; doubles per failure up to `reconnect_max`.
+    pub reconnect_initial: Duration,
+    pub reconnect_max: Duration,
+}
+
+impl Default for CoreOptions {
+    fn default() -> Self {
+        Self {
+            reconnect_initial: Duration::from_secs(1),
+            reconnect_max: Duration::from_secs(60),
+        }
+    }
+}
+
+/// Starts the core on its own thread with default options.
 ///
 /// `linker` runs on that thread, so the linker and its backend need not be
 /// `Send`.
@@ -136,6 +186,20 @@ pub fn spawn<L, F>(
     storage: Storage,
     secrets: Arc<dyn SecretStore + Send + Sync>,
     linker: F,
+) -> std::io::Result<(CoreHandle, Events)>
+where
+    F: FnOnce() -> L + Send + 'static,
+    L: Linker + 'static,
+{
+    spawn_with_options(storage, secrets, linker, CoreOptions::default())
+}
+
+/// [`spawn`] with explicit options.
+pub fn spawn_with_options<L, F>(
+    storage: Storage,
+    secrets: Arc<dyn SecretStore + Send + Sync>,
+    linker: F,
+    options: CoreOptions,
 ) -> std::io::Result<(CoreHandle, Events)>
 where
     F: FnOnce() -> L + Send + 'static,
@@ -152,6 +216,7 @@ where
             let core = run::Core {
                 storage,
                 secrets,
+                options,
                 commands: command_rx,
                 events: event_tx,
             };

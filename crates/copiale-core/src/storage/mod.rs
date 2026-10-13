@@ -8,6 +8,7 @@
 
 mod database;
 mod key;
+mod messages;
 mod secrets;
 
 use std::path::{Path, PathBuf};

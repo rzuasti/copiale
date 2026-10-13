@@ -19,8 +19,8 @@ const SQLITE_NOTADB: &str = "26";
 
 /// Open handle to the encrypted database.
 pub struct Database {
-    presage: SqliteStore,
-    app: SqlitePool,
+    pub(super) presage: SqliteStore,
+    pub(super) app: SqlitePool,
 }
 
 impl Database {
@@ -134,7 +134,7 @@ async fn verify_key(options: &SqliteConnectOptions) -> Result<(), StorageError> 
     result.map(drop).map_err(database_error)
 }
 
-fn database_error(error: sqlx::Error) -> StorageError {
+pub(super) fn database_error(error: sqlx::Error) -> StorageError {
     match &error {
         sqlx::Error::Database(db) if db.code().as_deref() == Some(SQLITE_NOTADB) => {
             StorageError::WrongKey

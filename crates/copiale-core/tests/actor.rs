@@ -7,7 +7,8 @@ use std::time::Duration;
 
 use copiale_core::storage::{KdfParams, Passphrase, Storage, StoragePaths};
 use copiale_core::{
-    BackendError, Command, CoreHandle, Event, Events, Incoming, IncomingMessage, MessageBody,
+    BackendError, Command, ConversationSummary, CoreHandle, CoreOptions, Direction, Event, Events,
+    Incoming, IncomingMessage, Message, MessageBody, MessagePreview, Peer, SentMessage,
     StorageFailure, Timestamp,
 };
 use copiale_testkit::{
@@ -22,6 +23,15 @@ const CHEAP_KDF: KdfParams = KdfParams {
     parallelism: 1,
 };
 
+const RETRY: Duration = Duration::from_millis(10);
+
+fn fast_reconnect() -> CoreOptions {
+    CoreOptions {
+        reconnect_initial: RETRY,
+        reconnect_max: RETRY * 4,
+    }
+}
+
 struct Running {
     core: CoreHandle,
     events: Events,
@@ -30,14 +40,31 @@ struct Running {
 }
 
 fn start(dir: &Path, secrets: &MemorySecretStore, linked: bool) -> Running {
+    start_with(dir, secrets, linked, fast_reconnect(), |_| {})
+}
+
+/// `script` prepares the network before the core starts using it.
+fn start_with(
+    dir: &Path,
+    secrets: &MemorySecretStore,
+    linked: bool,
+    options: CoreOptions,
+    script: impl FnOnce(&FakeNetwork),
+) -> Running {
     let (backend, network) = fake_backend();
+    script(&network);
     let (linker, phone) = fake_linker(backend);
     if linked {
         phone.set_linked();
     }
     let storage = Storage::new(StoragePaths::in_dir(dir)).with_kdf_params(CHEAP_KDF);
-    let (core, events) =
-        copiale_core::spawn(storage, Arc::new(secrets.clone()), move || linker).unwrap();
+    let (core, events) = copiale_core::spawn_with_options(
+        storage,
+        Arc::new(secrets.clone()),
+        move || linker,
+        options,
+    )
+    .unwrap();
     Running {
         core,
         events,
@@ -46,12 +73,45 @@ fn start(dir: &Path, secrets: &MemorySecretStore, linked: bool) -> Running {
     }
 }
 
-/// A linked account with a keychain, past [`Event::Ready`].
+/// A linked account with a keychain, connected.
 async fn ready() -> (TempDir, Running) {
     let dir = tempfile::tempdir().unwrap();
     let mut running = start(dir.path(), &MemorySecretStore::default(), true);
     expect(&mut running.events, Event::Ready).await;
+    expect(&mut running.events, Event::Connected).await;
     (dir, running)
+}
+
+fn incoming(from: u128, sent_at: u64, body: &str) -> Incoming {
+    Incoming::Message(IncomingMessage {
+        sender: service_id(from),
+        timestamp: Timestamp::from_millis(sent_at),
+        body: MessageBody::new(body),
+    })
+}
+
+async fn message_added(events: &mut Events) -> Message {
+    match next_event(events).await {
+        Event::MessageAdded(message) => message,
+        other => panic!("expected MessageAdded, got {other:?}"),
+    }
+}
+
+async fn conversation_updated(events: &mut Events) -> ConversationSummary {
+    match next_event(events).await {
+        Event::ConversationUpdated(summary) => summary,
+        other => panic!("expected ConversationUpdated, got {other:?}"),
+    }
+}
+
+async fn expect_disconnected(events: &mut Events, retry_in: Duration) {
+    let Event::Disconnected {
+        retry_in: actual, ..
+    } = next_event(events).await
+    else {
+        panic!("expected Disconnected");
+    };
+    assert_eq!(actual, retry_in);
 }
 
 async fn next_event(events: &mut Events) -> Event {
@@ -93,19 +153,174 @@ fn send(running: &Running, command: Command) {
 // Messaging
 
 #[tokio::test]
-async fn forwards_incoming_messages_and_queue_empty() {
+async fn incoming_message_is_stored_and_reported() {
     let (_dir, mut running) = ready().await;
-    let message = IncomingMessage {
-        sender: service_id(1),
-        timestamp: Timestamp::from_millis(1_700_000_000_000),
-        body: MessageBody::new("hello"),
-    };
 
-    running.network.deliver(Incoming::Message(message.clone()));
+    running
+        .network
+        .deliver(incoming(1, 1_700_000_000_000, "hello"));
     running.network.deliver(Incoming::QueueEmpty);
 
-    expect(&mut running.events, Event::MessageReceived(message)).await;
+    let message = message_added(&mut running.events).await;
+    assert_eq!(message.direction, Direction::Incoming);
+    assert_eq!(message.sent_at, Timestamp::from_millis(1_700_000_000_000));
+    assert_eq!(message.body, MessageBody::new("hello"));
+    assert!(!message.read);
+    let summary = conversation_updated(&mut running.events).await;
+    assert_eq!(summary.id, message.conversation);
+    assert_eq!(summary.peer, Peer::Contact(service_id(1)));
+    assert_eq!(summary.unread, 1);
+    assert_eq!(
+        summary.last_message,
+        Some(MessagePreview {
+            direction: Direction::Incoming,
+            body: MessageBody::new("hello"),
+        })
+    );
     expect(&mut running.events, Event::Synced).await;
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn redelivered_message_is_ignored() {
+    let (_dir, mut running) = ready().await;
+    running.network.deliver(incoming(1, 100, "once"));
+    message_added(&mut running.events).await;
+    conversation_updated(&mut running.events).await;
+
+    running.network.deliver(incoming(1, 100, "once"));
+    running.network.deliver(Incoming::QueueEmpty);
+
+    expect(&mut running.events, Event::Synced).await;
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn message_sent_from_the_phone_is_stored_as_outgoing() {
+    let (_dir, mut running) = ready().await;
+
+    running.network.deliver(Incoming::Sent(SentMessage {
+        recipient: service_id(2),
+        timestamp: Timestamp::from_millis(200),
+        body: MessageBody::new("from my phone"),
+    }));
+
+    let message = message_added(&mut running.events).await;
+    assert_eq!(message.direction, Direction::Outgoing);
+    assert!(message.read);
+    let summary = conversation_updated(&mut running.events).await;
+    assert_eq!(summary.peer, Peer::Contact(service_id(2)));
+    assert_eq!(summary.unread, 0);
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn conversations_and_messages_can_be_loaded() {
+    let (_dir, mut running) = ready().await;
+    for (from, sent_at, body) in [(1, 100, "a"), (2, 100, "b"), (1, 101, "c")] {
+        running.network.deliver(incoming(from, sent_at, body));
+        message_added(&mut running.events).await;
+        conversation_updated(&mut running.events).await;
+    }
+
+    send(&running, Command::LoadConversations);
+    let Event::Conversations(conversations) = next_event(&mut running.events).await else {
+        panic!("expected Conversations");
+    };
+    let peers: Vec<_> = conversations.iter().map(|c| c.peer).collect();
+    assert_eq!(
+        peers,
+        [Peer::Contact(service_id(1)), Peer::Contact(service_id(2))]
+    );
+    let first = conversations[0].id;
+
+    send(
+        &running,
+        Command::LoadMessages {
+            conversation: first,
+            before: None,
+            limit: 10,
+        },
+    );
+    let Event::Messages {
+        conversation,
+        before: None,
+        messages,
+    } = next_event(&mut running.events).await
+    else {
+        panic!("expected Messages");
+    };
+    assert_eq!(conversation, first);
+    let bodies: Vec<_> = messages
+        .iter()
+        .map(|m| m.body.as_str().to_string())
+        .collect();
+    assert_eq!(bodies, ["a", "c"]);
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn mark_read_updates_the_conversation_once() {
+    let (_dir, mut running) = ready().await;
+    running.network.deliver(incoming(1, 100, "unread"));
+    let message = message_added(&mut running.events).await;
+    conversation_updated(&mut running.events).await;
+
+    send(&running, Command::MarkRead(message.conversation));
+    assert_eq!(conversation_updated(&mut running.events).await.unread, 0);
+
+    // Nothing left unread: no update, so the next event answers this load.
+    send(&running, Command::MarkRead(message.conversation));
+    send(&running, Command::LoadConversations);
+    assert!(matches!(
+        next_event(&mut running.events).await,
+        Event::Conversations(_)
+    ));
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn messages_survive_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = MemorySecretStore::default();
+    let mut running = start(dir.path(), &secrets, true);
+    expect(&mut running.events, Event::Ready).await;
+    expect(&mut running.events, Event::Connected).await;
+    running.network.deliver(incoming(1, 100, "kept"));
+    let message = message_added(&mut running.events).await;
+    stop(running).await;
+
+    let mut running = start(dir.path(), &secrets, true);
+    expect(&mut running.events, Event::Ready).await;
+    send(
+        &running,
+        Command::LoadMessages {
+            conversation: message.conversation,
+            before: None,
+            limit: 10,
+        },
+    );
+    let messages = loop {
+        if let Event::Messages { messages, .. } = next_event(&mut running.events).await {
+            break messages;
+        }
+    };
+    assert_eq!(messages, [message]);
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn contacts_are_requested_and_refresh_conversations() {
+    let (_dir, mut running) = ready().await;
+    // No contacts stored yet, so the core asked for them on start.
+    assert_eq!(running.network.contact_sync_requests(), 1);
+
+    running.network.deliver(Incoming::ContactsSynced);
+
+    assert!(matches!(
+        next_event(&mut running.events).await,
+        Event::Conversations(_)
+    ));
     stop(running).await;
 }
 
@@ -171,19 +386,24 @@ async fn reports_send_failure() {
 #[tokio::test]
 async fn reports_receive_failure_and_keeps_serving_commands() {
     let dir = tempfile::tempdir().unwrap();
-    let mut running = start(dir.path(), &MemorySecretStore::default(), true);
-    running
-        .network
-        .fail_receive(BackendError::new("unauthorized"));
+    let mut running = start_with(
+        dir.path(),
+        &MemorySecretStore::default(),
+        true,
+        fast_reconnect(),
+        |network| network.fail_receive(BackendError::new("unauthorized")),
+    );
 
     expect(&mut running.events, Event::Ready).await;
     expect(
         &mut running.events,
         Event::Disconnected {
             error: Some(BackendError::new("unauthorized")),
+            retry_in: RETRY,
         },
     )
     .await;
+    expect(&mut running.events, Event::Connected).await;
 
     send(
         &running,
@@ -205,7 +425,71 @@ async fn reports_disconnect() {
 
     running.network.disconnect();
 
-    expect(&mut running.events, Event::Disconnected { error: None }).await;
+    expect(
+        &mut running.events,
+        Event::Disconnected {
+            error: None,
+            retry_in: RETRY,
+        },
+    )
+    .await;
+    expect(&mut running.events, Event::Connected).await;
+    assert_eq!(running.network.connections(), 2);
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn reconnect_backs_off_and_resets_once_synced() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut running = start_with(
+        dir.path(),
+        &MemorySecretStore::default(),
+        true,
+        fast_reconnect(),
+        |network| {
+            for _ in 0..4 {
+                network.fail_receive(BackendError::new("offline"));
+            }
+        },
+    );
+    expect(&mut running.events, Event::Ready).await;
+
+    for retry_in in [RETRY, RETRY * 2, RETRY * 4, RETRY * 4] {
+        expect_disconnected(&mut running.events, retry_in).await;
+    }
+    expect(&mut running.events, Event::Connected).await;
+
+    // Still backed off until the queue drains.
+    running.network.disconnect();
+    expect_disconnected(&mut running.events, RETRY * 4).await;
+    expect(&mut running.events, Event::Connected).await;
+    running.network.deliver(Incoming::QueueEmpty);
+    expect(&mut running.events, Event::Synced).await;
+    running.network.disconnect();
+    expect_disconnected(&mut running.events, RETRY).await;
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn reconnect_command_skips_the_wait() {
+    let dir = tempfile::tempdir().unwrap();
+    let slow = CoreOptions {
+        reconnect_initial: Duration::from_secs(600),
+        reconnect_max: Duration::from_secs(600),
+    };
+    let mut running = start_with(
+        dir.path(),
+        &MemorySecretStore::default(),
+        true,
+        slow,
+        |network| network.fail_receive(BackendError::new("offline")),
+    );
+    expect(&mut running.events, Event::Ready).await;
+    expect_disconnected(&mut running.events, Duration::from_secs(600)).await;
+
+    send(&running, Command::Reconnect);
+
+    expect(&mut running.events, Event::Connected).await;
     stop(running).await;
 }
 
@@ -240,11 +524,13 @@ async fn links_after_the_phone_approves() {
     running.phone.approve();
 
     expect(&mut running.events, Event::Ready).await;
+    expect(&mut running.events, Event::Connected).await;
     assert!(running.phone.is_linked());
     assert_eq!(
         running.phone.device_name().as_deref(),
         Some("Copiale on test")
     );
+    assert_eq!(running.network.contact_sync_requests(), 1);
     running.network.deliver(Incoming::QueueEmpty);
     expect(&mut running.events, Event::Synced).await;
     stop(running).await;

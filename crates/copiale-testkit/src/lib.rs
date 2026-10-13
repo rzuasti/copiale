@@ -23,17 +23,11 @@ pub fn service_id(n: u128) -> ServiceId {
 
 /// Creates a fake backend and the network controller that scripts it.
 pub fn fake_backend() -> (FakeBackend, FakeNetwork) {
-    let (incoming_tx, incoming_rx) = unbounded_channel();
     let state = Arc::new(Mutex::new(State::default()));
     let backend = FakeBackend {
-        incoming: Some(incoming_rx),
         state: state.clone(),
     };
-    let network = FakeNetwork {
-        incoming: Some(incoming_tx),
-        state,
-    };
-    (backend, network)
+    (backend, FakeNetwork { state })
 }
 
 /// A text message the backend was asked to send.
@@ -46,29 +40,33 @@ pub struct SentText {
 
 #[derive(Default)]
 struct State {
+    /// The open connection, if any.
+    connection: Option<UnboundedSender<Incoming>>,
+    connections: usize,
+    receive_failures: VecDeque<BackendError>,
     sent: Vec<SentText>,
     send_failures: VecDeque<BackendError>,
-    receive_failure: Option<BackendError>,
+    contact_sync_requests: usize,
 }
 
-/// [`SignalBackend`] driven by a [`FakeNetwork`].
+/// [`SignalBackend`] driven by a [`FakeNetwork`]. Each `receive` opens a
+/// new connection, replacing any previous one.
 pub struct FakeBackend {
-    incoming: Option<UnboundedReceiver<Incoming>>,
     state: Arc<Mutex<State>>,
 }
 
 impl SignalBackend for FakeBackend {
     async fn receive(&mut self) -> Result<LocalBoxStream<'static, Incoming>, BackendError> {
-        if let Some(error) = self.state.lock().unwrap().receive_failure.take() {
+        let mut state = self.state.lock().unwrap();
+        if let Some(error) = state.receive_failures.pop_front() {
             return Err(error);
         }
-        let incoming = self
-            .incoming
-            .take()
-            .ok_or_else(|| BackendError::new("already receiving"))?;
-        let stream = futures::stream::unfold(incoming, |mut incoming| async move {
-            let item = incoming.recv().await?;
-            Some((item, incoming))
+        let (tx, rx) = unbounded_channel();
+        state.connection = Some(tx);
+        state.connections += 1;
+        let stream = futures::stream::unfold(rx, |mut rx| async move {
+            let item = rx.recv().await?;
+            Some((item, rx))
         });
         Ok(stream.boxed_local())
     }
@@ -90,34 +88,41 @@ impl SignalBackend for FakeBackend {
         });
         Ok(())
     }
+
+    async fn request_contact_sync(&mut self) -> Result<(), BackendError> {
+        self.state.lock().unwrap().contact_sync_requests += 1;
+        Ok(())
+    }
 }
 
 /// Scripts what the [`FakeBackend`] receives and how sends behave.
 pub struct FakeNetwork {
-    incoming: Option<UnboundedSender<Incoming>>,
     state: Arc<Mutex<State>>,
 }
 
 impl FakeNetwork {
-    /// Delivers content as if it arrived from the server.
+    /// Delivers content on the open connection.
     ///
-    /// Panics after [`Self::disconnect`].
+    /// Panics if there is none; wait for `Event::Connected` first.
     pub fn deliver(&self, incoming: Incoming) {
-        self.incoming
+        self.state
+            .lock()
+            .unwrap()
+            .connection
             .as_ref()
-            .expect("network disconnected")
+            .expect("not connected")
             .send(incoming)
-            .expect("backend dropped");
+            .expect("backend dropped the connection");
     }
 
-    /// Closes the incoming stream, as if the connection dropped.
-    pub fn disconnect(&mut self) {
-        self.incoming = None;
+    /// Closes the open connection, as if the network dropped it.
+    pub fn disconnect(&self) {
+        self.state.lock().unwrap().connection = None;
     }
 
-    /// Makes opening the connection fail. Set before the core starts.
+    /// Makes the next connection attempt fail; queues up for repeated calls.
     pub fn fail_receive(&self, error: BackendError) {
-        self.state.lock().unwrap().receive_failure = Some(error);
+        self.state.lock().unwrap().receive_failures.push_back(error);
     }
 
     /// Makes the next send fail; queues up for repeated calls.
@@ -128,6 +133,15 @@ impl FakeNetwork {
     /// Texts sent so far, oldest first.
     pub fn sent(&self) -> Vec<SentText> {
         self.state.lock().unwrap().sent.clone()
+    }
+
+    /// Connections opened so far.
+    pub fn connections(&self) -> usize {
+        self.state.lock().unwrap().connections
+    }
+
+    pub fn contact_sync_requests(&self) -> usize {
+        self.state.lock().unwrap().contact_sync_requests
     }
 }
 

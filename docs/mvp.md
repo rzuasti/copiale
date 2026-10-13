@@ -178,8 +178,17 @@ crates/
   drains events with `cx.spawn`.
 - A `SignalBackend` trait wraps presage's `Manager`; `copiale-testkit`
   provides a fake implementation with scripted network responses.
-- Models are plain data (`Conversation`, `Message`, `Contact`, ...), shared
-  with the UI as snapshots or diffs.
+- Models are plain data (`ConversationSummary`, `Message`, ...), shared
+  with the UI as snapshots (`Conversations`, `Messages`) and updates
+  (`MessageAdded`, `ConversationUpdated`).
+- Startup: unlock storage, load or link the account, then serve.
+- Serving keeps the connection open, reconnecting with backoff (1 s doubling
+  to 60 s; reset once the queue drains); `Reconnect` retries at once.
+- Messages, including those sent from the phone, are stored once: Signal
+  identifies a message by author and sent timestamp, so redeliveries are
+  ignored. Order is by sent time; the chat list by local receive time.
+- Contact sync is requested after linking and while no contacts are
+  stored; synced names title conversations.
 
 ### Storage
 
