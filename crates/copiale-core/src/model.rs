@@ -167,6 +167,17 @@ pub enum Direction {
     Outgoing,
 }
 
+/// Progress of an outgoing message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MessageStatus {
+    /// Waiting to be sent, or sending.
+    Pending,
+    /// Accepted by the server.
+    Sent,
+    /// Sending failed; can be retried.
+    Failed,
+}
+
 /// A stored message.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Message {
@@ -179,6 +190,8 @@ pub struct Message {
     pub received_at: Timestamp,
     pub body: MessageBody,
     pub read: bool,
+    /// Outgoing messages only.
+    pub status: Option<MessageStatus>,
 }
 
 /// A conversation as the chat list shows it. `Debug` hides the title.

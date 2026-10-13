@@ -149,6 +149,7 @@ fn identifiers_and_secrets_are_redacted_in_logs() {
         received_at: Timestamp::from_millis(2),
         body: body.clone(),
         read: false,
+        status: None,
     });
     let summary = Event::ConversationUpdated(ConversationSummary {
         id: ConversationId::new(1),

@@ -1,6 +1,7 @@
 //! The core actor: owns storage and the Signal account on a dedicated
 //! thread, and walks through startup (unlock, then link) before serving.
 
+mod outbox;
 mod run;
 
 use std::sync::Arc;
@@ -12,7 +13,7 @@ use tokio::task::LocalSet;
 
 use crate::backend::{BackendError, Linker};
 use crate::model::{
-    ConversationId, ConversationSummary, Message, MessageBody, MessageId, ServiceId, Timestamp,
+    ConversationId, ConversationSummary, Message, MessageBody, MessageId, ServiceId,
 };
 use crate::storage::{Passphrase, SecretStore, Storage};
 
@@ -33,10 +34,16 @@ pub enum Command {
     /// Deletes all local data and starts from scratch, after
     /// [`Event::StorageFailed`]. The UI must confirm first.
     StartOver,
+    /// Stores the text as pending ([`Event::MessageAdded`]) and sends it
+    /// in the background: [`Event::MessageUpdated`] once sent, or
+    /// [`Event::SendFailed`]. Sends go out one at a time, in order.
     SendText {
         recipient: ServiceId,
         body: MessageBody,
     },
+    /// Sends a failed message again: [`Event::MessageUpdated`] as pending,
+    /// then as for [`Command::SendText`].
+    RetrySend(MessageId),
     /// Reconnects now instead of waiting for the next retry.
     Reconnect,
     /// Answered with [`Event::Conversations`].
@@ -94,13 +101,11 @@ pub enum Event {
     },
     /// Reading or writing local data failed while running.
     DatabaseError(String),
-    MessageSent {
-        recipient: ServiceId,
-        timestamp: Timestamp,
-    },
+    /// A stored message changed, e.g. its status.
+    MessageUpdated(Message),
+    /// Sending failed; `message` is now marked failed.
     SendFailed {
-        recipient: ServiceId,
-        timestamp: Timestamp,
+        message: Message,
         error: BackendError,
     },
     /// The connection failed to open (`Some`) or closed (`None`); the next

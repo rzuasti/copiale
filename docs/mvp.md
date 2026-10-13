@@ -184,6 +184,11 @@ crates/
 - Startup: unlock storage, load or link the account, then serve.
 - Serving keeps the connection open, reconnecting with backoff (1 s doubling
   to 60 s; reset once the queue drains); `Reconnect` retries at once.
+- Sending stores the message as pending, then sends in a background task,
+  one message at a time and in order, so receiving never waits on it.
+  Failed sends are retried on request with the same timestamp; sends cut off
+  by quitting are marked failed on the next start. libsignal-service copies
+  each sent message to the account's other devices.
 - Messages, including those sent from the phone, are stored once: Signal
   identifies a message by author and sent timestamp, so redeliveries are
   ignored. Order is by sent time; the chat list by local receive time.

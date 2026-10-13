@@ -1,5 +1,6 @@
 //! Boundary between the core and the Signal network.
 
+use futures::future::LocalBoxFuture;
 use futures::stream::LocalBoxStream;
 use tokio::sync::oneshot;
 
@@ -38,13 +39,17 @@ pub trait SignalBackend {
     /// Opens the connection and streams incoming content until it closes.
     async fn receive(&mut self) -> Result<LocalBoxStream<'static, Incoming>, BackendError>;
 
-    /// Sends a text message to one account.
-    async fn send_text(
+    /// Sends a text message to one account, with a copy to this account's
+    /// other devices.
+    ///
+    /// The future doesn't borrow the backend, so the core can keep serving
+    /// while it runs.
+    fn send_text(
         &mut self,
         recipient: ServiceId,
-        body: &MessageBody,
+        body: MessageBody,
         timestamp: Timestamp,
-    ) -> Result<(), BackendError>;
+    ) -> LocalBoxFuture<'static, Result<(), BackendError>>;
 
     /// Asks the phone to send its contacts; they arrive as
     /// [`Incoming::ContactsSynced`].

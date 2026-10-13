@@ -7,9 +7,9 @@ use std::time::Duration;
 
 use copiale_core::storage::{KdfParams, Passphrase, Storage, StoragePaths};
 use copiale_core::{
-    BackendError, Command, ConversationSummary, CoreHandle, CoreOptions, Direction, Event, Events,
-    Incoming, IncomingMessage, Message, MessageBody, MessagePreview, Peer, SentMessage,
-    StorageFailure, Timestamp,
+    BackendError, Command, ConversationId, ConversationSummary, CoreHandle, CoreOptions, Direction,
+    Event, Events, Incoming, IncomingMessage, Message, MessageBody, MessagePreview, MessageStatus,
+    Peer, SentMessage, StorageFailure, Timestamp,
 };
 use copiale_testkit::{
     FAKE_LINK_URL, FakeNetwork, FakePhone, MemorySecretStore, SentText, fake_backend, fake_linker,
@@ -324,62 +324,240 @@ async fn contacts_are_requested_and_refresh_conversations() {
     stop(running).await;
 }
 
-#[tokio::test]
-async fn sends_text_and_reports_sent() {
-    let (_dir, mut running) = ready().await;
-    let body = MessageBody::new("hi there");
-
+fn send_text(running: &Running, to: u128, body: &str) {
     send(
-        &running,
+        running,
         Command::SendText {
-            recipient: service_id(2),
-            body: body.clone(),
+            recipient: service_id(to),
+            body: MessageBody::new(body),
         },
     );
+}
 
-    let Event::MessageSent {
-        recipient,
-        timestamp,
-    } = next_event(&mut running.events).await
-    else {
-        panic!("expected MessageSent");
-    };
-    assert_eq!(recipient, service_id(2));
+/// The pending message stored for a send.
+async fn pending_added(events: &mut Events) -> Message {
+    let message = message_added(events).await;
+    assert_eq!(message.direction, Direction::Outgoing);
+    assert_eq!(message.status, Some(MessageStatus::Pending));
+    conversation_updated(events).await;
+    message
+}
+
+async fn message_updated(events: &mut Events) -> Message {
+    match next_event(events).await {
+        Event::MessageUpdated(message) => message,
+        other => panic!("expected MessageUpdated, got {other:?}"),
+    }
+}
+
+async fn send_failed(events: &mut Events) -> (Message, BackendError) {
+    match next_event(events).await {
+        Event::SendFailed { message, error } => (message, error),
+        other => panic!("expected SendFailed, got {other:?}"),
+    }
+}
+
+async fn load_messages(running: &mut Running, conversation: ConversationId) -> Vec<Message> {
+    send(
+        running,
+        Command::LoadMessages {
+            conversation,
+            before: None,
+            limit: 10,
+        },
+    );
+    loop {
+        if let Event::Messages { messages, .. } = next_event(&mut running.events).await {
+            break messages;
+        }
+    }
+}
+
+#[tokio::test]
+async fn sent_text_goes_from_pending_to_sent() {
+    let (_dir, mut running) = ready().await;
+
+    send_text(&running, 2, "hi there");
+
+    let pending = message_added(&mut running.events).await;
+    assert_eq!(pending.direction, Direction::Outgoing);
+    assert_eq!(pending.status, Some(MessageStatus::Pending));
+    assert_eq!(pending.body, MessageBody::new("hi there"));
+    assert!(pending.read);
+    let summary = conversation_updated(&mut running.events).await;
+    assert_eq!(summary.peer, Peer::Contact(service_id(2)));
+    assert_eq!(summary.unread, 0);
+    let sent = message_updated(&mut running.events).await;
+    assert_eq!(
+        sent,
+        Message {
+            status: Some(MessageStatus::Sent),
+            ..pending.clone()
+        }
+    );
     assert_eq!(
         running.network.sent(),
-        vec![SentText {
-            recipient,
-            body,
-            timestamp,
+        [SentText {
+            recipient: service_id(2),
+            body: MessageBody::new("hi there"),
+            timestamp: pending.sent_at,
         }]
+    );
+    assert_eq!(
+        load_messages(&mut running, pending.conversation).await,
+        [sent]
     );
     stop(running).await;
 }
 
 #[tokio::test]
-async fn reports_send_failure() {
+async fn failed_send_can_be_retried() {
     let (_dir, mut running) = ready().await;
     running
         .network
         .fail_next_send(BackendError::new("rate limited"));
 
-    send(
-        &running,
-        Command::SendText {
-            recipient: service_id(3),
-            body: MessageBody::new("nope"),
-        },
-    );
-
-    let Event::SendFailed {
-        recipient, error, ..
-    } = next_event(&mut running.events).await
-    else {
-        panic!("expected SendFailed");
-    };
-    assert_eq!(recipient, service_id(3));
+    send_text(&running, 3, "try again");
+    let pending = pending_added(&mut running.events).await;
+    let (failed, error) = send_failed(&mut running.events).await;
+    assert_eq!(failed.id, pending.id);
+    assert_eq!(failed.status, Some(MessageStatus::Failed));
     assert_eq!(error, BackendError::new("rate limited"));
     assert!(running.network.sent().is_empty());
+
+    send(&running, Command::RetrySend(pending.id));
+
+    let retried = message_updated(&mut running.events).await;
+    assert_eq!(retried.status, Some(MessageStatus::Pending));
+    let sent = message_updated(&mut running.events).await;
+    assert_eq!(sent.status, Some(MessageStatus::Sent));
+    // Same timestamp, so the recipient can drop a copy that got through.
+    assert_eq!(running.network.sent()[0].timestamp, pending.sent_at);
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn only_failed_messages_are_retried() {
+    let (_dir, mut running) = ready().await;
+    send_text(&running, 3, "fine");
+    let pending = pending_added(&mut running.events).await;
+    message_updated(&mut running.events).await;
+
+    send(&running, Command::RetrySend(pending.id));
+    send(&running, Command::LoadConversations);
+
+    assert!(matches!(
+        next_event(&mut running.events).await,
+        Event::Conversations(_)
+    ));
+    assert_eq!(running.network.sends_started(), 1);
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn slow_send_does_not_delay_incoming_messages() {
+    let (_dir, mut running) = ready().await;
+    running.network.pause_sends();
+
+    send_text(&running, 2, "slow");
+    let pending = pending_added(&mut running.events).await;
+    running.network.deliver(incoming(1, 100, "meanwhile"));
+
+    let received = message_added(&mut running.events).await;
+    assert_eq!(received.body, MessageBody::new("meanwhile"));
+    conversation_updated(&mut running.events).await;
+    send(&running, Command::LoadConversations);
+    assert!(matches!(
+        next_event(&mut running.events).await,
+        Event::Conversations(_)
+    ));
+
+    running.network.resume_sends();
+    let sent = message_updated(&mut running.events).await;
+    assert_eq!(sent.id, pending.id);
+    assert_eq!(sent.status, Some(MessageStatus::Sent));
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn sends_go_out_one_at_a_time_in_order() {
+    let (_dir, mut running) = ready().await;
+    running.network.pause_sends();
+
+    for body in ["first", "second", "third"] {
+        send_text(&running, 2, body);
+    }
+    let mut pending = Vec::new();
+    for _ in 0..3 {
+        pending.push(pending_added(&mut running.events).await);
+    }
+    assert_eq!(running.network.sends_started(), 1);
+    // Unique timestamps even when sent within the same millisecond.
+    assert!(pending.windows(2).all(|w| w[0].sent_at < w[1].sent_at));
+
+    running.network.resume_sends();
+    for expected in &pending {
+        assert_eq!(message_updated(&mut running.events).await.id, expected.id);
+    }
+    let bodies: Vec<_> = running
+        .network
+        .sent()
+        .into_iter()
+        .map(|sent| sent.body.as_str().to_string())
+        .collect();
+    assert_eq!(bodies, ["first", "second", "third"]);
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn one_failure_does_not_stop_later_sends() {
+    let (_dir, mut running) = ready().await;
+    running.network.fail_next_send(BackendError::new("offline"));
+    running.network.pause_sends();
+
+    send_text(&running, 2, "fails");
+    send_text(&running, 2, "works");
+    let failing = pending_added(&mut running.events).await;
+    let working = pending_added(&mut running.events).await;
+    running.network.resume_sends();
+
+    assert_eq!(send_failed(&mut running.events).await.0.id, failing.id);
+    assert_eq!(message_updated(&mut running.events).await.id, working.id);
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn empty_text_is_not_sent() {
+    let (_dir, mut running) = ready().await;
+
+    send_text(&running, 2, "  \n ");
+    send(&running, Command::LoadConversations);
+
+    let Event::Conversations(conversations) = next_event(&mut running.events).await else {
+        panic!("expected Conversations");
+    };
+    assert!(conversations.is_empty());
+    assert_eq!(running.network.sends_started(), 0);
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn sends_interrupted_by_quitting_fail_on_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = MemorySecretStore::default();
+    let mut running = start(dir.path(), &secrets, true);
+    expect(&mut running.events, Event::Ready).await;
+    expect(&mut running.events, Event::Connected).await;
+    running.network.pause_sends();
+    send_text(&running, 2, "interrupted");
+    let pending = pending_added(&mut running.events).await;
+    stop(running).await;
+
+    let mut running = start(dir.path(), &secrets, true);
+    expect(&mut running.events, Event::Ready).await;
+
+    let messages = load_messages(&mut running, pending.conversation).await;
+    assert_eq!(messages[0].status, Some(MessageStatus::Failed));
     stop(running).await;
 }
 
@@ -405,17 +583,12 @@ async fn reports_receive_failure_and_keeps_serving_commands() {
     .await;
     expect(&mut running.events, Event::Connected).await;
 
-    send(
-        &running,
-        Command::SendText {
-            recipient: service_id(4),
-            body: MessageBody::new("still here"),
-        },
+    send_text(&running, 4, "still here");
+    pending_added(&mut running.events).await;
+    assert_eq!(
+        message_updated(&mut running.events).await.status,
+        Some(MessageStatus::Sent)
     );
-    assert!(matches!(
-        next_event(&mut running.events).await,
-        Event::MessageSent { .. }
-    ));
     stop(running).await;
 }
 

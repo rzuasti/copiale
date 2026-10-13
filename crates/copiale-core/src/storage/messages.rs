@@ -8,7 +8,7 @@ use super::StorageError;
 use super::database::{Database, database_error};
 use crate::model::{
     ConversationId, ConversationSummary, Direction, Message, MessageBody, MessageId,
-    MessagePreview, Peer, ServiceId, Timestamp,
+    MessagePreview, MessageStatus, Peer, ServiceId, Timestamp,
 };
 
 /// Summary columns: id, peer, last_activity, unread, last message
@@ -27,16 +27,50 @@ macro_rules! summary_query {
     };
 }
 
+/// Message columns, in [`MessageRow`] order.
+macro_rules! message_columns {
+    () => {
+        "id, conversation_id, outgoing, sent_at, received_at, body, read, status"
+    };
+}
+
 type SummaryRow = (i64, Vec<u8>, Option<i64>, i64, Option<bool>, Option<String>);
-type MessageRow = (i64, i64, bool, i64, i64, String, bool);
+type MessageRow = (i64, i64, bool, i64, i64, String, bool, Option<String>);
 
 impl Database {
-    /// Stores a 1:1 message unless it's already stored (same peer,
-    /// direction and sent time). Returns it if new.
+    /// Stores a received 1:1 message, or one sent from another device,
+    /// unless it's already stored (same peer, direction and sent time).
+    /// Returns it if new.
     pub(crate) async fn add_message(
         &self,
         peer: ServiceId,
         direction: Direction,
+        sent_at: Timestamp,
+        body: &MessageBody,
+    ) -> Result<Option<Message>, StorageError> {
+        let status = (direction == Direction::Outgoing).then_some(MessageStatus::Sent);
+        self.insert_message(peer, direction, status, sent_at, body)
+            .await
+    }
+
+    /// Stores a message this device is about to send. `None` if one to
+    /// `peer` with the same sent time exists.
+    pub(crate) async fn add_pending(
+        &self,
+        peer: ServiceId,
+        sent_at: Timestamp,
+        body: &MessageBody,
+    ) -> Result<Option<Message>, StorageError> {
+        let status = Some(MessageStatus::Pending);
+        self.insert_message(peer, Direction::Outgoing, status, sent_at, body)
+            .await
+    }
+
+    async fn insert_message(
+        &self,
+        peer: ServiceId,
+        direction: Direction,
+        status: Option<MessageStatus>,
         sent_at: Timestamp,
         body: &MessageBody,
     ) -> Result<Option<Message>, StorageError> {
@@ -56,8 +90,9 @@ impl Database {
         .map_err(database_error)?;
 
         let id: Option<i64> = sqlx::query_scalar(
-            "INSERT INTO messages (conversation_id, outgoing, sent_at, received_at, body, read)
-             VALUES (?, ?, ?, ?, ?, ?)
+            "INSERT INTO messages
+                 (conversation_id, outgoing, sent_at, received_at, body, read, status)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT DO NOTHING
              RETURNING id",
         )
@@ -67,6 +102,7 @@ impl Database {
         .bind(millis(received_at))
         .bind(body.as_str())
         .bind(outgoing)
+        .bind(status.map(status_name))
         .fetch_optional(&mut *tx)
         .await
         .map_err(database_error)?;
@@ -94,7 +130,64 @@ impl Database {
             received_at,
             body: body.clone(),
             read: outgoing,
+            status,
         }))
+    }
+
+    /// Sets an outgoing message's status; returns it, or `None` if there is
+    /// no such outgoing message.
+    pub(crate) async fn set_status(
+        &self,
+        id: MessageId,
+        status: MessageStatus,
+    ) -> Result<Option<Message>, StorageError> {
+        let row: Option<MessageRow> = sqlx::query_as(concat!(
+            "UPDATE messages SET status = ? WHERE id = ? AND outgoing = 1 RETURNING ",
+            message_columns!()
+        ))
+        .bind(status_name(status))
+        .bind(id.get())
+        .fetch_optional(&self.app)
+        .await
+        .map_err(database_error)?;
+        row.map(message).transpose()
+    }
+
+    /// Marks a failed message pending again; returns it with its recipient,
+    /// or `None` if it hasn't failed.
+    pub(crate) async fn retry_send(
+        &self,
+        id: MessageId,
+    ) -> Result<Option<(ServiceId, Message)>, StorageError> {
+        let mut tx = self.app.begin().await.map_err(database_error)?;
+        let row: Option<MessageRow> = sqlx::query_as(concat!(
+            "UPDATE messages SET status = 'pending' WHERE id = ? AND status = 'failed' RETURNING ",
+            message_columns!()
+        ))
+        .bind(id.get())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(database_error)?;
+        let Some(message) = row.map(message).transpose()? else {
+            return Ok(None);
+        };
+        let peer: Vec<u8> = sqlx::query_scalar("SELECT peer FROM conversations WHERE id = ?")
+            .bind(message.conversation.get())
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(database_error)?;
+        tx.commit().await.map_err(database_error)?;
+        Ok(Some((service_id(&peer)?, message)))
+    }
+
+    /// Marks messages left pending, e.g. by a quit mid-send, failed;
+    /// returns how many.
+    pub(crate) async fn fail_pending(&self) -> Result<u64, StorageError> {
+        let result = sqlx::query("UPDATE messages SET status = 'failed' WHERE status = 'pending'")
+            .execute(&self.app)
+            .await
+            .map_err(database_error)?;
+        Ok(result.rows_affected())
     }
 
     /// All conversations, most recently active first.
@@ -136,21 +229,22 @@ impl Database {
         before: Option<MessageId>,
         limit: u32,
     ) -> Result<Vec<Message>, StorageError> {
-        let rows: Vec<MessageRow> = sqlx::query_as(
-            "SELECT id, conversation_id, outgoing, sent_at, received_at, body, read
-             FROM messages
+        let rows: Vec<MessageRow> = sqlx::query_as(concat!(
+            "SELECT ",
+            message_columns!(),
+            " FROM messages
              WHERE conversation_id = ?1
                AND (?2 IS NULL OR (sent_at, id) < (SELECT sent_at, id FROM messages WHERE id = ?2))
              ORDER BY sent_at DESC, id DESC
-             LIMIT ?3",
-        )
+             LIMIT ?3"
+        ))
         .bind(conversation.get())
         .bind(before.map(MessageId::get))
         .bind(limit)
         .fetch_all(&self.app)
         .await
         .map_err(database_error)?;
-        Ok(rows.into_iter().rev().map(message).collect())
+        rows.into_iter().rev().map(message).collect()
     }
 
     /// Marks incoming messages read; `true` if any were unread.
@@ -184,9 +278,7 @@ impl Database {
 
     async fn summary(&self, row: SummaryRow) -> Result<ConversationSummary, StorageError> {
         let (id, peer, last_activity, unread, outgoing, body) = row;
-        let peer = Uuid::from_slice(&peer)
-            .map(ServiceId::new)
-            .map_err(|_| StorageError::Database("invalid peer in conversations".into()))?;
+        let peer = service_id(&peer)?;
         let last_message = outgoing.zip(body).map(|(outgoing, body)| MessagePreview {
             direction: direction(outgoing),
             body: MessageBody::new(body),
@@ -215,9 +307,10 @@ impl Database {
     }
 }
 
-fn message(row: MessageRow) -> Message {
-    let (id, conversation, outgoing, sent_at, received_at, body, read) = row;
-    Message {
+fn message(row: MessageRow) -> Result<Message, StorageError> {
+    let (id, conversation, outgoing, sent_at, received_at, body, read, status) = row;
+    let status = status.as_deref().map(parse_status).transpose()?;
+    Ok(Message {
         id: MessageId::new(id),
         conversation: ConversationId::new(conversation),
         direction: direction(outgoing),
@@ -225,6 +318,30 @@ fn message(row: MessageRow) -> Message {
         received_at: timestamp(received_at),
         body: MessageBody::new(body),
         read,
+        status,
+    })
+}
+
+fn service_id(peer: &[u8]) -> Result<ServiceId, StorageError> {
+    Uuid::from_slice(peer)
+        .map(ServiceId::new)
+        .map_err(|_| StorageError::Database("invalid peer in conversations".into()))
+}
+
+fn status_name(status: MessageStatus) -> &'static str {
+    match status {
+        MessageStatus::Pending => "pending",
+        MessageStatus::Sent => "sent",
+        MessageStatus::Failed => "failed",
+    }
+}
+
+fn parse_status(name: &str) -> Result<MessageStatus, StorageError> {
+    match name {
+        "pending" => Ok(MessageStatus::Pending),
+        "sent" => Ok(MessageStatus::Sent),
+        "failed" => Ok(MessageStatus::Failed),
+        _ => Err(StorageError::Database("invalid message status".into())),
     }
 }
 
@@ -346,6 +463,116 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(summary.unread, 1);
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn only_outgoing_messages_have_a_status() {
+        let (_dir, db) = db().await;
+
+        let incoming = add(&db, 1, Direction::Incoming, 100, "a").await.unwrap();
+        let from_phone = add(&db, 1, Direction::Outgoing, 101, "b").await.unwrap();
+
+        assert_eq!(incoming.status, None);
+        assert_eq!(from_phone.status, Some(MessageStatus::Sent));
+        let stored = db.messages(incoming.conversation, None, 10).await.unwrap();
+        assert_eq!(stored, [incoming, from_phone]);
+        db.close().await;
+    }
+
+    async fn pending(db: &Database, to: u128, sent_at: u64) -> Option<Message> {
+        db.add_pending(
+            peer(to),
+            Timestamp::from_millis(sent_at),
+            &MessageBody::new("out"),
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn pending_message_is_outgoing_and_read() {
+        let (_dir, db) = db().await;
+
+        let message = pending(&db, 1, 100).await.unwrap();
+
+        assert_eq!(message.direction, Direction::Outgoing);
+        assert_eq!(message.status, Some(MessageStatus::Pending));
+        assert!(message.read);
+        let summary = db
+            .conversation(message.conversation)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(summary.unread, 0);
+        assert_eq!(summary.last_activity, Some(message.received_at));
+        assert_eq!(pending(&db, 1, 100).await, None);
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn status_changes_are_stored() {
+        let (_dir, db) = db().await;
+        let message = pending(&db, 1, 100).await.unwrap();
+
+        let sent = db
+            .set_status(message.id, MessageStatus::Sent)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(sent.status, Some(MessageStatus::Sent));
+        assert_eq!(sent.id, message.id);
+        let stored = db.messages(message.conversation, None, 10).await.unwrap();
+        assert_eq!(stored, [sent]);
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn incoming_messages_get_no_status() {
+        let (_dir, db) = db().await;
+        let message = add(&db, 1, Direction::Incoming, 100, "a").await.unwrap();
+
+        let updated = db
+            .set_status(message.id, MessageStatus::Sent)
+            .await
+            .unwrap();
+
+        assert_eq!(updated, None);
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn only_failed_messages_can_be_retried() {
+        let (_dir, db) = db().await;
+        let message = pending(&db, 7, 100).await.unwrap();
+        assert_eq!(db.retry_send(message.id).await.unwrap(), None);
+        db.set_status(message.id, MessageStatus::Failed)
+            .await
+            .unwrap();
+
+        let (recipient, retried) = db.retry_send(message.id).await.unwrap().unwrap();
+
+        assert_eq!(recipient, peer(7));
+        assert_eq!(retried.status, Some(MessageStatus::Pending));
+        assert_eq!(retried.sent_at, message.sent_at);
+        assert_eq!(db.retry_send(message.id).await.unwrap(), None);
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn leftover_pending_messages_fail() {
+        let (_dir, db) = db().await;
+        let first = pending(&db, 1, 100).await.unwrap();
+        let second = pending(&db, 2, 100).await.unwrap();
+        db.set_status(second.id, MessageStatus::Sent).await.unwrap();
+
+        assert_eq!(db.fail_pending().await.unwrap(), 1);
+
+        let stored = db.messages(first.conversation, None, 10).await.unwrap();
+        assert_eq!(stored[0].status, Some(MessageStatus::Failed));
+        let stored = db.messages(second.conversation, None, 10).await.unwrap();
+        assert_eq!(stored[0].status, Some(MessageStatus::Sent));
         db.close().await;
     }
 

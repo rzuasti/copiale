@@ -9,10 +9,11 @@ use copiale_core::storage::{Database, SecretError, SecretStore};
 use copiale_core::{
     BackendError, Incoming, Linker, MessageBody, ServiceId, SignalBackend, Timestamp,
 };
-use futures::StreamExt as _;
+use futures::future::LocalBoxFuture;
 use futures::stream::LocalBoxStream;
+use futures::{FutureExt as _, StreamExt as _};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -24,10 +25,17 @@ pub fn service_id(n: u128) -> ServiceId {
 /// Creates a fake backend and the network controller that scripts it.
 pub fn fake_backend() -> (FakeBackend, FakeNetwork) {
     let state = Arc::new(Mutex::new(State::default()));
+    let (sends_paused, _) = watch::channel(false);
+    let sends_paused = Arc::new(sends_paused);
     let backend = FakeBackend {
         state: state.clone(),
+        sends_paused: sends_paused.clone(),
     };
-    (backend, FakeNetwork { state })
+    let network = FakeNetwork {
+        state,
+        sends_paused,
+    };
+    (backend, network)
 }
 
 /// A text message the backend was asked to send.
@@ -45,6 +53,7 @@ struct State {
     connections: usize,
     receive_failures: VecDeque<BackendError>,
     sent: Vec<SentText>,
+    sends_started: usize,
     send_failures: VecDeque<BackendError>,
     contact_sync_requests: usize,
 }
@@ -53,6 +62,7 @@ struct State {
 /// new connection, replacing any previous one.
 pub struct FakeBackend {
     state: Arc<Mutex<State>>,
+    sends_paused: Arc<watch::Sender<bool>>,
 }
 
 impl SignalBackend for FakeBackend {
@@ -71,22 +81,34 @@ impl SignalBackend for FakeBackend {
         Ok(stream.boxed_local())
     }
 
-    async fn send_text(
+    /// Counts as started at once; completes when sends aren't paused.
+    fn send_text(
         &mut self,
         recipient: ServiceId,
-        body: &MessageBody,
+        body: MessageBody,
         timestamp: Timestamp,
-    ) -> Result<(), BackendError> {
-        let mut state = self.state.lock().unwrap();
-        if let Some(error) = state.send_failures.pop_front() {
-            return Err(error);
+    ) -> LocalBoxFuture<'static, Result<(), BackendError>> {
+        let failure = {
+            let mut state = self.state.lock().unwrap();
+            state.sends_started += 1;
+            state.send_failures.pop_front()
+        };
+        let state = self.state.clone();
+        let mut paused = self.sends_paused.subscribe();
+        async move {
+            // Fails only once the network is gone; then nothing pauses.
+            paused.wait_for(|paused| !paused).await.ok();
+            if let Some(error) = failure {
+                return Err(error);
+            }
+            state.lock().unwrap().sent.push(SentText {
+                recipient,
+                body,
+                timestamp,
+            });
+            Ok(())
         }
-        state.sent.push(SentText {
-            recipient,
-            body: body.clone(),
-            timestamp,
-        });
-        Ok(())
+        .boxed_local()
     }
 
     async fn request_contact_sync(&mut self) -> Result<(), BackendError> {
@@ -98,6 +120,7 @@ impl SignalBackend for FakeBackend {
 /// Scripts what the [`FakeBackend`] receives and how sends behave.
 pub struct FakeNetwork {
     state: Arc<Mutex<State>>,
+    sends_paused: Arc<watch::Sender<bool>>,
 }
 
 impl FakeNetwork {
@@ -130,9 +153,24 @@ impl FakeNetwork {
         self.state.lock().unwrap().send_failures.push_back(error);
     }
 
-    /// Texts sent so far, oldest first.
+    /// Holds sends in flight until [`Self::resume_sends`], like a slow
+    /// network.
+    pub fn pause_sends(&self) {
+        self.sends_paused.send_replace(true);
+    }
+
+    pub fn resume_sends(&self) {
+        self.sends_paused.send_replace(false);
+    }
+
+    /// Texts sent successfully so far, oldest first.
     pub fn sent(&self) -> Vec<SentText> {
         self.state.lock().unwrap().sent.clone()
+    }
+
+    /// Sends started so far, including failed and paused ones.
+    pub fn sends_started(&self) -> usize {
+        self.state.lock().unwrap().sends_started
     }
 
     /// Connections opened so far.

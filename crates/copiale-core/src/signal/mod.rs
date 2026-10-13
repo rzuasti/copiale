@@ -5,8 +5,9 @@
 
 mod store;
 
-use futures::StreamExt as _;
+use futures::future::LocalBoxFuture;
 use futures::stream::LocalBoxStream;
+use futures::{FutureExt as _, StreamExt as _};
 use presage::Manager;
 use presage::libsignal_service::configuration::SignalServers;
 use presage::libsignal_service::content::{Content, ContentBody};
@@ -132,21 +133,27 @@ impl SignalBackend for PresageBackend {
         Ok(stream.boxed_local())
     }
 
-    async fn send_text(
+    /// Sends on a clone of the manager; libsignal-service adds the sync
+    /// copy for the other devices.
+    fn send_text(
         &mut self,
         recipient: ServiceId,
-        body: &MessageBody,
+        body: MessageBody,
         timestamp: Timestamp,
-    ) -> Result<(), BackendError> {
+    ) -> LocalBoxFuture<'static, Result<(), BackendError>> {
+        let mut manager = self.manager.clone();
         let message = DataMessage {
             body: Some(body.as_str().into()),
             timestamp: Some(timestamp.as_millis()),
             ..Default::default()
         };
-        self.manager
-            .send_message(Aci::from(recipient.uuid()), message, timestamp.as_millis())
-            .await
-            .map_err(backend_error)
+        async move {
+            manager
+                .send_message(Aci::from(recipient.uuid()), message, timestamp.as_millis())
+                .await
+                .map_err(backend_error)
+        }
+        .boxed_local()
     }
 
     async fn request_contact_sync(&mut self) -> Result<(), BackendError> {

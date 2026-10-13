@@ -22,5 +22,5 @@ pub use actor::{
 pub use backend::{BackendError, Incoming, Linker, SignalBackend};
 pub use model::{
     ConversationId, ConversationSummary, Direction, GroupId, IncomingMessage, Message, MessageBody,
-    MessageId, MessagePreview, Peer, PhoneNumber, SentMessage, ServiceId, Timestamp,
+    MessageId, MessagePreview, MessageStatus, Peer, PhoneNumber, SentMessage, ServiceId, Timestamp,
 };

@@ -9,9 +9,12 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
 use tokio::time::Instant;
 
+use super::outbox::Outbox;
 use super::{Command, CoreOptions, Event, StorageFailure};
 use crate::backend::{BackendError, Incoming, Linker, SignalBackend};
-use crate::model::{ConversationId, Direction, MessageBody, ServiceId, Timestamp};
+use crate::model::{
+    ConversationId, Direction, MessageBody, MessageId, MessageStatus, ServiceId, Timestamp,
+};
 use crate::storage::{Database, KeyLookup, SecretStore, Storage, StorageError};
 
 pub(super) struct Core {
@@ -210,6 +213,11 @@ impl Core {
 
     /// Keeps a connection open, stores messages and answers queries.
     async fn serve<B: SignalBackend>(&mut self, db: &Database, mut backend: B, linked_now: bool) {
+        match db.fail_pending().await {
+            Ok(0) => {}
+            Ok(count) => tracing::info!(count, "unsent messages marked failed"),
+            Err(error) => self.database_error(error),
+        }
         // Contact names title conversations; ask the phone if there are none.
         if (linked_now || !db.has_contacts().await.unwrap_or(false))
             && let Err(error) = backend.request_contact_sync().await
@@ -220,6 +228,7 @@ impl Core {
         let mut incoming: Option<LocalBoxStream<'static, Incoming>> = None;
         let mut retry_at = Some(Instant::now());
         let mut delay = self.options.reconnect_initial;
+        let mut outbox = Outbox::default();
         loop {
             if incoming.is_none() && retry_at.is_some_and(|at| at <= Instant::now()) {
                 retry_at = None;
@@ -240,16 +249,16 @@ impl Core {
             tokio::select! {
                 command = self.commands.recv() => match command {
                     Some(Command::SendText { recipient, body }) => {
-                        let timestamp = Timestamp::now();
-                        let event = match backend.send_text(recipient, &body, timestamp).await {
-                            Ok(()) => Event::MessageSent { recipient, timestamp },
-                            Err(error) => {
-                                tracing::warn!(?recipient, %error, "send failed");
-                                Event::SendFailed { recipient, timestamp, error }
-                            }
-                        };
-                        self.emit(event);
+                        self.send_text(db, &mut outbox, &mut backend, recipient, body).await;
                     }
+                    Some(Command::RetrySend(id)) => match db.retry_send(id).await {
+                        Ok(Some((recipient, message))) => {
+                            self.emit(Event::MessageUpdated(message.clone()));
+                            outbox.push(recipient, &message, &mut backend);
+                        }
+                        Ok(None) => tracing::debug!(message = id.get(), "nothing to retry"),
+                        Err(error) => self.database_error(error),
+                    },
                     Some(Command::Reconnect) if incoming.is_none() => retry_at = Some(Instant::now()),
                     Some(Command::LoadConversations) => self.send_conversations(db).await,
                     Some(Command::LoadMessages { conversation, before, limit }) => {
@@ -291,7 +300,62 @@ impl Core {
                         retry_at = Some(self.disconnected(None, &mut delay));
                     }
                 },
+                (id, result) = outbox.finished() => {
+                    self.send_finished(db, id, result).await;
+                    outbox.start_next(&mut backend);
+                }
                 () = tokio::time::sleep_until(wait), if incoming.is_none() && retry_at.is_some() => {}
+            }
+        }
+    }
+
+    /// Stores the text as pending and queues it.
+    async fn send_text<B: SignalBackend>(
+        &self,
+        db: &Database,
+        outbox: &mut Outbox,
+        backend: &mut B,
+        recipient: ServiceId,
+        body: MessageBody,
+    ) {
+        if body.as_str().trim().is_empty() {
+            tracing::debug!("empty message not sent");
+            return;
+        }
+        // Signal identifies a message by author and sent time, so each needs
+        // its own.
+        let mut sent_at = Timestamp::now();
+        let message = loop {
+            match db.add_pending(recipient, sent_at, &body).await {
+                Ok(Some(message)) => break message,
+                Ok(None) => sent_at = Timestamp::from_millis(sent_at.as_millis() + 1),
+                Err(error) => return self.database_error(error),
+            }
+        };
+        let conversation = message.conversation;
+        self.emit(Event::MessageAdded(message.clone()));
+        self.send_conversation(db, conversation).await;
+        outbox.push(recipient, &message, backend);
+    }
+
+    async fn send_finished(&self, db: &Database, id: MessageId, result: Result<(), BackendError>) {
+        let status = match result {
+            Ok(()) => MessageStatus::Sent,
+            Err(_) => MessageStatus::Failed,
+        };
+        let message = match db.set_status(id, status).await {
+            Ok(Some(message)) => message,
+            Ok(None) => return,
+            Err(error) => return self.database_error(error),
+        };
+        match result {
+            Ok(()) => {
+                tracing::debug!(message = id.get(), "message sent");
+                self.emit(Event::MessageUpdated(message));
+            }
+            Err(error) => {
+                tracing::warn!(message = id.get(), %error, "send failed");
+                self.emit(Event::SendFailed { message, error });
             }
         }
     }
