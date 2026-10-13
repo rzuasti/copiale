@@ -14,5 +14,9 @@ publish = false
 copiale-core = { path = "crates/copiale-core" }
 copiale-testkit = { path = "crates/copiale-testkit" }
 copiale-ui = { path = "crates/copiale-ui" }
+futures = "0.3"
 # GPUI snapshots may break the API between releases; upgrade deliberately.
 gpui-kit = "=0.7.3"
+thiserror = "2"
+tokio = "1"
+uuid = "1"

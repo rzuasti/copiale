@@ -6,3 +6,13 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
+
+[dependencies]
+futures.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "macros"] }
+uuid.workspace = true
+
+[dev-dependencies]
+copiale-testkit.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }
