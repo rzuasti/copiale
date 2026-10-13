@@ -1,8 +1,10 @@
 //! Boundary between the core and the Signal network.
 
 use futures::stream::LocalBoxStream;
+use tokio::sync::oneshot;
 
 use crate::model::{IncomingMessage, MessageBody, ServiceId, Timestamp};
+use crate::storage::Database;
 
 /// Content delivered by the backend.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -39,4 +41,22 @@ pub trait SignalBackend {
         body: &MessageBody,
         timestamp: Timestamp,
     ) -> Result<(), BackendError>;
+}
+
+/// Account setup: presage in the app, a fake in tests.
+#[allow(async_fn_in_trait)]
+pub trait Linker {
+    type Backend: SignalBackend;
+
+    /// The account linked in `db`, or `None` if there is none yet.
+    async fn load(&mut self, db: &Database) -> Result<Option<Self::Backend>, BackendError>;
+
+    /// Links as a secondary device. Sends the provisioning URL, to show as
+    /// a QR code, on `url`; completes once the phone confirms.
+    async fn link(
+        &mut self,
+        db: &Database,
+        device_name: &str,
+        url: oneshot::Sender<String>,
+    ) -> Result<Self::Backend, BackendError>;
 }

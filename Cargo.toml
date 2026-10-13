@@ -17,6 +17,7 @@ copiale-testkit = { path = "crates/copiale-testkit" }
 copiale-ui = { path = "crates/copiale-ui" }
 directories = "6"
 futures = "0.3"
+gethostname = "1"
 # GPUI snapshots may break the API between releases; upgrade deliberately.
 gpui-kit = "=0.7.3"
 keyring = "4.2"

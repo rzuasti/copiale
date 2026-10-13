@@ -5,11 +5,14 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
-use copiale_core::storage::{SecretError, SecretStore};
-use copiale_core::{BackendError, Incoming, MessageBody, ServiceId, SignalBackend, Timestamp};
+use copiale_core::storage::{Database, SecretError, SecretStore};
+use copiale_core::{
+    BackendError, Incoming, Linker, MessageBody, ServiceId, SignalBackend, Timestamp,
+};
 use futures::StreamExt as _;
 use futures::stream::LocalBoxStream;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio::sync::oneshot;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -194,5 +197,111 @@ impl SecretStore for MemorySecretStore {
         Self::check_available(&state)?;
         state.secret = None;
         Ok(())
+    }
+}
+
+/// Provisioning URL the [`FakeLinker`] hands out.
+pub const FAKE_LINK_URL: &str = "sgnl://linkdevice?uuid=fake&pub_key=fake";
+
+/// Creates a fake linker that yields `backend`, and the phone that drives it.
+pub fn fake_linker(backend: FakeBackend) -> (FakeLinker, FakePhone) {
+    let (approvals_tx, approvals_rx) = unbounded_channel();
+    let state = Arc::new(Mutex::new(PhoneState::default()));
+    let linker = FakeLinker {
+        backend: Some(backend),
+        approvals: approvals_rx,
+        state: state.clone(),
+    };
+    let phone = FakePhone {
+        approvals: approvals_tx,
+        state,
+    };
+    (linker, phone)
+}
+
+#[derive(Default)]
+struct PhoneState {
+    linked: bool,
+    device_name: Option<String>,
+    load_failure: Option<BackendError>,
+}
+
+/// [`Linker`] driven by a [`FakePhone`]. Hands out its backend once.
+pub struct FakeLinker {
+    backend: Option<FakeBackend>,
+    approvals: UnboundedReceiver<Result<(), BackendError>>,
+    state: Arc<Mutex<PhoneState>>,
+}
+
+impl Linker for FakeLinker {
+    type Backend = FakeBackend;
+
+    async fn load(&mut self, _db: &Database) -> Result<Option<FakeBackend>, BackendError> {
+        let mut state = self.state.lock().unwrap();
+        if let Some(error) = state.load_failure.take() {
+            return Err(error);
+        }
+        Ok(if state.linked {
+            self.backend.take()
+        } else {
+            None
+        })
+    }
+
+    async fn link(
+        &mut self,
+        _db: &Database,
+        device_name: &str,
+        url: oneshot::Sender<String>,
+    ) -> Result<FakeBackend, BackendError> {
+        self.state.lock().unwrap().device_name = Some(device_name.into());
+        url.send(FAKE_LINK_URL.into()).ok();
+        match self.approvals.recv().await {
+            Some(Ok(())) => {
+                self.state.lock().unwrap().linked = true;
+                self.backend
+                    .take()
+                    .ok_or_else(|| BackendError::new("already linked"))
+            }
+            Some(Err(error)) => Err(error),
+            None => Err(BackendError::new("phone gone")),
+        }
+    }
+}
+
+/// The user's phone: confirms or rejects linking.
+pub struct FakePhone {
+    approvals: UnboundedSender<Result<(), BackendError>>,
+    state: Arc<Mutex<PhoneState>>,
+}
+
+impl FakePhone {
+    /// Marks the account as linked already, as on a later start.
+    pub fn set_linked(&self) {
+        self.state.lock().unwrap().linked = true;
+    }
+
+    pub fn is_linked(&self) -> bool {
+        self.state.lock().unwrap().linked
+    }
+
+    /// Device name of the last link attempt.
+    pub fn device_name(&self) -> Option<String> {
+        self.state.lock().unwrap().device_name.clone()
+    }
+
+    /// Confirms the pending link, as if the QR code was scanned.
+    pub fn approve(&self) {
+        self.approvals.send(Ok(())).ok();
+    }
+
+    /// Fails the pending link.
+    pub fn reject(&self, error: BackendError) {
+        self.approvals.send(Err(error)).ok();
+    }
+
+    /// Makes the next account load fail.
+    pub fn fail_load(&self, error: BackendError) {
+        self.state.lock().unwrap().load_failure = Some(error);
     }
 }

@@ -11,6 +11,7 @@ publish.workspace = true
 argon2.workspace = true
 directories.workspace = true
 futures.workspace = true
+gethostname.workspace = true
 keyring.workspace = true
 notify.workspace = true
 presage.workspace = true

@@ -105,7 +105,10 @@ impl Storage {
     ///
     /// On first run with a working keychain, generates a key and stores it
     /// there before the database exists.
-    pub fn find_key(&self, secrets: &impl SecretStore) -> Result<KeyLookup, StorageError> {
+    pub fn find_key<S: SecretStore + ?Sized>(
+        &self,
+        secrets: &S,
+    ) -> Result<KeyLookup, StorageError> {
         if self.paths.key_file.exists() {
             tracing::info!("database is passphrase-encrypted");
             return Ok(KeyLookup::NeedsPassphrase);
@@ -159,6 +162,35 @@ impl Storage {
         let key = key_file.derive(passphrase)?;
         key_file.write(&self.paths.key_file)?;
         Ok(key)
+    }
+
+    /// Deletes the database, its WAL files, the key file and the keychain
+    /// entry. Blocking. The database must not be open.
+    pub fn wipe<S: SecretStore + ?Sized>(&self, secrets: &S) -> Result<(), StorageError> {
+        let database = self.paths.database.as_os_str();
+        let mut files = vec![self.paths.database.clone(), self.paths.key_file.clone()];
+        for suffix in ["-wal", "-shm"] {
+            let mut name = database.to_owned();
+            name.push(suffix);
+            files.push(name.into());
+        }
+        for file in files {
+            match std::fs::remove_file(&file) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        match secrets.delete() {
+            Ok(()) => {}
+            // A leftover key is replaced on the next first run.
+            Err(SecretError::Unavailable(error)) => {
+                tracing::warn!(%error, "keychain unavailable; old key left in place");
+            }
+            Err(SecretError::Failed(error)) => return Err(StorageError::Keychain(error)),
+        }
+        tracing::info!("local data wiped");
+        Ok(())
     }
 
     /// Opens the database, creating it if needed, and runs migrations.

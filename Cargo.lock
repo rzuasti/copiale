@@ -1311,6 +1311,7 @@ dependencies = [
  "copiale-testkit",
  "directories",
  "futures",
+ "gethostname",
  "keyring",
  "log",
  "notify",
