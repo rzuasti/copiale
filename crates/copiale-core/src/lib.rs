@@ -21,8 +21,9 @@ pub use actor::{
 };
 pub use backend::{BackendError, Incoming, Linker, SignalBackend};
 pub use model::{
-    AccountSettings, Attachment, Content, ConversationId, ConversationSummary, Destination,
-    Direction, GroupId, GroupInfo, GroupMasterKey, GroupRef, GroupUpdate, IncomingMessage, Member,
-    Message, MessageBody, MessageId, MessagePreview, MessageStatus, Peer, PhoneNumber, ReceiptKind,
-    SentMessage, ServiceId, Timestamp, Unsupported,
+    AccountSettings, Attachment, Change, ChatRef, Content, ConversationId, ConversationSummary,
+    Destination, Direction, GroupId, GroupInfo, GroupMasterKey, GroupRef, GroupUpdate,
+    IncomingMessage, Member, Message, MessageBody, MessageChange, MessageId, MessagePreview,
+    MessageRef, MessageStatus, Peer, PhoneNumber, Quote, ReceiptKind, SentMessage, ServiceId,
+    Timestamp, Unsupported,
 };

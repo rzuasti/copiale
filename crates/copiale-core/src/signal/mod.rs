@@ -17,8 +17,9 @@ use presage::libsignal_service::proto;
 use presage::libsignal_service::proto::call_message::offer;
 use presage::libsignal_service::proto::sync_message::{self, Content as SyncContent, Sent};
 use presage::libsignal_service::proto::{
-    AttachmentPointer, CallMessage, DataMessage, GroupContextV2, ReceiptMessage, SyncMessage,
-    TypingMessage, attachment_pointer, data_message, receipt_message, typing_message,
+    AddressableMessage, AttachmentPointer, CallMessage, ConversationIdentifier, DataMessage,
+    EditMessage, GroupContextV2, ReceiptMessage, SyncMessage, TypingMessage, addressable_message,
+    attachment_pointer, conversation_identifier, data_message, receipt_message, typing_message,
 };
 use presage::libsignal_service::protocol::{Aci, ServiceId as SignalServiceId};
 use presage::libsignal_service::push_service::ServiceError;
@@ -31,9 +32,9 @@ use tokio::task::JoinHandle;
 
 use crate::backend::{BackendError, Incoming, Linker, SignalBackend};
 use crate::model::{
-    self, Attachment, Destination, GroupId, GroupInfo, GroupMasterKey, GroupRef, GroupUpdate,
-    IncomingMessage, Member, MessageBody, ReceiptKind, SentMessage, ServiceId, Timestamp,
-    Unsupported,
+    self, Attachment, Change, ChatRef, Destination, GroupId, GroupInfo, GroupMasterKey, GroupRef,
+    GroupUpdate, IncomingMessage, Member, MessageBody, MessageChange, MessageRef, Quote,
+    ReceiptKind, SentMessage, ServiceId, Timestamp, Unsupported,
 };
 use crate::storage::Database;
 use store::AppStore;
@@ -451,6 +452,7 @@ fn incoming(received: Received) -> Option<Incoming> {
     match received {
         Received::QueueEmpty => Some(Incoming::QueueEmpty),
         Received::Content(content) => signal(&content)
+            .or_else(|| message_change(&content).map(Incoming::Change))
             .or_else(|| received_message(&content).map(Incoming::Message))
             .or_else(|| sent_message(&content).map(Incoming::Sent)),
         Received::Contacts => Some(Incoming::ContactsSynced),
@@ -516,6 +518,39 @@ fn signal(content: &Content) -> Option<Incoming> {
             Some(Incoming::ReadElsewhere(read))
         }
         ContentBody::SynchronizeMessage(SyncMessage {
+            content: Some(SyncContent::DeleteForMe(delete)),
+            ..
+        }) => {
+            let messages = delete
+                .message_deletes
+                .iter()
+                .filter_map(|deletes| {
+                    let chat = chat_ref(deletes.conversation.as_ref()?)?;
+                    Some(deletes.messages.iter().filter_map(move |message| {
+                        Some(MessageRef {
+                            chat,
+                            author: Some(message_author(message)?),
+                            sent_at: Timestamp::from_millis(message.sent_timestamp?),
+                        })
+                    }))
+                })
+                .flatten()
+                .collect();
+            let whole = delete
+                .conversation_deletes
+                .iter()
+                .map(|delete| delete.conversation.as_ref());
+            let local = delete
+                .local_only_conversation_deletes
+                .iter()
+                .map(|delete| delete.conversation.as_ref());
+            let conversations = whole.chain(local).flatten().filter_map(chat_ref).collect();
+            Some(Incoming::DeletedForMe {
+                messages,
+                conversations,
+            })
+        }
+        ContentBody::SynchronizeMessage(SyncMessage {
             content: Some(SyncContent::Configuration(configuration)),
             ..
         }) => Some(Incoming::Settings {
@@ -524,6 +559,38 @@ fn signal(content: &Content) -> Option<Incoming> {
         }),
         _ => None,
     }
+}
+
+/// A conversation as another device names it; `None` for phone numbers
+/// alone, which conversations aren't keyed by.
+fn chat_ref(conversation: &ConversationIdentifier) -> Option<ChatRef> {
+    match conversation.identifier.as_ref()? {
+        conversation_identifier::Identifier::ThreadServiceId(id) => {
+            let id = SignalServiceId::parse_from_service_id_string(id)?;
+            Some(ChatRef::Contact(ServiceId::new(id.raw_uuid())))
+        }
+        conversation_identifier::Identifier::ThreadServiceIdBinary(id) => {
+            let id = SignalServiceId::parse_from_service_id_binary(id)?;
+            Some(ChatRef::Contact(ServiceId::new(id.raw_uuid())))
+        }
+        conversation_identifier::Identifier::ThreadGroupId(id) => Some(ChatRef::Group(
+            GroupId::new(<[u8; 32]>::try_from(id.as_slice()).ok()?),
+        )),
+        conversation_identifier::Identifier::ThreadE164(_) => None,
+    }
+}
+
+fn message_author(message: &AddressableMessage) -> Option<ServiceId> {
+    let id = match message.author.as_ref()? {
+        addressable_message::Author::AuthorServiceId(id) => {
+            SignalServiceId::parse_from_service_id_string(id)?
+        }
+        addressable_message::Author::AuthorServiceIdBinary(id) => {
+            SignalServiceId::parse_from_service_id_binary(id)?
+        }
+        addressable_message::Author::AuthorE164(_) => return None,
+    };
+    Some(ServiceId::new(id.raw_uuid()))
 }
 
 /// A message from another account, 1:1 or in a group, or a call to it.
@@ -556,44 +623,116 @@ fn received_message(content: &Content) -> Option<IncomingMessage> {
 
 /// A message this account sent from another device, 1:1 or in a group.
 fn sent_message(content: &Content) -> Option<SentMessage> {
-    let ContentBody::SynchronizeMessage(SyncMessage {
-        content: Some(SyncContent::Sent(sent)),
-        ..
-    }) = &content.body
-    else {
-        return None;
-    };
-    let Sent {
-        message: Some(message),
-        timestamp: Some(timestamp),
-        ..
-    } = sent
-    else {
-        return None;
-    };
-    let destination = match &message.group_v2 {
-        Some(context) => Destination::Group(group_ref(context)?),
-        None => {
-            let recipient = sent
-                .destination_service_id_binary
-                .as_deref()
-                .and_then(SignalServiceId::parse_from_service_id_binary)
-                .or_else(|| {
-                    sent.destination_service_id
-                        .as_deref()
-                        .and_then(SignalServiceId::parse_from_service_id_string)
-                })?;
-            Destination::Contact(ServiceId::new(recipient.raw_uuid()))
-        }
-    };
-    let group = match destination {
-        Destination::Group(group) => Some(group),
-        Destination::Contact(_) => None,
-    };
+    let sent = sync_sent(content)?;
+    let message = sent.message.as_ref()?;
+    let destination = sent_destination(sent, message)?;
     Some(SentMessage {
         destination,
-        timestamp: Timestamp::from_millis(*timestamp),
-        content: data_content(message, group)?,
+        timestamp: Timestamp::from_millis(sent.timestamp?),
+        content: data_content(message, group_of(destination))?,
+    })
+}
+
+/// A sync copy of a message sent from another of this account's devices.
+fn sync_sent(content: &Content) -> Option<&Sent> {
+    match &content.body {
+        ContentBody::SynchronizeMessage(SyncMessage {
+            content: Some(SyncContent::Sent(sent)),
+            ..
+        }) => Some(sent),
+        _ => None,
+    }
+}
+
+/// Where a message sent from another device went.
+fn sent_destination(sent: &Sent, message: &DataMessage) -> Option<Destination> {
+    if let Some(context) = &message.group_v2 {
+        return Some(Destination::Group(group_ref(context)?));
+    }
+    let recipient = sent
+        .destination_service_id_binary
+        .as_deref()
+        .and_then(SignalServiceId::parse_from_service_id_binary)
+        .or_else(|| {
+            sent.destination_service_id
+                .as_deref()
+                .and_then(SignalServiceId::parse_from_service_id_string)
+        })?;
+    Some(Destination::Contact(ServiceId::new(recipient.raw_uuid())))
+}
+
+fn group_of(destination: Destination) -> Option<GroupRef> {
+    match destination {
+        Destination::Group(group) => Some(group),
+        Destination::Contact(_) => None,
+    }
+}
+
+/// An edit or delete of an earlier message, from its author or from
+/// another of this account's devices.
+fn message_change(content: &Content) -> Option<MessageChange> {
+    let sender = ServiceId::new(content.metadata.sender.raw_uuid());
+    let client_timestamp = || content.metadata.client_timestamp.timestamp_millis().max(0) as u64;
+    let in_conversation = |message: &DataMessage| -> Option<Destination> {
+        match &message.group_v2 {
+            Some(context) => Some(Destination::Group(group_ref(context)?)),
+            None => Some(Destination::Contact(sender)),
+        }
+    };
+    let (destination, author, target, change) = match &content.body {
+        ContentBody::DataMessage(
+            message @ DataMessage {
+                delete: Some(delete),
+                ..
+            },
+        ) => (
+            in_conversation(message)?,
+            Some(sender),
+            delete.target_sent_timestamp?,
+            Change::Delete,
+        ),
+        ContentBody::EditMessage(EditMessage {
+            target_sent_timestamp: Some(target),
+            data_message: Some(message),
+        }) => {
+            let destination = in_conversation(message)?;
+            let edit = Change::Edit {
+                content: data_content(message, group_of(destination))?,
+                at: Timestamp::from_millis(message.timestamp.unwrap_or_else(client_timestamp)),
+            };
+            (destination, Some(sender), *target, edit)
+        }
+        ContentBody::SynchronizeMessage(_) => {
+            let sent = sync_sent(content)?;
+            if let Some(EditMessage {
+                target_sent_timestamp: Some(target),
+                data_message: Some(message),
+            }) = &sent.edit_message
+            {
+                let destination = sent_destination(sent, message)?;
+                let edit = Change::Edit {
+                    content: data_content(message, group_of(destination))?,
+                    at: Timestamp::from_millis(message.timestamp.or(sent.timestamp)?),
+                };
+                (destination, None, *target, edit)
+            } else {
+                let message = sent.message.as_ref()?;
+                let target = message.delete.as_ref()?.target_sent_timestamp?;
+                (
+                    sent_destination(sent, message)?,
+                    None,
+                    target,
+                    Change::Delete,
+                )
+            }
+        }
+        _ => return None,
+    };
+    Some(MessageChange {
+        destination,
+        author,
+        target: Timestamp::from_millis(target),
+        change,
     })
 }
 
@@ -637,6 +776,7 @@ fn data_content(message: &DataMessage, group: Option<GroupRef>) -> Option<model:
         return Some(model::Content::Text {
             body: MessageBody::new(body),
             attachments,
+            quote: message.quote.as_ref().and_then(quote),
         });
     }
     let unsupported = if !message.contact.is_empty() {
@@ -654,9 +794,15 @@ fn data_content(message: &DataMessage, group: Option<GroupRef>) -> Option<model:
 }
 
 fn attachment(pointer: &AttachmentPointer) -> Attachment {
-    let flags = pointer.flags.unwrap_or(0);
+    attachment_kind(
+        pointer.content_type.as_deref().unwrap_or(""),
+        pointer.flags.unwrap_or(0),
+        pointer.file_name.as_deref(),
+    )
+}
+
+fn attachment_kind(kind: &str, flags: u32, file_name: Option<&str>) -> Attachment {
     let has = |flag: attachment_pointer::Flags| flags & flag as u32 != 0;
-    let kind = pointer.content_type.as_deref().unwrap_or("");
     if has(attachment_pointer::Flags::Gif) || kind == "image/gif" {
         Attachment::Gif
     } else if kind.starts_with("image/") {
@@ -669,9 +815,35 @@ fn attachment(pointer: &AttachmentPointer) -> Attachment {
         Attachment::Audio
     } else {
         Attachment::File {
-            name: pointer.file_name.clone(),
+            name: file_name.map(Into::into),
         }
     }
+}
+
+/// The message a reply quotes; `None` without its author or time.
+fn quote(quote: &data_message::Quote) -> Option<Quote> {
+    let author = quote
+        .author_aci_binary
+        .as_deref()
+        .and_then(|bytes| uuid::Uuid::from_slice(bytes).ok())
+        .or_else(|| quote.author_aci.as_deref()?.parse().ok())?;
+    let attachment = quote.attachments.first().map(|attachment| {
+        attachment_kind(
+            attachment.content_type.as_deref().unwrap_or(""),
+            attachment
+                .thumbnail
+                .as_ref()
+                .and_then(|t| t.flags)
+                .unwrap_or(0),
+            attachment.file_name.as_deref(),
+        )
+    });
+    Some(Quote {
+        author: Some(ServiceId::new(author)),
+        sent_at: Timestamp::from_millis(quote.id?),
+        text: quote.text.clone().unwrap_or_default(),
+        attachment,
+    })
 }
 
 /// The changes in an encrypted group change; `None` if it can't be read.
@@ -853,6 +1025,7 @@ mod tests {
                         name: Some("report.pdf".into())
                     },
                 ],
+                quote: None,
             })
         );
     }
@@ -868,6 +1041,7 @@ mod tests {
             Some(model::Content::Text {
                 body: MessageBody::new(""),
                 attachments: vec![Attachment::Image],
+                quote: None,
             })
         );
     }
@@ -1252,6 +1426,206 @@ mod tests {
             Some(Incoming::Settings {
                 read_receipts: Some(true),
                 typing_indicators: Some(false),
+            })
+        );
+    }
+
+    #[test]
+    fn replies_carry_their_quote() {
+        let message = DataMessage {
+            body: Some("agreed".into()),
+            quote: Some(data_message::Quote {
+                id: Some(50),
+                author_aci: Some(OTHER.to_string()),
+                text: Some("ship it?".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let attachment_only = data_message::Quote {
+            id: Some(51),
+            author_aci_binary: Some(OTHER.as_bytes().to_vec()),
+            attachments: vec![data_message::quote::QuotedAttachment {
+                content_type: Some("image/jpeg".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            data(message),
+            Some(model::Content::Text {
+                body: MessageBody::new("agreed"),
+                attachments: Vec::new(),
+                quote: Some(Quote {
+                    author: Some(ServiceId::new(OTHER)),
+                    sent_at: Timestamp::from_millis(50),
+                    text: "ship it?".into(),
+                    attachment: None,
+                }),
+            })
+        );
+        let quoted = quote(&attachment_only).unwrap();
+        assert_eq!(quoted.text, "");
+        assert_eq!(quoted.attachment, Some(Attachment::Image));
+        assert_eq!(quote(&data_message::Quote::default()), None);
+    }
+
+    #[test]
+    fn maps_deletes_and_edits() {
+        let delete = ContentBody::DataMessage(DataMessage {
+            delete: Some(data_message::Delete {
+                target_sent_timestamp: Some(40),
+            }),
+            group_v2: group_context(Some(KEY.to_vec())),
+            ..Default::default()
+        });
+        assert_eq!(
+            received(delete),
+            Some(Incoming::Change(MessageChange {
+                destination: Destination::Group(GroupRef {
+                    key: GroupMasterKey::new(KEY),
+                    revision: 3,
+                }),
+                author: Some(ServiceId::new(SENDER)),
+                target: Timestamp::from_millis(40),
+                change: Change::Delete,
+            }))
+        );
+
+        let edit = ContentBody::EditMessage(EditMessage {
+            target_sent_timestamp: Some(40),
+            data_message: Some(DataMessage {
+                body: Some("fixed".into()),
+                timestamp: Some(45),
+                ..Default::default()
+            }),
+        });
+        assert_eq!(
+            received(edit),
+            Some(Incoming::Change(MessageChange {
+                destination: Destination::Contact(ServiceId::new(SENDER)),
+                author: Some(ServiceId::new(SENDER)),
+                target: Timestamp::from_millis(40),
+                change: Change::Edit {
+                    content: model::Content::text("fixed"),
+                    at: Timestamp::from_millis(45),
+                },
+            }))
+        );
+    }
+
+    #[test]
+    fn maps_edits_and_deletes_from_the_phone() {
+        let recipient: SignalServiceId = Aci::from(RECIPIENT).into();
+        let edit = sent(Sent {
+            destination_service_id_binary: Some(recipient.service_id_binary()),
+            timestamp: Some(90),
+            edit_message: Some(EditMessage {
+                target_sent_timestamp: Some(80),
+                data_message: sent_data("better", false),
+            }),
+            ..Default::default()
+        });
+        assert_eq!(
+            received(edit),
+            Some(Incoming::Change(MessageChange {
+                destination: Destination::Contact(ServiceId::new(RECIPIENT)),
+                author: None,
+                target: Timestamp::from_millis(80),
+                change: Change::Edit {
+                    content: model::Content::text("better"),
+                    at: Timestamp::from_millis(90),
+                },
+            }))
+        );
+
+        let delete = sent(Sent {
+            timestamp: Some(91),
+            message: Some(DataMessage {
+                delete: Some(data_message::Delete {
+                    target_sent_timestamp: Some(80),
+                }),
+                group_v2: group_context(Some(KEY.to_vec())),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let Some(Incoming::Change(change)) = received(delete) else {
+            panic!("expected a change");
+        };
+        assert_eq!(change.author, None);
+        assert_eq!(change.change, Change::Delete);
+        assert!(matches!(change.destination, Destination::Group(_)));
+    }
+
+    #[test]
+    fn maps_deletes_for_me() {
+        use presage::libsignal_service::proto::sync_message::{DeleteForMe, delete_for_me};
+
+        let contact = ConversationIdentifier {
+            identifier: Some(conversation_identifier::Identifier::ThreadServiceId(
+                OTHER.to_string(),
+            )),
+        };
+        let group = ConversationIdentifier {
+            identifier: Some(conversation_identifier::Identifier::ThreadGroupId(vec![
+                4;
+                32
+            ])),
+        };
+        let phone_only = ConversationIdentifier {
+            identifier: Some(conversation_identifier::Identifier::ThreadE164(
+                "+15550100".into(),
+            )),
+        };
+        let message = |author: Uuid, sent_at| AddressableMessage {
+            sent_timestamp: Some(sent_at),
+            author: Some(addressable_message::Author::AuthorServiceIdBinary(
+                SignalServiceId::from(Aci::from(author)).service_id_binary(),
+            )),
+        };
+        let delete = DeleteForMe {
+            message_deletes: vec![
+                delete_for_me::MessageDeletes {
+                    conversation: Some(contact.clone()),
+                    messages: vec![message(OTHER, 10), message(SENDER, 11)],
+                },
+                delete_for_me::MessageDeletes {
+                    conversation: Some(phone_only.clone()),
+                    messages: vec![message(OTHER, 12)],
+                },
+            ],
+            conversation_deletes: vec![delete_for_me::ConversationDelete {
+                conversation: Some(group),
+                ..Default::default()
+            }],
+            local_only_conversation_deletes: vec![delete_for_me::LocalOnlyConversationDelete {
+                conversation: Some(phone_only),
+            }],
+            ..Default::default()
+        };
+
+        let chat = ChatRef::Contact(ServiceId::new(OTHER));
+        assert_eq!(
+            received(ContentBody::SynchronizeMessage(SyncMessage {
+                content: Some(SyncContent::DeleteForMe(delete)),
+                ..Default::default()
+            })),
+            Some(Incoming::DeletedForMe {
+                messages: vec![
+                    MessageRef {
+                        chat,
+                        author: Some(ServiceId::new(OTHER)),
+                        sent_at: Timestamp::from_millis(10),
+                    },
+                    MessageRef {
+                        chat,
+                        author: Some(ServiceId::new(SENDER)),
+                        sent_at: Timestamp::from_millis(11),
+                    },
+                ],
+                conversations: vec![ChatRef::Group(GroupId::new([4; 32]))],
             })
         );
     }

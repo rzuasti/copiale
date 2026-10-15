@@ -155,6 +155,7 @@ fn identifiers_and_secrets_are_redacted_in_logs() {
         sent_at: Timestamp::from_millis(1),
         received_at: Timestamp::from_millis(2),
         content: Content::text(body.as_str()),
+        edited: false,
         read: false,
         status: None,
     });

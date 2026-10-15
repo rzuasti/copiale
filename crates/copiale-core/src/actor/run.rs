@@ -17,8 +17,8 @@ use super::probe::{Check, Probe};
 use super::{Command, CoreOptions, Event, StorageFailure};
 use crate::backend::{BackendError, Incoming, Linker, SignalBackend};
 use crate::model::{
-    AccountSettings, Content, ConversationId, Destination, GroupRef, MessageBody, MessageId,
-    MessageStatus, ReceiptKind, ServiceId, Timestamp,
+    AccountSettings, Change, ChatRef, Content, ConversationId, Destination, GroupRef, MessageBody,
+    MessageId, MessageRef, MessageStatus, ReceiptKind, ServiceId, Timestamp,
 };
 use crate::storage::{Database, KeyLookup, SecretStore, Storage, StorageError};
 
@@ -223,6 +223,17 @@ impl Core {
             Ok(count) => tracing::info!(count, "unsent messages marked failed"),
             Err(error) => self.database_error(error),
         }
+        let day_ago = Timestamp::now()
+            .as_millis()
+            .saturating_sub(PENDING_CHANGE_LIFETIME_MS);
+        match db
+            .expire_pending_changes(Timestamp::from_millis(day_ago))
+            .await
+        {
+            Ok(0) => {}
+            Ok(count) => tracing::info!(count, "edits and deletes for unknown messages dropped"),
+            Err(error) => self.database_error(error),
+        }
         // Contact names title conversations; ask the phone if there are none.
         if linked_now || !db.has_contacts().await.unwrap_or(false) {
             let request = backend.request_contact_sync();
@@ -342,20 +353,47 @@ impl Core {
                         delay = self.options.reconnect_initial;
                         self.emit(Event::Synced);
                     }
-                    Some(Incoming::Message(message)) => {
+                    Some(Incoming::Message(mut message)) => {
                         let destination = message
                             .group
                             .map_or(Destination::Contact(message.sender), Destination::Group);
+                        own_quotes(&mut message.content, backend.own_id());
                         self.store(db, &destination, Some(message.sender), message.timestamp, &message.content).await;
                         if let Some(group) = message.group {
                             self.check_group(db, &mut groups, &mut backend, group).await;
                         }
                     }
-                    Some(Incoming::Sent(message)) => {
+                    Some(Incoming::Sent(mut message)) => {
+                        own_quotes(&mut message.content, backend.own_id());
                         self.store(db, &message.destination, None, message.timestamp, &message.content).await;
                         if let Destination::Group(group) = message.destination {
                             self.check_group(db, &mut groups, &mut backend, group).await;
                         }
+                    }
+                    Some(Incoming::Change(mut change)) => {
+                        if let Change::Edit { content, .. } = &mut change.change {
+                            own_quotes(content, backend.own_id());
+                        }
+                        match db.apply_change(&change).await {
+                            Ok(Some(message)) => {
+                                let conversation = message.conversation;
+                                self.emit(Event::MessageUpdated(message));
+                                self.send_conversation(db, conversation).await;
+                            }
+                            Ok(None) => tracing::debug!("change kept or ignored"),
+                            Err(error) => self.database_error(error),
+                        }
+                    }
+                    Some(Incoming::DeletedForMe { messages, conversations }) => {
+                        let me = backend.own_id();
+                        let messages: Vec<_> = messages
+                            .into_iter()
+                            .map(|message| MessageRef {
+                                author: message.author.filter(|author| *author != me),
+                                ..message
+                            })
+                            .collect();
+                        self.delete_for_me(db, &messages, &conversations).await;
                     }
                     Some(Incoming::Receipt { sender, kind, timestamps }) => {
                         // Without our read receipts, theirs aren't shown either.
@@ -459,6 +497,37 @@ impl Core {
                 probe.stop();
                 outbox.disconnected();
                 retry_at = Some(self.disconnected(error, &mut delay));
+            }
+        }
+    }
+
+    /// Removes messages and conversations deleted on another device.
+    async fn delete_for_me(
+        &self,
+        db: &Database,
+        messages: &[MessageRef],
+        conversations: &[ChatRef],
+    ) {
+        match db.delete_messages(messages).await {
+            Ok(deleted) => {
+                let mut changed = Vec::new();
+                for (conversation, id) in deleted {
+                    self.emit(Event::MessageRemoved { conversation, id });
+                    if !changed.contains(&conversation) {
+                        changed.push(conversation);
+                    }
+                }
+                for conversation in changed {
+                    self.send_conversation(db, conversation).await;
+                }
+            }
+            Err(error) => self.database_error(error),
+        }
+        for chat in conversations {
+            match db.delete_conversation(*chat).await {
+                Ok(Some(conversation)) => self.emit(Event::ConversationRemoved(conversation)),
+                Ok(None) => {}
+                Err(error) => self.database_error(error),
             }
         }
     }
@@ -628,6 +697,20 @@ fn failure(error: StorageError) -> StorageFailure {
         StorageError::KeychainUnavailable(error) => StorageFailure::KeychainUnavailable(error),
         StorageError::WrongKey => StorageFailure::WrongKey,
         other => StorageFailure::Other(other.to_string()),
+    }
+}
+
+/// How long an edit or delete waits for its message.
+const PENDING_CHANGE_LIFETIME_MS: u64 = 24 * 3600 * 1000;
+
+/// Quotes of this account's messages name no author.
+fn own_quotes(content: &mut Content, me: ServiceId) {
+    if let Content::Text {
+        quote: Some(quote), ..
+    } = content
+        && quote.author == Some(me)
+    {
+        quote.author = None;
     }
 }
 

@@ -120,6 +120,14 @@ pub enum Event {
     DatabaseError(String),
     /// A stored message changed, e.g. its status.
     MessageUpdated(Message),
+    /// A message was deleted for this account only; gone from storage.
+    /// [`Event::ConversationUpdated`] follows.
+    MessageRemoved {
+        conversation: ConversationId,
+        id: MessageId,
+    },
+    /// A conversation and its messages were deleted.
+    ConversationRemoved(ConversationId),
     /// `member` started or stopped typing in `conversation`. Treat it as
     /// stopped after [`TYPING_TIMEOUT`] without news, or once a message
     /// from them arrives.

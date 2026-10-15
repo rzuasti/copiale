@@ -5,8 +5,8 @@ use futures::stream::LocalBoxStream;
 use tokio::sync::oneshot;
 
 use crate::model::{
-    Destination, GroupId, GroupInfo, GroupMasterKey, IncomingMessage, MessageBody, ReceiptKind,
-    SentMessage, ServiceId, Timestamp,
+    ChatRef, Destination, GroupId, GroupInfo, GroupMasterKey, IncomingMessage, MessageBody,
+    MessageChange, MessageRef, ReceiptKind, SentMessage, ServiceId, Timestamp,
 };
 use crate::storage::Database;
 
@@ -18,6 +18,14 @@ pub enum Incoming {
     Message(IncomingMessage),
     /// Sent by this account from another device.
     Sent(SentMessage),
+    /// An edit or delete of an earlier message.
+    Change(MessageChange),
+    /// Messages and whole conversations deleted on another of this
+    /// account's devices, for this account only.
+    DeletedForMe {
+        messages: Vec<MessageRef>,
+        conversations: Vec<ChatRef>,
+    },
     /// Contacts synced from the phone are now in the store.
     ContactsSynced,
     /// `sender` got or read our messages sent at `timestamps`.

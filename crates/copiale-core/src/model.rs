@@ -141,10 +141,13 @@ impl fmt::Debug for MessageBody {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Content {
-    /// Text, possibly empty, with attachments this client can't show yet.
+    /// Text, possibly empty, with attachments this client can't show yet,
+    /// maybe replying to an earlier message.
     Text {
         body: MessageBody,
         attachments: Vec<Attachment>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        quote: Option<Quote>,
     },
     Sticker {
         emoji: Option<String>,
@@ -162,6 +165,8 @@ pub enum Content {
     GroupChanged(Vec<GroupUpdate>),
     /// Disappearing messages set to this many seconds; `None` turns them off.
     TimerChanged(Option<u32>),
+    /// Deleted by its author.
+    Deleted,
 }
 
 impl Content {
@@ -169,6 +174,7 @@ impl Content {
         Self::Text {
             body: MessageBody::new(body),
             attachments: Vec::new(),
+            quote: None,
         }
     }
 
@@ -194,10 +200,15 @@ impl Content {
 impl fmt::Debug for Content {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Text { body, attachments } => f
+            Self::Text {
+                body,
+                attachments,
+                quote,
+            } => f
                 .debug_struct("Text")
                 .field("body", body)
                 .field("attachments", &attachments.len())
+                .field("quote", quote)
                 .finish(),
             Self::Sticker { .. } => f.write_str("Sticker"),
             Self::Reaction { .. } => f.write_str("Reaction"),
@@ -207,8 +218,70 @@ impl fmt::Debug for Content {
                 f.debug_tuple("GroupChanged").field(&updates.len()).finish()
             }
             Self::TimerChanged(seconds) => f.debug_tuple("TimerChanged").field(seconds).finish(),
+            Self::Deleted => f.write_str("Deleted"),
         }
     }
+}
+
+/// The message a reply quotes, as the reply carries it. `Debug` hides the
+/// text.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Quote {
+    /// The quoted message's author; `None` for this account.
+    pub author: Option<ServiceId>,
+    pub sent_at: Timestamp,
+    /// Its text, possibly empty.
+    pub text: String,
+    /// Its first attachment, for quotes of attachments without text.
+    pub attachment: Option<Attachment>,
+}
+
+impl fmt::Debug for Quote {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Quote")
+            .field("author", &self.author)
+            .field("sent_at", &self.sent_at)
+            .field("text_bytes", &self.text.len())
+            .finish()
+    }
+}
+
+/// A conversation as another device names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChatRef {
+    Contact(ServiceId),
+    Group(GroupId),
+}
+
+/// A message as another device names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MessageRef {
+    pub chat: ChatRef,
+    /// `None` for this account.
+    pub author: Option<ServiceId>,
+    pub sent_at: Timestamp,
+}
+
+/// A change to an earlier message by its author.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MessageChange {
+    /// The conversation it's in.
+    pub destination: Destination,
+    /// The message's author; `None` for this account.
+    pub author: Option<ServiceId>,
+    /// The message's sent time.
+    pub target: Timestamp,
+    pub change: Change,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Change {
+    /// New content, sent at `at`.
+    Edit {
+        content: Content,
+        at: Timestamp,
+    },
+    Delete,
 }
 
 /// An attachment, by what the placeholder calls it. `Debug` hides file
@@ -298,7 +371,8 @@ impl fmt::Debug for GroupUpdate {
 }
 
 /// Milliseconds since the Unix epoch; Signal's message timestamp.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct Timestamp(u64);
 
 impl Timestamp {
@@ -448,6 +522,8 @@ pub struct Message {
     /// When this device stored it, by the local clock.
     pub received_at: Timestamp,
     pub content: Content,
+    /// Edited by its author since it was sent.
+    pub edited: bool,
     pub read: bool,
     /// Outgoing messages only.
     pub status: Option<MessageStatus>,

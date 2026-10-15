@@ -7,7 +7,7 @@ use std::time::Duration;
 use copiale_core::{
     Attachment, BackendError, Command, Content, ConversationId, ConversationSummary, Direction,
     Event, GroupMasterKey, GroupUpdate, Member, Message, MessageBody, MessageId, MessageStatus,
-    Peer, ServiceId, StorageFailure, Timestamp, Unsupported,
+    Peer, Quote, ServiceId, StorageFailure, Timestamp, Unsupported,
 };
 use copiale_ui::onboarding::Screen;
 use copiale_ui::theme::{self, ActivePalette as _, Appearance, Scheme, Theme};
@@ -191,6 +191,7 @@ fn message(id: i64, direction: Direction, status: Option<MessageStatus>) -> Mess
         sent_at: Timestamp::from_millis(id as u64 * 1000),
         received_at: Timestamp::from_millis(id as u64 * 1000),
         content: Content::text(format!("*message* {id}")),
+        edited: false,
         read: true,
         status,
     }
@@ -676,10 +677,12 @@ fn renders_every_kind_of_content(cx: &mut TestAppContext) {
         Content::Text {
             body: MessageBody::new("caption"),
             attachments: vec![Attachment::Image, Attachment::File { name: None }],
+            quote: None,
         },
         Content::Text {
             body: MessageBody::new(""),
             attachments: vec![Attachment::Voice],
+            quote: None,
         },
         Content::Sticker { emoji: None },
         Content::Reaction {
@@ -689,11 +692,23 @@ fn renders_every_kind_of_content(cx: &mut TestAppContext) {
         Content::Unsupported(Unsupported::Payment),
         Content::GroupChanged(vec![GroupUpdate::Title("Dev".into()), GroupUpdate::Left]),
         Content::TimerChanged(Some(60)),
+        Content::Deleted,
+        Content::Text {
+            body: MessageBody::new("agreed"),
+            attachments: Vec::new(),
+            quote: Some(Quote {
+                author: None,
+                sent_at: Timestamp::from_millis(1),
+                text: "ship it?".into(),
+                attachment: None,
+            }),
+        },
     ];
     let messages = (1..)
         .zip(contents)
         .map(|(id, content)| Message {
             content,
+            edited: id % 2 == 0,
             ..message(id, Direction::Incoming, None)
         })
         .collect();
@@ -712,21 +727,24 @@ fn renders_every_kind_of_content(cx: &mut TestAppContext) {
         (0..chat.row_count())
             .map(|ix| {
                 let row = chat.row(ix).unwrap();
-                (row.placeholders.len(), row.system.len())
+                (row.placeholders.len(), row.system.len(), row.quote.clone())
             })
             .collect::<Vec<_>>()
     });
+    let quote = Some("↳ you: ship it?".to_string());
     assert_eq!(
         rows,
         [
-            (2, 0),
-            (1, 0),
-            (1, 0),
-            (1, 0),
-            (1, 0),
-            (1, 0),
-            (0, 2),
-            (0, 1)
+            (2, 0, None),
+            (1, 0, None),
+            (1, 0, None),
+            (1, 0, None),
+            (1, 0, None),
+            (1, 0, None),
+            (0, 2, None),
+            (0, 1, None),
+            (1, 0, None),
+            (0, 0, quote),
         ]
     );
 }
@@ -890,4 +908,60 @@ fn rows_at_the_end_ease_in_and_out(cx: &mut TestAppContext) {
         dropping.windows(2).all(|pair| pair[1] >= pair[0]),
         "{dropping:?}"
     );
+}
+
+#[gpui_kit::test]
+fn deleting_the_last_message_eases_the_rest_down(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.click(("conversation", 1u64), cx);
+    ui.event(
+        Event::Messages {
+            conversation: ConversationId::new(1),
+            before: None,
+            messages: (1..=80)
+                .map(|id| message(id, Direction::Incoming, None))
+                .collect(),
+        },
+        cx,
+    );
+    ui.settle(cx);
+    let bottom = |ix: usize, cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            let chat = ui.shell.read(cx).chat().unwrap().read(cx);
+            chat.log().bounds_for_item(ix).unwrap().bottom()
+        })
+    };
+    let end = bottom(79, cx);
+
+    ui.event(
+        Event::MessageRemoved {
+            conversation: ConversationId::new(1),
+            id: MessageId::new(80),
+        },
+        cx,
+    );
+
+    let path: Vec<_> = (0..30)
+        .map(|_| {
+            cx.executor().advance_clock(Duration::from_millis(16));
+            ui.frame(cx);
+            bottom(78, cx)
+        })
+        .collect();
+    assert!(path[0] < end - px(4.), "starts where it was: {path:?}");
+    assert!(
+        (path[29] - end).abs() < px(1.),
+        "ends at the bottom: {path:?}"
+    );
+    assert!(path.windows(2).all(|pair| pair[1] >= pair[0]), "{path:?}");
+    let rows = cx.update(|cx| {
+        ui.shell
+            .read(cx)
+            .chat()
+            .unwrap()
+            .read(cx)
+            .chat()
+            .row_count()
+    });
+    assert_eq!(rows, 79);
 }

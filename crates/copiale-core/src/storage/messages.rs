@@ -5,6 +5,7 @@ use presage::store::ContentsStore as _;
 use uuid::Uuid;
 
 use super::StorageError;
+use super::changes::apply_pending;
 use super::database::{Database, database_error};
 use crate::model::{
     Content, ConversationId, ConversationSummary, Destination, Direction, GroupId, GroupInfo,
@@ -32,7 +33,7 @@ macro_rules! summary_query {
 macro_rules! message_columns {
     () => {
         "id, conversation_id, outgoing, author, sent_at, received_at, body, content, read, status, \
-         delivery"
+         delivery, edited_at"
     };
 }
 
@@ -59,6 +60,7 @@ type MessageRow = (
     bool,
     Option<String>,
     Option<String>,
+    Option<i64>,
 );
 type DestinationRow = (Option<Vec<u8>>, Option<Vec<u8>>, Option<i64>);
 
@@ -78,6 +80,10 @@ impl Database {
         let status = (author.is_none() && !content.is_system()).then_some(MessageStatus::Sent);
         let message =
             insert_message(&mut tx, conversation, author, status, sent_at, content).await?;
+        let message = match message {
+            Some(message) => Some(apply_pending(&mut tx, message).await?),
+            None => None,
+        };
         tx.commit().await.map_err(database_error)?;
         Ok(message)
     }
@@ -103,6 +109,7 @@ impl Database {
         let content = Content::Text {
             body: body.clone(),
             attachments: Vec::new(),
+            quote: None,
         };
         let message =
             insert_message(&mut tx, conversation, None, status, sent_at, &content).await?;
@@ -322,16 +329,8 @@ impl Database {
     }
 
     pub(super) async fn message(&self, id: MessageId) -> Result<Option<Message>, StorageError> {
-        let row: Option<MessageRow> = sqlx::query_as(concat!(
-            "SELECT ",
-            message_columns!(),
-            " FROM messages WHERE id = ?"
-        ))
-        .bind(id.get())
-        .fetch_optional(&self.app)
-        .await
-        .map_err(database_error)?;
-        row.map(message).transpose()
+        let mut conn = self.app.acquire().await.map_err(database_error)?;
+        load_message(&mut conn, id).await
     }
 
     /// Marks incoming messages read; returns the newly read ones by author
@@ -441,6 +440,22 @@ impl Database {
     }
 }
 
+pub(super) async fn load_message(
+    conn: &mut sqlx::SqliteConnection,
+    id: MessageId,
+) -> Result<Option<Message>, StorageError> {
+    let row: Option<MessageRow> = sqlx::query_as(concat!(
+        "SELECT ",
+        message_columns!(),
+        " FROM messages WHERE id = ?"
+    ))
+    .bind(id.get())
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(database_error)?;
+    row.map(message).transpose()
+}
+
 /// The conversation with `destination`, created if new.
 async fn conversation_id(
     tx: &mut sqlx::SqliteConnection,
@@ -530,15 +545,20 @@ async fn insert_message(
         sent_at,
         received_at,
         content: content.clone(),
+        edited: false,
         read,
         status,
     }))
 }
 
 /// The `body` and `content` columns for `content`.
-fn content_columns(content: &Content) -> Result<(&str, Option<String>), StorageError> {
+pub(super) fn content_columns(content: &Content) -> Result<(&str, Option<String>), StorageError> {
     match content {
-        Content::Text { body, attachments } if attachments.is_empty() => Ok((body.as_str(), None)),
+        Content::Text {
+            body,
+            attachments,
+            quote: None,
+        } if attachments.is_empty() => Ok((body.as_str(), None)),
         other => {
             let body = other.body().map_or("", MessageBody::as_str);
             let json = serde_json::to_string(other)
@@ -586,6 +606,7 @@ fn message(row: MessageRow) -> Result<Message, StorageError> {
         read,
         status,
         delivery,
+        edited_at,
     ) = row;
     let status = match (status.as_deref(), delivery.as_deref()) {
         (Some("sent"), Some("delivered")) => Some(MessageStatus::Delivered),
@@ -605,6 +626,7 @@ fn message(row: MessageRow) -> Result<Message, StorageError> {
         sent_at: timestamp(sent_at),
         received_at: timestamp(received_at),
         content: content_from(body, content)?,
+        edited: edited_at.is_some(),
         read,
         status,
     })
@@ -1145,6 +1167,7 @@ mod tests {
                         name: Some("a.pdf".into()),
                     },
                 ],
+                quote: None,
             },
             Content::Sticker { emoji: None },
             Content::Call { video: true },

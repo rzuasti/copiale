@@ -30,8 +30,37 @@ pub fn placeholders(content: &Content) -> Vec<String> {
             };
             vec![format!("[{label}] {ON_PHONE}")]
         }
+        Content::Deleted => vec!["this message was deleted".into()],
         Content::GroupChanged(_) | Content::TimerChanged(_) => Vec::new(),
     }
+}
+
+/// One line quoting the message a reply answers; `author` names its
+/// author.
+pub fn quote_line(
+    content: &Content,
+    author: impl Fn(Option<ServiceId>) -> String,
+) -> Option<String> {
+    let Content::Text {
+        quote: Some(quote), ..
+    } = content
+    else {
+        return None;
+    };
+    let text = quote.text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let quoted = if !text.is_empty() {
+        text
+    } else {
+        match &quote.attachment {
+            Some(attachment) => attachment_lines(std::slice::from_ref(attachment))
+                .first()
+                .and_then(|line| line.split(']').next())
+                .map(|label| format!("{label}]"))
+                .unwrap_or_default(),
+            None => "…".into(),
+        }
+    };
+    Some(format!("↳ {}: {quoted}", author(quote.author)))
 }
 
 /// Attachments by kind, counted, in order of appearance; files one per
@@ -151,6 +180,7 @@ mod tests {
         Content::Text {
             body: MessageBody::new("caption"),
             attachments,
+            quote: None,
         }
     }
 
@@ -227,6 +257,45 @@ mod tests {
         for (content, expected) in cases {
             assert_eq!(placeholders(&content), [expected]);
         }
+    }
+
+    #[test]
+    fn deleted_messages_say_so() {
+        assert_eq!(
+            placeholders(&Content::Deleted),
+            ["this message was deleted"]
+        );
+    }
+
+    fn reply(author: Option<ServiceId>, text: &str, attachment: Option<Attachment>) -> Content {
+        Content::Text {
+            body: MessageBody::new("yes"),
+            attachments: Vec::new(),
+            quote: Some(copiale_core::Quote {
+                author,
+                sent_at: copiale_core::Timestamp::from_millis(1),
+                text: text.into(),
+                attachment,
+            }),
+        }
+    }
+
+    #[test]
+    fn quotes_read_as_one_line() {
+        let author = |id: Option<ServiceId>| id.map_or("you".into(), named);
+        assert_eq!(quote_line(&Content::text("hi"), author), None);
+        assert_eq!(
+            quote_line(&reply(Some(id(2)), "ship\n it?", None), author).as_deref(),
+            Some("↳ member2: ship it?")
+        );
+        assert_eq!(
+            quote_line(&reply(None, "", Some(Attachment::Image)), author).as_deref(),
+            Some("↳ you: [image]")
+        );
+        assert_eq!(
+            quote_line(&reply(None, "", None), author).as_deref(),
+            Some("↳ you: …")
+        );
     }
 
     #[test]

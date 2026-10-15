@@ -246,6 +246,15 @@ impl ChatView {
                     }
                 }
                 LogChange::Changed(ix) => self.log.remeasure_items(ix..ix + 1),
+                LogChange::Removed(ix) => {
+                    if ix == self.chat.row_count() && !self.typing_row {
+                        self.ease_removal(ix, cx);
+                    }
+                    self.log.splice(ix..ix + 1, 0);
+                    if ix < self.log.item_count() {
+                        self.log.remeasure_items(ix..ix + 1);
+                    }
+                }
             }
         }
         self.sync_typing_row(cx);
@@ -790,14 +799,16 @@ fn render_log_row(row: Row<'_>, window: &mut Window, cx: &mut Context<ChatView>)
             .into_any_element();
     }
     let placeholders: Vec<_> = row
-        .placeholders
+        .quote
         .iter()
+        .chain(&row.placeholders)
         .map(|line| {
             div()
                 .font_family(mono.clone())
                 .text_size(PREFIX_SIZE)
                 .line_height(line_height)
                 .text_color(muted)
+                .truncate()
                 .child(line.clone())
         })
         .collect();
@@ -828,6 +839,13 @@ fn render_log_row(row: Row<'_>, window: &mut Window, cx: &mut Context<ChatView>)
                             .selectable(true)
                         })),
                 )
+                .children(message.edited.then(|| {
+                    div()
+                        .font_family(mono.clone())
+                        .text_xs()
+                        .text_color(muted)
+                        .child("edited")
+                }))
                 .children(status.map(|(status, color)| {
                     div()
                         .font_family(mono.clone())

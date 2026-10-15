@@ -10,7 +10,7 @@ use copiale_core::{
     MessageBody, MessageId, MessageStatus, Peer, ServiceId, TYPING_TIMEOUT, Timestamp,
 };
 
-use super::content::{placeholders, system_lines};
+use super::content::{placeholders, quote_line, system_lines};
 use super::time::Clock;
 
 /// Messages loaded per page.
@@ -39,6 +39,8 @@ pub enum LogChange {
     Inserted { at: usize, count: usize },
     /// The row at this index changed.
     Changed(usize),
+    /// The row at this index is gone; the one now there may look different.
+    Removed(usize),
 }
 
 /// What the view does after a change.
@@ -65,6 +67,8 @@ pub struct Row<'a> {
     pub prefix: Prefix,
     /// Whether the message starts its group, so shows the prefix.
     pub leads: bool,
+    /// The message a reply quotes, as one line above it.
+    pub quote: Option<String>,
     /// Muted lines for content the log can't show, above any text.
     pub placeholders: Vec<String>,
     /// System lines (group and timer changes); the row shows only these.
@@ -255,6 +259,10 @@ impl Chat {
                 time: self.clock.time(first.sent_at),
             },
             leads: start == ix,
+            quote: quote_line(&message.content, |author| match author {
+                Some(author) => self.author_name(author),
+                None => "you".into(),
+            }),
             placeholders: placeholders(&message.content),
             system,
             day: new_day.then(|| self.clock.day_label(day)),
@@ -334,6 +342,17 @@ impl Chat {
                 }
             }
             Event::MessageUpdated(message) => return self.updated(message, None),
+            Event::MessageRemoved { conversation, id } => {
+                return self.removed(*conversation, *id);
+            }
+            Event::ConversationRemoved(id) => {
+                self.conversations.retain(|summary| summary.id != *id);
+                self.typing.retain(|typing| typing.conversation != *id);
+                if self.open_id() == Some(*id) {
+                    self.open = None;
+                    return Effects::log(LogChange::Reset(0));
+                }
+            }
             Event::SendFailed { message, error } => {
                 return self.updated(message, Some(error.clone()));
             }
@@ -545,6 +564,19 @@ impl Chat {
         effects
     }
 
+    fn removed(&mut self, conversation: ConversationId, id: MessageId) -> Effects {
+        let Some(log) = self.open.as_mut().filter(|log| log.id == conversation) else {
+            return Effects::default();
+        };
+        let Some(ix) = log.messages.iter().position(|m| m.id == id) else {
+            return Effects::default();
+        };
+        log.messages.remove(ix);
+        log.errors.remove(&id);
+        log.regroup(&self.clock);
+        Effects::log(LogChange::Removed(ix))
+    }
+
     fn updated(&mut self, message: &Message, error: Option<BackendError>) -> Effects {
         let Some(log) = self
             .open
@@ -650,6 +682,7 @@ mod tests {
             sent_at: Timestamp::from_millis(sent_at),
             received_at: Timestamp::from_millis(sent_at),
             content: Content::text(format!("message {id}")),
+            edited: false,
             read: outgoing,
             status: outgoing.then_some(MessageStatus::Sent),
         }
@@ -1140,6 +1173,7 @@ mod tests {
             content: Content::Text {
                 body: MessageBody::new("look"),
                 attachments: vec![Attachment::Image],
+                quote: None,
             },
             ..from(3, 1, today + 2 * MINUTE)
         };
@@ -1231,5 +1265,42 @@ mod tests {
         };
         assert!(typing("h"));
         assert!(!typing("  "));
+    }
+
+    #[test]
+    fn removed_messages_leave_the_log() {
+        let today = NOW - 5 * MINUTE;
+        let mut chat = opened(vec![
+            incoming(1, today),
+            incoming(2, today + MINUTE),
+            incoming(3, today + 2 * MINUTE),
+        ]);
+        let removed = chat.apply(
+            &Event::MessageRemoved {
+                conversation: ConversationId::new(1),
+                id: MessageId::new(1),
+            },
+            true,
+        );
+        assert_eq!(removed.log, [LogChange::Removed(0)]);
+        assert_eq!(chat.row_count(), 2);
+        assert!(chat.row(0).unwrap().leads, "the next message leads now");
+        let elsewhere = chat.apply(
+            &Event::MessageRemoved {
+                conversation: ConversationId::new(2),
+                id: MessageId::new(2),
+            },
+            true,
+        );
+        assert!(elsewhere.log.is_empty());
+    }
+
+    #[test]
+    fn removed_conversations_close() {
+        let mut chat = opened(vec![incoming(1, NOW)]);
+        let removed = chat.apply(&Event::ConversationRemoved(ConversationId::new(1)), true);
+        assert_eq!(removed.log, [LogChange::Reset(0)]);
+        assert_eq!(chat.open_id(), None);
+        assert_eq!(titles(&chat), ["Unknown (0002)"]);
     }
 }

@@ -7,10 +7,11 @@ use std::time::Duration;
 
 use copiale_core::storage::{KdfParams, Passphrase, Storage, StoragePaths};
 use copiale_core::{
-    BackendError, Command, Content, ConversationId, ConversationSummary, CoreHandle, CoreOptions,
-    Destination, Direction, Event, Events, GroupInfo, GroupRef, GroupUpdate, Incoming,
-    IncomingMessage, Member, Message, MessageBody, MessagePreview, MessageStatus, Peer,
-    ReceiptKind, SentMessage, StorageFailure, Timestamp,
+    BackendError, Change, ChatRef, Command, Content, ConversationId, ConversationSummary,
+    CoreHandle, CoreOptions, Destination, Direction, Event, Events, GroupInfo, GroupRef,
+    GroupUpdate, Incoming, IncomingMessage, Member, Message, MessageBody, MessageChange,
+    MessagePreview, MessageRef, MessageStatus, Peer, Quote, ReceiptKind, SentMessage,
+    StorageFailure, Timestamp,
 };
 use copiale_testkit::{
     FAKE_LINK_URL, FakeNetwork, FakePhone, MemorySecretStore, OWN_ID, SentText, fake_backend,
@@ -1616,5 +1617,155 @@ async fn note_to_self_gets_no_typing_or_read_receipts() {
 
     assert!(running.network.read_receipts().is_empty());
     assert!(running.network.typing().is_empty());
+    stop(running).await;
+}
+
+// Edits, deletes and quotes
+
+fn changed(from: u128, target: u64, change: Change) -> Incoming {
+    Incoming::Change(MessageChange {
+        destination: Destination::Contact(service_id(from)),
+        author: Some(service_id(from)),
+        target: Timestamp::from_millis(target),
+        change,
+    })
+}
+
+fn edit(body: &str, at: u64) -> Change {
+    Change::Edit {
+        content: Content::text(body),
+        at: Timestamp::from_millis(at),
+    }
+}
+
+#[tokio::test]
+async fn edits_and_deletes_update_the_message() {
+    let (_dir, mut running) = ready().await;
+    running.network.deliver(incoming(1, 100, "teh"));
+    let original = message_added(&mut running.events).await;
+    conversation_updated(&mut running.events).await;
+
+    running.network.deliver(changed(1, 100, edit("the", 150)));
+    let edited = message_updated(&mut running.events).await;
+    assert_eq!(edited.id, original.id);
+    assert_eq!(edited.content, Content::text("the"));
+    assert!(edited.edited);
+    conversation_updated(&mut running.events).await;
+
+    running.network.deliver(changed(1, 100, Change::Delete));
+    let deleted = message_updated(&mut running.events).await;
+    assert_eq!(deleted.content, Content::Deleted);
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn changes_before_their_message_apply_on_arrival() {
+    let (_dir, mut running) = ready().await;
+
+    running.network.deliver(changed(1, 100, edit("final", 150)));
+    assert!(flush(&mut running).await.is_empty());
+    running.network.deliver(incoming(1, 100, "draft"));
+
+    let message = message_added(&mut running.events).await;
+    assert_eq!(message.content, Content::text("final"));
+    assert!(message.edited);
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn quotes_of_our_messages_name_no_author() {
+    let (_dir, mut running) = ready().await;
+    let reply = |author: u128| Content::Text {
+        body: MessageBody::new("yes"),
+        attachments: Vec::new(),
+        quote: Some(Quote {
+            author: Some(service_id(author)),
+            sent_at: Timestamp::from_millis(50),
+            text: "really?".into(),
+            attachment: None,
+        }),
+    };
+
+    for (sent_at, author) in [(100, OWN_ID), (101, 2)] {
+        running.network.deliver(Incoming::Message(IncomingMessage {
+            sender: service_id(1),
+            group: None,
+            timestamp: Timestamp::from_millis(sent_at),
+            content: reply(author),
+        }));
+    }
+
+    let ours = message_added(&mut running.events).await;
+    let Content::Text {
+        quote: Some(quote), ..
+    } = ours.content
+    else {
+        panic!("expected a quote");
+    };
+    assert_eq!(quote.author, None);
+    conversation_updated(&mut running.events).await;
+    let theirs = message_added(&mut running.events).await;
+    let Content::Text {
+        quote: Some(quote), ..
+    } = theirs.content
+    else {
+        panic!("expected a quote");
+    };
+    assert_eq!(quote.author, Some(service_id(2)));
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn deletes_for_me_remove_messages_and_conversations() {
+    let (_dir, mut running) = ready().await;
+    running.network.deliver(incoming(1, 100, "theirs"));
+    let theirs = message_added(&mut running.events).await;
+    conversation_updated(&mut running.events).await;
+    running.network.deliver(Incoming::Sent(SentMessage {
+        destination: Destination::Contact(service_id(1)),
+        timestamp: Timestamp::from_millis(101),
+        content: Content::text("mine"),
+    }));
+    let mine = message_added(&mut running.events).await;
+    conversation_updated(&mut running.events).await;
+    let chat = ChatRef::Contact(service_id(1));
+
+    running.network.deliver(Incoming::DeletedForMe {
+        messages: vec![
+            MessageRef {
+                chat,
+                author: Some(service_id(1)),
+                sent_at: Timestamp::from_millis(100),
+            },
+            // Our own messages name this account.
+            MessageRef {
+                chat,
+                author: Some(service_id(OWN_ID)),
+                sent_at: Timestamp::from_millis(101),
+            },
+        ],
+        conversations: Vec::new(),
+    });
+
+    for expected in [&theirs, &mine] {
+        assert_eq!(
+            next_event(&mut running.events).await,
+            Event::MessageRemoved {
+                conversation: expected.conversation,
+                id: expected.id,
+            }
+        );
+    }
+    let summary = conversation_updated(&mut running.events).await;
+    assert_eq!(summary.last_message, None);
+
+    running.network.deliver(Incoming::DeletedForMe {
+        messages: Vec::new(),
+        conversations: vec![chat],
+    });
+    assert_eq!(
+        next_event(&mut running.events).await,
+        Event::ConversationRemoved(theirs.conversation)
+    );
     stop(running).await;
 }

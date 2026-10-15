@@ -6,6 +6,7 @@
 //! Key handling is blocking (keychain I/O, key derivation); opening the
 //! database is async.
 
+mod changes;
 mod database;
 mod key;
 mod messages;
