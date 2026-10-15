@@ -36,6 +36,9 @@ pub fn fake_backend() -> (FakeBackend, FakeNetwork) {
     (backend, network)
 }
 
+/// The fake account's own ID.
+pub const OWN_ID: u128 = 0x5e1f;
+
 /// Deterministic group master key for fixtures.
 pub fn group_key(n: u8) -> GroupMasterKey {
     GroupMasterKey::new([n; 32])
@@ -71,6 +74,10 @@ struct State {
     profile_names: HashMap<ServiceId, String>,
     profiles_fetched: HashSet<ServiceId>,
     profile_fetches: usize,
+    settings_sync_requests: usize,
+    read_receipts: Vec<(ServiceId, Vec<Timestamp>)>,
+    read_syncs: Vec<Vec<(ServiceId, Timestamp)>>,
+    typing: Vec<(Destination, bool)>,
 }
 
 /// [`SignalBackend`] driven by a [`FakeNetwork`]. Each `receive` opens a
@@ -154,6 +161,49 @@ impl SignalBackend for FakeBackend {
     async fn request_contact_sync(&mut self) -> Result<(), BackendError> {
         self.state.lock().unwrap().contact_sync_requests += 1;
         Ok(())
+    }
+
+    fn own_id(&self) -> ServiceId {
+        service_id(OWN_ID)
+    }
+
+    async fn request_settings_sync(&mut self) -> Result<(), BackendError> {
+        self.state.lock().unwrap().settings_sync_requests += 1;
+        Ok(())
+    }
+
+    fn send_read_receipts(
+        &mut self,
+        recipient: ServiceId,
+        timestamps: Vec<Timestamp>,
+    ) -> LocalBoxFuture<'static, Result<(), BackendError>> {
+        self.state
+            .lock()
+            .unwrap()
+            .read_receipts
+            .push((recipient, timestamps));
+        async { Ok(()) }.boxed_local()
+    }
+
+    fn send_read_sync(
+        &mut self,
+        read: Vec<(ServiceId, Timestamp)>,
+    ) -> LocalBoxFuture<'static, Result<(), BackendError>> {
+        self.state.lock().unwrap().read_syncs.push(read);
+        async { Ok(()) }.boxed_local()
+    }
+
+    fn send_typing(
+        &mut self,
+        destination: Destination,
+        typing: bool,
+    ) -> LocalBoxFuture<'static, Result<(), BackendError>> {
+        self.state
+            .lock()
+            .unwrap()
+            .typing
+            .push((destination, typing));
+        async { Ok(()) }.boxed_local()
     }
 
     /// The scripted group, with fetched profile names filled in.
@@ -307,6 +357,25 @@ impl FakeNetwork {
     /// Profiles fetched so far.
     pub fn profile_fetches(&self) -> usize {
         self.state.lock().unwrap().profile_fetches
+    }
+
+    pub fn settings_sync_requests(&self) -> usize {
+        self.state.lock().unwrap().settings_sync_requests
+    }
+
+    /// Read receipts sent so far, per recipient.
+    pub fn read_receipts(&self) -> Vec<(ServiceId, Vec<Timestamp>)> {
+        self.state.lock().unwrap().read_receipts.clone()
+    }
+
+    /// Reads synced to the account's other devices so far.
+    pub fn read_syncs(&self) -> Vec<Vec<(ServiceId, Timestamp)>> {
+        self.state.lock().unwrap().read_syncs.clone()
+    }
+
+    /// Typing indicators sent so far.
+    pub fn typing(&self) -> Vec<(Destination, bool)> {
+        self.state.lock().unwrap().typing.clone()
     }
 }
 

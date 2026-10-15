@@ -65,7 +65,15 @@ pub enum Command {
         limit: u32,
     },
     /// Marks incoming messages read; [`Event::ConversationUpdated`] follows.
+    /// Sends read receipts if the account allows them.
     MarkRead(ConversationId),
+    /// The user started or stopped typing in a conversation; tells the
+    /// other side if the account allows typing indicators. Repeat `true`
+    /// freely while typing.
+    Typing {
+        conversation: ConversationId,
+        typing: bool,
+    },
     /// Stops the core; [`Event::Stopped`] follows.
     Shutdown,
 }
@@ -112,6 +120,14 @@ pub enum Event {
     DatabaseError(String),
     /// A stored message changed, e.g. its status.
     MessageUpdated(Message),
+    /// `member` started or stopped typing in `conversation`. Treat it as
+    /// stopped after [`TYPING_TIMEOUT`] without news, or once a message
+    /// from them arrives.
+    Typing {
+        conversation: ConversationId,
+        member: ServiceId,
+        typing: bool,
+    },
     /// Sending failed; `message` is now marked failed.
     SendFailed {
         message: Message,
@@ -126,6 +142,9 @@ pub enum Event {
     /// Last event: the core has stopped and closed storage.
     Stopped,
 }
+
+/// How long a typing indicator lasts without being renewed.
+pub const TYPING_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Why storage can't be opened.
 #[derive(Clone, Debug, PartialEq, Eq)]

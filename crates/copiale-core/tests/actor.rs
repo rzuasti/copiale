@@ -10,11 +10,11 @@ use copiale_core::{
     BackendError, Command, Content, ConversationId, ConversationSummary, CoreHandle, CoreOptions,
     Destination, Direction, Event, Events, GroupInfo, GroupRef, GroupUpdate, Incoming,
     IncomingMessage, Member, Message, MessageBody, MessagePreview, MessageStatus, Peer,
-    SentMessage, StorageFailure, Timestamp,
+    ReceiptKind, SentMessage, StorageFailure, Timestamp,
 };
 use copiale_testkit::{
-    FAKE_LINK_URL, FakeNetwork, FakePhone, MemorySecretStore, SentText, fake_backend, fake_linker,
-    group_key, service_id,
+    FAKE_LINK_URL, FakeNetwork, FakePhone, MemorySecretStore, OWN_ID, SentText, fake_backend,
+    fake_linker, group_key, service_id,
 };
 use tempfile::TempDir;
 
@@ -1388,5 +1388,233 @@ async fn system_lines_and_reactions_arrive_read_but_calls_do_not() {
         .deliver(deliver(Content::Call { video: false }, 102));
     assert!(!message_added(&mut running.events).await.read);
     assert_eq!(conversation_updated(&mut running.events).await.unread, 1);
+    stop(running).await;
+}
+
+// Receipts and typing
+
+/// Delivers everything queued on the connection, then returns the events
+/// it caused.
+async fn flush(running: &mut Running) -> Vec<Event> {
+    running.network.deliver(Incoming::QueueEmpty);
+    let mut events = Vec::new();
+    loop {
+        match next_event(&mut running.events).await {
+            Event::Synced => break events,
+            event => events.push(event),
+        }
+    }
+}
+
+/// Connected, with the phone's settings applied.
+async fn ready_with(read_receipts: bool, typing_indicators: bool) -> (TempDir, Running) {
+    let (dir, mut running) = ready().await;
+    running.network.deliver(Incoming::Settings {
+        read_receipts: Some(read_receipts),
+        typing_indicators: Some(typing_indicators),
+    });
+    flush(&mut running).await;
+    (dir, running)
+}
+
+#[tokio::test]
+async fn settings_are_requested_until_known() {
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = MemorySecretStore::default();
+    let mut running = start(dir.path(), &secrets, true);
+    expect(&mut running.events, Event::Ready).await;
+    expect(&mut running.events, Event::Connected).await;
+    assert_eq!(running.network.settings_sync_requests(), 1);
+    running.network.deliver(Incoming::Settings {
+        read_receipts: Some(true),
+        typing_indicators: None,
+    });
+    flush(&mut running).await;
+    stop(running).await;
+
+    let mut running = start(dir.path(), &secrets, true);
+    expect(&mut running.events, Event::Ready).await;
+    expect(&mut running.events, Event::Connected).await;
+    assert_eq!(running.network.settings_sync_requests(), 0);
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn unknown_settings_send_and_show_nothing() {
+    let (_dir, mut running) = ready().await;
+    running.network.deliver(incoming(1, 100, "hi"));
+    let message = message_added(&mut running.events).await;
+    conversation_updated(&mut running.events).await;
+
+    send(&running, Command::MarkRead(message.conversation));
+    conversation_updated(&mut running.events).await;
+    send(
+        &running,
+        Command::Typing {
+            conversation: message.conversation,
+            typing: true,
+        },
+    );
+    running.network.deliver(Incoming::Typing {
+        sender: service_id(1),
+        group: None,
+        typing: true,
+    });
+
+    assert!(flush(&mut running).await.is_empty());
+    assert!(running.network.read_receipts().is_empty());
+    assert!(running.network.typing().is_empty());
+    assert_eq!(
+        running.network.read_syncs(),
+        [vec![(service_id(1), Timestamp::from_millis(100))]],
+        "our own devices always learn what we read"
+    );
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn each_setting_combination() {
+    for (read_receipts, typing_indicators) in
+        [(false, false), (true, false), (false, true), (true, true)]
+    {
+        let (_dir, mut running) = ready_with(read_receipts, typing_indicators).await;
+        let label = format!("read receipts {read_receipts}, typing {typing_indicators}");
+
+        // Viewing sends read receipts only if enabled.
+        running.network.deliver(incoming(1, 100, "hi"));
+        running.network.deliver(incoming(1, 101, "there"));
+        let message = message_added(&mut running.events).await;
+        conversation_updated(&mut running.events).await;
+        message_added(&mut running.events).await;
+        conversation_updated(&mut running.events).await;
+        let chat = message.conversation;
+        send(&running, Command::MarkRead(chat));
+        conversation_updated(&mut running.events).await;
+        let expected = read_receipts.then(|| {
+            (
+                service_id(1),
+                vec![Timestamp::from_millis(100), Timestamp::from_millis(101)],
+            )
+        });
+        assert_eq!(
+            running.network.read_receipts(),
+            Vec::from_iter(expected),
+            "{label}"
+        );
+
+        // Their receipts: delivered always, read only if enabled.
+        send_text(&running, chat, "reply");
+        let pending = pending_added(&mut running.events).await;
+        message_updated(&mut running.events).await;
+        for kind in [ReceiptKind::Delivered, ReceiptKind::Read] {
+            running.network.deliver(Incoming::Receipt {
+                sender: service_id(1),
+                kind,
+                timestamps: vec![pending.sent_at],
+            });
+        }
+        let statuses: Vec<_> = flush(&mut running)
+            .await
+            .into_iter()
+            .filter_map(|event| match event {
+                Event::MessageUpdated(message) => message.status,
+                _ => None,
+            })
+            .collect();
+        let mut expected = vec![MessageStatus::Delivered];
+        if read_receipts {
+            expected.push(MessageStatus::Read);
+        }
+        assert_eq!(statuses, expected, "{label}");
+
+        // Typing, both ways, only if enabled.
+        running.network.deliver(Incoming::Typing {
+            sender: service_id(1),
+            group: None,
+            typing: true,
+        });
+        let shown = flush(&mut running).await;
+        let expected = typing_indicators.then_some(Event::Typing {
+            conversation: chat,
+            member: service_id(1),
+            typing: true,
+        });
+        assert_eq!(shown, Vec::from_iter(expected), "{label}");
+        for typing in [true, true, false, false] {
+            send(
+                &running,
+                Command::Typing {
+                    conversation: chat,
+                    typing,
+                },
+            );
+        }
+        sync(&mut running).await;
+        let destination = Destination::Contact(service_id(1));
+        let expected = if typing_indicators {
+            vec![(destination, true), (destination, false)]
+        } else {
+            Vec::new()
+        };
+        assert_eq!(running.network.typing(), expected, "{label}");
+        stop(running).await;
+    }
+}
+
+#[tokio::test]
+async fn typing_from_strangers_is_ignored() {
+    let (_dir, mut running) = ready_with(true, true).await;
+
+    running.network.deliver(Incoming::Typing {
+        sender: service_id(9),
+        group: None,
+        typing: true,
+    });
+
+    assert!(flush(&mut running).await.is_empty());
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn reads_on_the_phone_clear_unread_here() {
+    let (_dir, mut running) = ready().await;
+    for sent_at in [100, 101] {
+        running.network.deliver(incoming(1, sent_at, "hi"));
+        message_added(&mut running.events).await;
+        conversation_updated(&mut running.events).await;
+    }
+
+    running.network.deliver(Incoming::ReadElsewhere(vec![(
+        service_id(1),
+        Timestamp::from_millis(101),
+    )]));
+
+    let summary = conversation_updated(&mut running.events).await;
+    assert_eq!(summary.unread, 0);
+    assert!(running.network.read_syncs().is_empty(), "not echoed back");
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn note_to_self_gets_no_typing_or_read_receipts() {
+    let (_dir, mut running) = ready_with(true, true).await;
+    let note = open_chat(&mut running, OWN_ID).await;
+    running.network.deliver(incoming(OWN_ID, 100, "to me"));
+    message_added(&mut running.events).await;
+    conversation_updated(&mut running.events).await;
+
+    send(&running, Command::MarkRead(note));
+    conversation_updated(&mut running.events).await;
+    send(
+        &running,
+        Command::Typing {
+            conversation: note,
+            typing: true,
+        },
+    );
+    sync(&mut running).await;
+
+    assert!(running.network.read_receipts().is_empty());
+    assert!(running.network.typing().is_empty());
     stop(running).await;
 }

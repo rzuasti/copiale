@@ -105,5 +105,6 @@ went unsolved until 2011.
 
 Pre-development. MVP planned (`docs/mvp.md`, Codeberg issues #1–#28);
 M0 (foundations) and M1 (walking skeleton, #7–#11) done. M2: group text
-(#12) and placeholders for non-text content (#13) done. Next: receipts and
-typing indicators (#14).
+(#12), placeholders for non-text content (#13), and receipts and typing
+indicators (#14) done. Next: incoming edits, deletes and quoted replies
+(#15).

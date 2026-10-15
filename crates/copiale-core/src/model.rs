@@ -411,8 +411,28 @@ pub enum MessageStatus {
     Pending,
     /// Accepted by the server.
     Sent,
+    /// On the recipient's device; in a group, on every member's.
+    Delivered,
+    /// Read by the recipient; in a group, by every member.
+    Read,
     /// Sending failed; can be retried.
     Failed,
+}
+
+/// Privacy settings of the account, synced from the phone.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AccountSettings {
+    /// Send read receipts, and show others'.
+    pub read_receipts: bool,
+    /// Send typing indicators, and show others'.
+    pub typing_indicators: bool,
+}
+
+/// Which receipt an account sent for messages of ours.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReceiptKind {
+    Delivered,
+    Read,
 }
 
 /// A stored message.

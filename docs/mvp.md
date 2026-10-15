@@ -10,7 +10,8 @@ Scope, UI design, architecture and work items for the first usable release.
 - 1:1 and group chats: send and receive text.
 - Start a new 1:1 chat from synced contacts.
 - Delivery/read receipts and typing indicators, following the account's
-  settings.
+  settings as synced from the phone (off until known). Groups count as
+  delivered or read once every member has.
 - Edits, remote deletes and quoted replies: render incoming, send own.
 - Disappearing messages: honor timers on incoming and outgoing messages.
 - Emoji: render incoming as color glyphs; OS emoji input works; no picker.
@@ -76,8 +77,10 @@ Scope, UI design, architecture and work items for the first usable release.
     are grouped, indented to the first message's text.
   - **Blocks**: Slack-style name header with grouped messages.
   - **Bubbles**: left/right bubbles.
-- Status (sent, delivered, read), edited marker and disappearing timer shown as
-  small muted glyphs.
+- Status (`…` pending, `✓` sent, `✓✓` delivered, accent `✓✓` read), edited
+  marker and disappearing timer shown as small muted glyphs.
+- Typing: `alice is typing…` as a line after the last message, replaced by
+  their message or removed when they stop; `typing…` in the chat list.
 - Quoted replies render as a one-line muted quote above the message.
 
 ### Typography

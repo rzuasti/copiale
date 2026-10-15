@@ -373,7 +373,12 @@ fn composer_sends_to_the_open_chat(cx: &mut TestAppContext) {
     ui.type_text("there", cx);
     ui.press("enter", cx);
 
-    let commands = ui.core.take();
+    let commands: Vec<_> = ui
+        .core
+        .take()
+        .into_iter()
+        .filter(|command| !matches!(command, Command::Typing { .. }))
+        .collect();
     assert!(
         matches!(
             commands.as_slice(),
@@ -723,5 +728,166 @@ fn renders_every_kind_of_content(cx: &mut TestAppContext) {
             (0, 2),
             (0, 1)
         ]
+    );
+}
+
+#[gpui_kit::test]
+fn typing_is_shown_and_sent(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.open_alice(cx);
+    assert!(!ui.shows("typing", cx));
+
+    ui.event(
+        Event::Typing {
+            conversation: ConversationId::new(1),
+            member: peer(1),
+            typing: true,
+        },
+        cx,
+    );
+    assert!(ui.shows("typing", cx));
+    // A line after the last message, not over it.
+    let items = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            let chat = ui.shell.read(cx).chat().unwrap().read(cx);
+            (chat.log().item_count(), chat.chat().row_count())
+        })
+    };
+    assert_eq!(items(cx), (2, 1));
+    let last_item = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            let chat = ui.shell.read(cx).chat().unwrap().read(cx);
+            chat.log().bounds_for_item(1).unwrap().top()
+        })
+    };
+    let typing_top = last_item(cx);
+
+    // Their message takes the typing line's place.
+    ui.event(
+        Event::MessageAdded(message(11, Direction::Incoming, None)),
+        cx,
+    );
+    assert!(!ui.shows("typing", cx));
+    assert_eq!(items(cx), (2, 2));
+    let bounds = cx.update(|cx| {
+        let chat = ui.shell.read(cx).chat().unwrap().read(cx);
+        chat.log().bounds_for_item(1).unwrap()
+    });
+    assert!(
+        (bounds.top() - typing_top).abs() < px(8.),
+        "{bounds:?} vs {typing_top:?}"
+    );
+
+    // Stopping without a message removes the line.
+    ui.event(
+        Event::Typing {
+            conversation: ConversationId::new(1),
+            member: peer(1),
+            typing: true,
+        },
+        cx,
+    );
+    assert_eq!(items(cx), (3, 2));
+    ui.event(
+        Event::Typing {
+            conversation: ConversationId::new(1),
+            member: peer(1),
+            typing: false,
+        },
+        cx,
+    );
+    assert!(!ui.shows("typing", cx));
+    assert_eq!(items(cx), (2, 2));
+
+    ui.type_text("h", cx);
+    let typing = |commands: Vec<Command>| {
+        commands
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::Typing {
+                    conversation,
+                    typing,
+                } => Some((conversation.get(), typing)),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(typing(ui.core.take()), [(1, true)]);
+    cx.executor().advance_clock(Duration::from_secs(6));
+    ui.frame(cx);
+    assert_eq!(typing(ui.core.take()), [(1, false)], "stops after a pause");
+}
+
+#[gpui_kit::test]
+fn rows_at_the_end_ease_in_and_out(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.click(("conversation", 1u64), cx);
+    ui.event(
+        Event::Messages {
+            conversation: ConversationId::new(1),
+            before: None,
+            messages: (1..=80)
+                .map(|id| message(id, Direction::Incoming, None))
+                .collect(),
+        },
+        cx,
+    );
+    ui.settle(cx);
+    let log = |cx: &mut TestAppContext| {
+        cx.update(|cx| ui.shell.read(cx).chat().unwrap().read(cx).log().clone())
+    };
+    let bottom =
+        |ix: usize, cx: &mut TestAppContext| log(cx).bounds_for_item(ix).map(|b| b.bottom());
+    let frames = |ix: usize, cx: &mut TestAppContext| {
+        (0..30)
+            .map(|_| {
+                cx.executor().advance_clock(Duration::from_millis(16));
+                ui.frame(cx);
+                bottom(ix, cx).unwrap()
+            })
+            .collect::<Vec<_>>()
+    };
+    let end = bottom(79, cx).unwrap();
+
+    // A new message rises into view.
+    ui.event(
+        Event::MessageAdded(message(81, Direction::Incoming, None)),
+        cx,
+    );
+    let rising = frames(80, cx);
+    assert!(rising[0] > end + px(4.), "starts lower: {rising:?}");
+    assert!(
+        (rising[29] - end).abs() < px(1.),
+        "ends at the bottom: {rising:?}"
+    );
+    assert!(
+        rising.windows(2).all(|pair| pair[1] <= pair[0]),
+        "{rising:?}"
+    );
+    assert!(log(cx).is_following_tail());
+
+    // The typing line comes and goes; the last message drops back.
+    for typing in [true, false] {
+        ui.event(
+            Event::Typing {
+                conversation: ConversationId::new(1),
+                member: peer(1),
+                typing,
+            },
+            cx,
+        );
+        if typing {
+            frames(81, cx);
+        }
+    }
+    let dropping = frames(80, cx);
+    assert!(dropping[0] < end - px(4.), "starts higher: {dropping:?}");
+    assert!(
+        (dropping[29] - end).abs() < px(1.),
+        "ends at the bottom: {dropping:?}"
+    );
+    assert!(
+        dropping.windows(2).all(|pair| pair[1] >= pair[0]),
+        "{dropping:?}"
     );
 }

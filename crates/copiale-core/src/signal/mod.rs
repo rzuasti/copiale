@@ -15,10 +15,10 @@ use presage::libsignal_service::groups_v2::{GroupChange, GroupOperations, Role};
 use presage::libsignal_service::prelude::{GroupSecretParams, ProtobufMessage as _};
 use presage::libsignal_service::proto;
 use presage::libsignal_service::proto::call_message::offer;
-use presage::libsignal_service::proto::sync_message::{Content as SyncContent, Sent};
+use presage::libsignal_service::proto::sync_message::{self, Content as SyncContent, Sent};
 use presage::libsignal_service::proto::{
-    AttachmentPointer, CallMessage, DataMessage, GroupContextV2, SyncMessage, attachment_pointer,
-    data_message,
+    AttachmentPointer, CallMessage, DataMessage, GroupContextV2, ReceiptMessage, SyncMessage,
+    TypingMessage, attachment_pointer, data_message, receipt_message, typing_message,
 };
 use presage::libsignal_service::protocol::{Aci, ServiceId as SignalServiceId};
 use presage::libsignal_service::push_service::ServiceError;
@@ -31,8 +31,9 @@ use tokio::task::JoinHandle;
 
 use crate::backend::{BackendError, Incoming, Linker, SignalBackend};
 use crate::model::{
-    self, Attachment, Destination, GroupInfo, GroupMasterKey, GroupRef, GroupUpdate,
-    IncomingMessage, Member, MessageBody, SentMessage, ServiceId, Timestamp, Unsupported,
+    self, Attachment, Destination, GroupId, GroupInfo, GroupMasterKey, GroupRef, GroupUpdate,
+    IncomingMessage, Member, MessageBody, ReceiptKind, SentMessage, ServiceId, Timestamp,
+    Unsupported,
 };
 use crate::storage::Database;
 use store::AppStore;
@@ -279,8 +280,115 @@ impl SignalBackend for PresageBackend {
         .boxed_local()
     }
 
+    fn own_id(&self) -> ServiceId {
+        ServiceId::new(self.manager.registration_data().service_ids.aci)
+    }
+
     async fn request_contact_sync(&mut self) -> Result<(), BackendError> {
         self.manager.request_contacts().await.map_err(presage_error)
+    }
+
+    async fn request_settings_sync(&mut self) -> Result<(), BackendError> {
+        let request = SyncMessage {
+            content: Some(SyncContent::Request(sync_message::Request {
+                r#type: Some(sync_message::request::Type::Configuration.into()),
+            })),
+            ..SyncMessage::with_padding(&mut rand::rng())
+        };
+        let me = self.manager.registration_data().service_ids.aci();
+        self.manager
+            .send_message(me, request, Timestamp::now().as_millis())
+            .await
+            .map_err(presage_error)
+    }
+
+    fn send_read_receipts(
+        &mut self,
+        recipient: ServiceId,
+        timestamps: Vec<Timestamp>,
+    ) -> LocalBoxFuture<'static, Result<(), BackendError>> {
+        let mut manager = self.manager.clone();
+        let receipt = ReceiptMessage {
+            r#type: Some(receipt_message::Type::Read.into()),
+            timestamp: timestamps.iter().map(Timestamp::as_millis).collect(),
+        };
+        async move {
+            manager
+                .send_message(
+                    Aci::from(recipient.uuid()),
+                    receipt,
+                    Timestamp::now().as_millis(),
+                )
+                .await
+                .map_err(presage_error)
+        }
+        .boxed_local()
+    }
+
+    fn send_read_sync(
+        &mut self,
+        read: Vec<(ServiceId, Timestamp)>,
+    ) -> LocalBoxFuture<'static, Result<(), BackendError>> {
+        let mut manager = self.manager.clone();
+        let sync = SyncMessage {
+            read: read
+                .into_iter()
+                .map(|(author, sent_at)| sync_message::Read {
+                    sender_aci: Some(author.uuid().to_string()),
+                    timestamp: Some(sent_at.as_millis()),
+                    ..Default::default()
+                })
+                .collect(),
+            ..SyncMessage::with_padding(&mut rand::rng())
+        };
+        async move {
+            let me = manager.registration_data().service_ids.aci();
+            manager
+                .send_message(me, sync, Timestamp::now().as_millis())
+                .await
+                .map_err(presage_error)
+        }
+        .boxed_local()
+    }
+
+    fn send_typing(
+        &mut self,
+        destination: Destination,
+        typing: bool,
+    ) -> LocalBoxFuture<'static, Result<(), BackendError>> {
+        let mut manager = self.manager.clone();
+        let now = Timestamp::now().as_millis();
+        let action = if typing {
+            typing_message::Action::Started
+        } else {
+            typing_message::Action::Stopped
+        };
+        async move {
+            match destination {
+                Destination::Contact(recipient) => {
+                    let message = TypingMessage {
+                        timestamp: Some(now),
+                        action: Some(action.into()),
+                        group_id: None,
+                    };
+                    manager
+                        .send_message(Aci::from(recipient.uuid()), message, now)
+                        .await
+                }
+                Destination::Group(group) => {
+                    let message = TypingMessage {
+                        timestamp: Some(now),
+                        action: Some(action.into()),
+                        group_id: Some(group.key.id().as_bytes().to_vec()),
+                    };
+                    manager
+                        .send_message_to_group(group.key.as_bytes(), message, now)
+                        .await
+                }
+            }
+            .map_err(presage_error)
+        }
+        .boxed_local()
     }
 }
 
@@ -342,14 +450,79 @@ fn is_network(error: &ServiceError) -> bool {
 fn incoming(received: Received) -> Option<Incoming> {
     match received {
         Received::QueueEmpty => Some(Incoming::QueueEmpty),
-        Received::Content(content) => received_message(&content)
-            .map(Incoming::Message)
+        Received::Content(content) => signal(&content)
+            .or_else(|| received_message(&content).map(Incoming::Message))
             .or_else(|| sent_message(&content).map(Incoming::Sent)),
         Received::Contacts => Some(Incoming::ContactsSynced),
         Received::DecryptionError(_) => {
             tracing::warn!("a message could not be decrypted");
             None
         }
+    }
+}
+
+/// Receipts, typing, and reads and settings synced from other devices.
+fn signal(content: &Content) -> Option<Incoming> {
+    let sender = ServiceId::new(content.metadata.sender.raw_uuid());
+    match &content.body {
+        ContentBody::ReceiptMessage(ReceiptMessage { r#type, timestamp }) => {
+            let kind = match receipt_message::Type::try_from(r#type.unwrap_or_default()) {
+                Ok(receipt_message::Type::Delivery) => ReceiptKind::Delivered,
+                Ok(receipt_message::Type::Read | receipt_message::Type::Viewed) => {
+                    ReceiptKind::Read
+                }
+                Err(_) => return None,
+            };
+            Some(Incoming::Receipt {
+                sender,
+                kind,
+                timestamps: timestamp
+                    .iter()
+                    .copied()
+                    .map(Timestamp::from_millis)
+                    .collect(),
+            })
+        }
+        ContentBody::TypingMessage(TypingMessage {
+            action, group_id, ..
+        }) => {
+            let group = match group_id {
+                Some(id) => Some(GroupId::new(<[u8; 32]>::try_from(id.as_slice()).ok()?)),
+                None => None,
+            };
+            let typing = *action == Some(typing_message::Action::Started.into());
+            Some(Incoming::Typing {
+                sender,
+                group,
+                typing,
+            })
+        }
+        ContentBody::SynchronizeMessage(sync) if !sync.read.is_empty() => {
+            let read = sync
+                .read
+                .iter()
+                .filter_map(|read| {
+                    let author = read
+                        .sender_aci_binary
+                        .as_deref()
+                        .and_then(|bytes| uuid::Uuid::from_slice(bytes).ok())
+                        .or_else(|| read.sender_aci.as_deref()?.parse().ok())?;
+                    Some((
+                        ServiceId::new(author),
+                        Timestamp::from_millis(read.timestamp?),
+                    ))
+                })
+                .collect();
+            Some(Incoming::ReadElsewhere(read))
+        }
+        ContentBody::SynchronizeMessage(SyncMessage {
+            content: Some(SyncContent::Configuration(configuration)),
+            ..
+        }) => Some(Incoming::Settings {
+            read_receipts: configuration.read_receipts,
+            typing_indicators: configuration.typing_indicators,
+        }),
+        _ => None,
     }
 }
 
@@ -578,7 +751,7 @@ fn group_ref(context: &GroupContextV2) -> Option<GroupRef> {
 mod tests {
     use chrono::{TimeZone as _, Utc};
     use presage::libsignal_service::groups_v2::Timer;
-    use presage::libsignal_service::proto::{TypingMessage, call_message, group_change};
+    use presage::libsignal_service::proto::{call_message, group_change};
     use presage::libsignal_service::protocol::DeviceId;
     use uuid::Uuid;
 
@@ -975,6 +1148,112 @@ mod tests {
         for (change, expected) in cases {
             assert_eq!(group_update(change, editor), expected);
         }
+    }
+
+    fn received(body: ContentBody) -> Option<Incoming> {
+        incoming(Received::Content(Box::new(content(body))))
+    }
+
+    #[test]
+    fn maps_receipts() {
+        let receipt = |kind: receipt_message::Type| {
+            received(ContentBody::ReceiptMessage(ReceiptMessage {
+                r#type: Some(kind.into()),
+                timestamp: vec![10, 11],
+            }))
+        };
+        let expected = |kind| {
+            Some(Incoming::Receipt {
+                sender: ServiceId::new(SENDER),
+                kind,
+                timestamps: vec![Timestamp::from_millis(10), Timestamp::from_millis(11)],
+            })
+        };
+        assert_eq!(
+            receipt(receipt_message::Type::Delivery),
+            expected(ReceiptKind::Delivered)
+        );
+        assert_eq!(
+            receipt(receipt_message::Type::Read),
+            expected(ReceiptKind::Read)
+        );
+        assert_eq!(
+            receipt(receipt_message::Type::Viewed),
+            expected(ReceiptKind::Read)
+        );
+    }
+
+    #[test]
+    fn maps_typing() {
+        let typing = |action: typing_message::Action, group_id: Option<Vec<u8>>| {
+            received(ContentBody::TypingMessage(TypingMessage {
+                timestamp: Some(1),
+                action: Some(action.into()),
+                group_id,
+            }))
+        };
+        assert_eq!(
+            typing(typing_message::Action::Started, None),
+            Some(Incoming::Typing {
+                sender: ServiceId::new(SENDER),
+                group: None,
+                typing: true,
+            })
+        );
+        assert_eq!(
+            typing(typing_message::Action::Stopped, Some(vec![4; 32])),
+            Some(Incoming::Typing {
+                sender: ServiceId::new(SENDER),
+                group: Some(GroupId::new([4; 32])),
+                typing: false,
+            })
+        );
+        assert_eq!(
+            typing(typing_message::Action::Started, Some(vec![4; 3])),
+            None
+        );
+    }
+
+    #[test]
+    fn maps_reads_and_settings_from_other_devices() {
+        let read = received(ContentBody::SynchronizeMessage(SyncMessage {
+            read: vec![
+                sync_message::Read {
+                    sender_aci: Some(OTHER.to_string()),
+                    timestamp: Some(5),
+                    ..Default::default()
+                },
+                sync_message::Read {
+                    sender_aci_binary: Some(SENDER.as_bytes().to_vec()),
+                    timestamp: Some(6),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }));
+        assert_eq!(
+            read,
+            Some(Incoming::ReadElsewhere(vec![
+                (ServiceId::new(OTHER), Timestamp::from_millis(5)),
+                (ServiceId::new(SENDER), Timestamp::from_millis(6)),
+            ]))
+        );
+
+        let settings = received(ContentBody::SynchronizeMessage(SyncMessage {
+            content: Some(SyncContent::Configuration(sync_message::Configuration {
+                read_receipts: Some(true),
+                typing_indicators: Some(false),
+                ..Default::default()
+            })),
+            ..Default::default()
+        }));
+        assert_eq!(
+            settings,
+            Some(Incoming::Settings {
+                read_receipts: Some(true),
+                typing_indicators: Some(false),
+            })
+        );
     }
 
     #[test]

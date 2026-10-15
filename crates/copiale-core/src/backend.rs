@@ -5,7 +5,8 @@ use futures::stream::LocalBoxStream;
 use tokio::sync::oneshot;
 
 use crate::model::{
-    Destination, GroupInfo, GroupMasterKey, IncomingMessage, MessageBody, SentMessage, Timestamp,
+    Destination, GroupId, GroupInfo, GroupMasterKey, IncomingMessage, MessageBody, ReceiptKind,
+    SentMessage, ServiceId, Timestamp,
 };
 use crate::storage::Database;
 
@@ -19,6 +20,26 @@ pub enum Incoming {
     Sent(SentMessage),
     /// Contacts synced from the phone are now in the store.
     ContactsSynced,
+    /// `sender` got or read our messages sent at `timestamps`.
+    Receipt {
+        sender: ServiceId,
+        kind: ReceiptKind,
+        timestamps: Vec<Timestamp>,
+    },
+    /// Messages, by author and sent time, read on another of this
+    /// account's devices.
+    ReadElsewhere(Vec<(ServiceId, Timestamp)>),
+    /// `sender` started or stopped typing, in a group if `group` is set.
+    Typing {
+        sender: ServiceId,
+        group: Option<GroupId>,
+        typing: bool,
+    },
+    /// Settings synced from the phone; `None` fields are unchanged.
+    Settings {
+        read_receipts: Option<bool>,
+        typing_indicators: Option<bool>,
+    },
 }
 
 /// Backend failure, as text for display. Must not contain message content.
@@ -96,9 +117,39 @@ pub trait SignalBackend {
     /// times it out.
     fn probe(&mut self) -> LocalBoxFuture<'static, Result<(), BackendError>>;
 
+    /// This account's ID, e.g. the peer of Note to Self.
+    fn own_id(&self) -> ServiceId;
+
     /// Asks the phone to send its contacts; they arrive as
     /// [`Incoming::ContactsSynced`].
     async fn request_contact_sync(&mut self) -> Result<(), BackendError>;
+
+    /// Asks the phone to send the account's settings; they arrive as
+    /// [`Incoming::Settings`].
+    async fn request_settings_sync(&mut self) -> Result<(), BackendError>;
+
+    /// Tells `recipient` we read their messages sent at `timestamps`.
+    /// Doesn't borrow the backend.
+    fn send_read_receipts(
+        &mut self,
+        recipient: ServiceId,
+        timestamps: Vec<Timestamp>,
+    ) -> LocalBoxFuture<'static, Result<(), BackendError>>;
+
+    /// Tells this account's other devices we read these messages, by author
+    /// and sent time. Doesn't borrow the backend.
+    fn send_read_sync(
+        &mut self,
+        read: Vec<(ServiceId, Timestamp)>,
+    ) -> LocalBoxFuture<'static, Result<(), BackendError>>;
+
+    /// Tells `destination` we started or stopped typing. Doesn't borrow
+    /// the backend.
+    fn send_typing(
+        &mut self,
+        destination: Destination,
+        typing: bool,
+    ) -> LocalBoxFuture<'static, Result<(), BackendError>>;
 }
 
 /// Account setup: presage in the app, a fake in tests.

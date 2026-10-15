@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use copiale_core::{
     BackendError, Command, ConversationId, ConversationSummary, Direction, Event, Message,
-    MessageBody, MessageId, MessageStatus, Peer, ServiceId, Timestamp,
+    MessageBody, MessageId, MessageStatus, Peer, ServiceId, TYPING_TIMEOUT, Timestamp,
 };
 
 use super::content::{placeholders, system_lines};
@@ -91,6 +91,15 @@ pub struct Chat {
     search: String,
     open: Option<Log>,
     connection: Connection,
+    /// Who is typing where, until when.
+    typing: Vec<Typing>,
+}
+
+#[derive(Debug)]
+struct Typing {
+    conversation: ConversationId,
+    member: ServiceId,
+    until: Timestamp,
 }
 
 /// The open conversation's loaded messages.
@@ -147,6 +156,7 @@ impl Chat {
             search: String::new(),
             open: None,
             connection: Connection::Connecting,
+            typing: Vec::new(),
         }
     }
 
@@ -297,7 +307,32 @@ impl Chat {
                 before,
                 messages,
             } => return self.page(*conversation, *before, messages),
-            Event::MessageAdded(message) => return self.added(message, active),
+            Event::MessageAdded(message) => {
+                // A message ends its author's typing.
+                if let Some(sender) = message.sender {
+                    self.typing
+                        .retain(|t| t.conversation != message.conversation || t.member != sender);
+                }
+                return self.added(message, active);
+            }
+            Event::Typing {
+                conversation,
+                member,
+                typing,
+            } => {
+                let now = self.clock.now();
+                self.typing.retain(|t| {
+                    t.until > now && (t.conversation != *conversation || t.member != *member)
+                });
+                if *typing {
+                    let timeout = u64::try_from(TYPING_TIMEOUT.as_millis()).unwrap_or(u64::MAX);
+                    self.typing.push(Typing {
+                        conversation: *conversation,
+                        member: *member,
+                        until: Timestamp::from_millis(now.as_millis().saturating_add(timeout)),
+                    });
+                }
+            }
             Event::MessageUpdated(message) => return self.updated(message, None),
             Event::SendFailed { message, error } => {
                 return self.updated(message, Some(error.clone()));
@@ -367,6 +402,50 @@ impl Chat {
 
     /// The command sending `text` to the open conversation; `None` if
     /// there's nothing to send.
+    /// Who is typing in the open conversation, as a line to show.
+    pub fn typing_label(&self) -> Option<String> {
+        let open = self.open_id()?;
+        let now = self.clock.now();
+        let names: Vec<_> = self
+            .typing
+            .iter()
+            .filter(|t| t.conversation == open && t.until > now)
+            .map(|t| self.author_name(t.member))
+            .collect();
+        match names.as_slice() {
+            [] => None,
+            [one] => Some(format!("{one} is typing…")),
+            [one, two] => Some(format!("{one} and {two} are typing…")),
+            more => Some(format!("{} people are typing…", more.len())),
+        }
+    }
+
+    /// Whether someone is typing in a conversation.
+    pub fn is_typing(&self, conversation: ConversationId) -> bool {
+        let now = self.clock.now();
+        self.typing
+            .iter()
+            .any(|t| t.conversation == conversation && t.until > now)
+    }
+
+    /// Time until the next typing indicator expires.
+    pub fn typing_changes_in(&self) -> Option<Duration> {
+        let now = self.clock.now();
+        self.typing
+            .iter()
+            .filter(|t| t.until > now)
+            .map(|t| Duration::from_millis(t.until.as_millis() - now.as_millis()))
+            .min()
+    }
+
+    /// Tells the core whether we're typing, given the composer's text.
+    pub fn typing_command(&self, text: &str) -> Option<Command> {
+        Some(Command::Typing {
+            conversation: self.open_id()?,
+            typing: !text.trim().is_empty(),
+        })
+    }
+
     pub fn submit(&self, text: &str) -> Option<Command> {
         let log = self.open.as_ref()?;
         let text = text.trim();
@@ -1080,5 +1159,77 @@ mod tests {
         assert_eq!(row(2).placeholders, ["[image] open on your phone"]);
         assert!(row(2).system.is_empty());
         assert_eq!(row(3).system, ["you turned off disappearing messages"]);
+    }
+
+    fn typing(chat: &mut Chat, member: u128, typing: bool) {
+        chat.apply(
+            &Event::Typing {
+                conversation: ConversationId::new(1),
+                member: peer(member),
+                typing,
+            },
+            true,
+        );
+    }
+
+    #[test]
+    fn typing_shows_names_and_expires() {
+        let mut chat = chat();
+        chat.apply(
+            &Event::Conversations(vec![group_summary(
+                vec![
+                    member(1, Some("Alice")),
+                    member(2, Some("Bob")),
+                    member(3, None),
+                ],
+                Some("Dev"),
+            )]),
+            true,
+        );
+        chat.open(ConversationId::new(1));
+        assert_eq!(chat.typing_label(), None);
+
+        typing(&mut chat, 1, true);
+        assert_eq!(chat.typing_label().as_deref(), Some("Alice is typing…"));
+        assert!(chat.is_typing(ConversationId::new(1)));
+        assert!(!chat.is_typing(ConversationId::new(2)));
+        typing(&mut chat, 2, true);
+        assert_eq!(
+            chat.typing_label().as_deref(),
+            Some("Alice and Bob are typing…")
+        );
+        typing(&mut chat, 3, true);
+        assert_eq!(chat.typing_label().as_deref(), Some("3 people are typing…"));
+        typing(&mut chat, 3, false);
+        // A message from Bob ends his typing.
+        chat.apply(&Event::MessageAdded(from(9, 2, NOW)), true);
+        assert_eq!(chat.typing_label().as_deref(), Some("Alice is typing…"));
+        assert_eq!(chat.typing_changes_in(), Some(TYPING_TIMEOUT));
+
+        chat.clock = Clock::fixed(
+            FixedOffset::east_opt(2 * 3600).unwrap(),
+            Timestamp::from_millis(NOW + TYPING_TIMEOUT.as_millis() as u64),
+        );
+        assert_eq!(chat.typing_label(), None);
+        assert_eq!(chat.typing_changes_in(), None);
+    }
+
+    #[test]
+    fn composer_text_sets_typing() {
+        let mut chat = with_conversations();
+        assert!(chat.typing_command("hi").is_none(), "no open conversation");
+        chat.open(ConversationId::new(1));
+        let typing = |text| match chat.typing_command(text) {
+            Some(Command::Typing {
+                conversation,
+                typing,
+            }) => {
+                assert_eq!(conversation, ConversationId::new(1));
+                typing
+            }
+            other => panic!("expected Typing, got {other:?}"),
+        };
+        assert!(typing("h"));
+        assert!(!typing("  "));
     }
 }

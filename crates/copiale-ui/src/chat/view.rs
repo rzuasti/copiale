@@ -19,7 +19,7 @@ use gpui_kit::{
     HighlightStyle, InteractiveElement as _, IntoElement, KeyBinding, ListAlignment, ListState,
     MouseMoveEvent, ParentElement as _, Pixels, Rems, Render, SharedString,
     StatefulInteractiveElement as _, Styled as _, StyledText, Subscription, Task,
-    TestSupportExt as _, TextRun, Window, actions, canvas, div, font, list, px, rems,
+    TestSupportExt as _, TextRun, Window, actions, canvas, div, font, list, point, px, rems,
 };
 
 use super::model::{Chat, Connection, Effects, LogChange, Row, member_list, title};
@@ -27,7 +27,7 @@ use super::text::message_markdown;
 use super::time::Clock;
 use crate::CoreSink;
 use crate::drawer::drawer;
-use crate::kinetic::{Kinetic, kinetic};
+use crate::kinetic::{self, Kinetic, kinetic};
 use crate::theme::ActivePalette as _;
 
 /// Load the previous page when the top visible row is this close to the
@@ -35,6 +35,9 @@ use crate::theme::ActivePalette as _;
 const LOAD_OLDER_WITHIN: usize = 20;
 
 const PREFIX_SIZE: Rems = rems(0.875);
+/// How long a pause in typing counts as having stopped.
+const TYPING_IDLE: Duration = Duration::from_secs(5);
+
 /// Above the first and below the last message.
 const LOG_PADDING: Pixels = px(8.);
 
@@ -67,6 +70,12 @@ pub struct ChatView {
     composer: Entity<TextareaState>,
     /// Redraws the reconnect countdown.
     countdown: Option<Task<()>>,
+    /// Redraws when a typing indicator expires.
+    typing_expiry: Option<Task<()>>,
+    /// The log ends with a typing line.
+    typing_row: bool,
+    /// Tells the core we stopped typing after a pause.
+    typing_idle: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -105,6 +114,9 @@ impl ChatView {
             sidebar_top: Rc::default(),
             composer,
             countdown: None,
+            typing_expiry: None,
+            typing_row: false,
+            typing_idle: None,
             _subscriptions: subscriptions,
         }
     }
@@ -128,9 +140,46 @@ impl ChatView {
     pub fn on_event(&mut self, event: &Event, window: &mut Window, cx: &mut Context<Self>) {
         let effects = self.chat.apply(event, window.is_window_active());
         self.run(effects, cx);
-        if let Event::Disconnected { .. } = event {
-            self.start_countdown(cx);
+        match event {
+            Event::Disconnected { .. } => self.start_countdown(cx),
+            Event::Typing { .. } | Event::MessageAdded(_) => self.expire_typing(cx),
+            _ => {}
         }
+    }
+
+    /// Redraws as typing indicators expire.
+    fn expire_typing(&mut self, cx: &mut Context<Self>) {
+        let Some(delay) = self.chat.typing_changes_in() else {
+            self.typing_expiry = None;
+            return;
+        };
+        self.typing_expiry = Some(cx.spawn(async move |view, cx| {
+            // A little late, so it has expired by then.
+            cx.background_executor()
+                .timer(delay + Duration::from_millis(10))
+                .await;
+            view.update(cx, |view, cx| {
+                view.sync_typing_row(cx);
+                cx.notify();
+                view.expire_typing(cx);
+            })
+            .ok();
+        }));
+    }
+
+    /// Tells the core whether we're typing; stops after [`TYPING_IDLE`]
+    /// without changes.
+    fn typing(&mut self, text: &str, cx: &mut Context<Self>) {
+        let command = self.chat.typing_command(text);
+        let typing = matches!(command, Some(Command::Typing { typing: true, .. }));
+        self.send(command);
+        self.typing_idle = typing.then(|| {
+            cx.spawn(async move |view, cx| {
+                cx.background_executor().timer(TYPING_IDLE).await;
+                view.update(cx, |view, _| view.send(view.chat.typing_command("")))
+                    .ok();
+            })
+        });
     }
 
     fn start_countdown(&mut self, cx: &mut Context<Self>) {
@@ -154,6 +203,9 @@ impl ChatView {
     }
 
     pub fn open(&mut self, id: ConversationId, window: &mut Window, cx: &mut Context<Self>) {
+        if self.chat.open_id() != Some(id) && self.typing_idle.take().is_some() {
+            self.send(self.chat.typing_command(""));
+        }
         let effects = self.chat.open(id);
         self.run(effects, cx);
         let placeholder = self
@@ -178,19 +230,80 @@ impl ChatView {
                 LogChange::Reset(count) => {
                     self.kinetic.stop();
                     self.log.reset(count);
+                    self.typing_row = false;
                     self.log.set_follow_mode(FollowMode::Tail);
                 }
                 LogChange::Inserted { at, count } => {
+                    let at_end = at + count == self.chat.row_count();
+                    let reveal = at_end && self.hold_position(cx);
                     self.log.splice(at..at, count);
                     let next = at + count;
                     if next < self.log.item_count() {
                         self.log.remeasure_items(next..next + 1);
                     }
+                    if reveal {
+                        self.kinetic.settle_to_end(cx);
+                    }
                 }
                 LogChange::Changed(ix) => self.log.remeasure_items(ix..ix + 1),
             }
         }
+        self.sync_typing_row(cx);
         cx.notify();
+    }
+
+    /// Before rows are added at the end while it's in view: keeps the
+    /// current position instead of following the end, so the caller can
+    /// ease there. `false` if not showing the end, or not animating.
+    fn hold_position(&mut self, cx: &App) -> bool {
+        if !self.log.is_following_tail() || !kinetic::animates(cx) {
+            return false;
+        }
+        // Pin the position: just short of the end, since setting within a
+        // pixel of it follows again, then the rest, which doesn't.
+        const SHORT: Pixels = px(2.);
+        let max = self.log.max_offset_for_scrollbar().y + LOG_PADDING * 2.;
+        self.log
+            .set_offset_from_scrollbar(point(px(0.), -(max - SHORT).max(px(0.))));
+        self.log.scroll_by(SHORT);
+        self.log.pause_following_tail();
+        true
+    }
+
+    /// Before the last row goes while the end is in view: the rows above
+    /// drop into its place, so draw them where they were and ease down.
+    fn ease_removal(&mut self, ix: usize, cx: &App) {
+        if !self.log.is_following_tail() || !kinetic::animates(cx) {
+            return;
+        }
+        let scrollable = self.log.max_offset_for_scrollbar().y;
+        if let Some(bounds) = self.log.bounds_for_item(ix)
+            && scrollable > px(0.)
+        {
+            self.kinetic
+                .shift_by(-bounds.size.height.min(scrollable), cx);
+        }
+    }
+
+    /// Shows or hides the typing line after the last message. A message
+    /// from the typist is inserted before it first, so takes its place.
+    fn sync_typing_row(&mut self, cx: &App) {
+        let wanted = self.chat.typing_label().is_some();
+        if wanted == self.typing_row {
+            return;
+        }
+        let at = self.chat.row_count();
+        if wanted {
+            let reveal = self.hold_position(cx);
+            self.log.splice(at..at, 1);
+            if reveal {
+                self.kinetic.settle_to_end(cx);
+            }
+        } else {
+            self.ease_removal(at, cx);
+            self.log.splice(at..at + 1, 0);
+        }
+        self.typing_row = wanted;
     }
 
     fn send(&self, command: Option<Command>) {
@@ -229,10 +342,15 @@ impl ChatView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let InputEvent::Change = event {
+            let text = composer.read(cx).value();
+            self.typing(&text, cx);
+        }
         if let InputEvent::PressEnter { shift: false, .. } = event {
             let Some(command) = self.chat.submit(&composer.read(cx).value()) else {
                 return;
             };
+            self.typing_idle = None;
             self.core.send(command);
             composer.update(cx, |composer, cx| composer.set_value("", window, cx));
             self.kinetic.stop();
@@ -383,10 +501,15 @@ impl ChatView {
     ) -> AnyElement {
         let id = summary.id;
         let unread = summary.unread > 0;
-        let age = summary
-            .last_activity
-            .map(|at| self.chat.clock().age(at))
-            .unwrap_or_default();
+        let typing = self.chat.is_typing(id);
+        let age = if typing {
+            "typing…".into()
+        } else {
+            summary
+                .last_activity
+                .map(|at| self.chat.clock().age(at))
+                .unwrap_or_default()
+        };
         ListItem::new(("conversation", id.get() as u64))
             .selected(selected)
             .on_click(cx.listener(move |view, _, window, cx| view.open(id, window, cx)))
@@ -412,7 +535,11 @@ impl ChatView {
                     .child(
                         div()
                             .text_xs()
-                            .text_color(cx.palette().text_muted)
+                            .text_color(if typing {
+                                cx.palette().accent
+                            } else {
+                                cx.palette().text_muted
+                            })
                             .child(age),
                     ),
             )
@@ -533,10 +660,23 @@ impl ChatView {
     }
 
     fn render_row(&self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let Some(row) = self.chat.row(ix) else {
-            return div().into_any_element();
-        };
-        render_log_row(row, window, cx)
+        if let Some(row) = self.chat.row(ix) {
+            return render_log_row(row, window, cx);
+        }
+        match self.chat.typing_label() {
+            Some(label) if self.typing_row => div()
+                .id("typing")
+                .px_4()
+                .pt_1()
+                .font_family(cx.theme().mono_font_family.clone())
+                .text_size(PREFIX_SIZE)
+                .line_height(window.line_height())
+                .text_color(cx.palette().text_muted)
+                .child(label)
+                .test_support()
+                .into_any_element(),
+            _ => div().into_any_element(),
+        }
     }
 }
 
@@ -550,8 +690,10 @@ fn render_log_row(row: Row<'_>, window: &mut Window, cx: &mut Context<ChatView>)
     let id = message.id;
     let failed = message.status == Some(MessageStatus::Failed);
     let status = match message.status {
-        Some(MessageStatus::Pending) => Some("…"),
-        Some(MessageStatus::Sent) => Some("✓"),
+        Some(MessageStatus::Pending) => Some(("…", muted)),
+        Some(MessageStatus::Sent) => Some(("✓", muted)),
+        Some(MessageStatus::Delivered) => Some(("✓✓", muted)),
+        Some(MessageStatus::Read) => Some(("✓✓", palette.accent)),
         Some(MessageStatus::Failed) | None => None,
     };
     let error: Option<SharedString> = row.error.map(|error| error.to_string().into());
@@ -686,11 +828,11 @@ fn render_log_row(row: Row<'_>, window: &mut Window, cx: &mut Context<ChatView>)
                             .selectable(true)
                         })),
                 )
-                .children(status.map(|status| {
+                .children(status.map(|(status, color)| {
                     div()
                         .font_family(mono.clone())
                         .text_xs()
-                        .text_color(muted)
+                        .text_color(color)
                         .child(status)
                 }))
                 .children(failure),

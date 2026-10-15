@@ -1,6 +1,8 @@
-//! Kinetic scrolling for a [`ListState`]: momentum, rubber band and bounce.
+//! Kinetic scrolling for a [`ListState`]: momentum, rubber band and bounce,
+//! and easing when content at the end comes and goes.
 //!
-//! Off on macOS, which has native momentum, and with reduced motion.
+//! Wheel handling is off on macOS, which has native momentum. All of it is
+//! off with reduced motion.
 
 mod physics;
 
@@ -31,6 +33,24 @@ impl Kinetic {
         state.physics.stop();
         state.carry = 0.;
     }
+
+    /// Eases to the end of the list, e.g. to reveal a new last row.
+    pub fn settle_to_end(&self, cx: &App) {
+        let now = cx.background_executor().now();
+        self.0.borrow_mut().physics.settle_to_end(now);
+    }
+
+    /// Draws the content `by` from where it now is and eases it back, so
+    /// a jump looks like movement; negative is up.
+    pub fn shift_by(&self, by: Pixels, cx: &App) {
+        let now = cx.background_executor().now();
+        self.0.borrow_mut().physics.shift_by(by.as_f32(), now);
+    }
+}
+
+/// Whether to animate scrolling at all.
+pub fn animates(cx: &App) -> bool {
+    !cx.reduce_motion()
 }
 
 #[derive(Debug, Default)]
@@ -141,9 +161,9 @@ impl Element for KineticScroll {
         cx: &mut App,
     ) -> Hitbox {
         let scale = window.scale_factor();
-        let overscroll = {
+        let offset = {
             let mut state = self.state.borrow_mut();
-            if !ENABLED || cx.reduce_motion() {
+            if !animates(cx) {
                 state.physics.stop();
             }
             let now = cx.background_executor().now();
@@ -152,11 +172,12 @@ impl Element for KineticScroll {
             if state.physics.is_animating() {
                 window.request_animation_frame();
             }
-            (state.physics.overscroll() * scale).round() / scale
+            let offset = state.physics.shift() - state.physics.overscroll();
+            (offset * scale).round() / scale
         };
         let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
-            window.with_element_offset(point(px(0.), px(-overscroll)), |window| {
+            window.with_element_offset(point(px(0.), px(offset)), |window| {
                 self.child.prepaint(window, cx);
             });
         });
@@ -173,7 +194,7 @@ impl Element for KineticScroll {
         window: &mut Window,
         cx: &mut App,
     ) {
-        if ENABLED && !cx.reduce_motion() {
+        if ENABLED && animates(cx) {
             let state = self.state.clone();
             let list = self.list.clone();
             let padding = self.padding;

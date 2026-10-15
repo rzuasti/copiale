@@ -32,6 +32,14 @@ const RUBBER_BAND: f32 = 0.55;
 /// stiff stop past the edge, then an unhurried return (about 600 ms).
 const SPRING_OUT: f32 = 24.;
 const SPRING_BACK: f32 = 10.5;
+/// How fast settling to the end and shifts ease out, per second: most of
+/// the way in about 250 ms.
+const SETTLE: f32 = 12.;
+/// Settling and shifts stop within this many pixels.
+const SETTLED: f32 = 0.5;
+/// Settling runs at least this long: new content at the end is measured a
+/// frame after it's added.
+const SETTLE_GRACE: Duration = Duration::from_millis(50);
 /// Longest step simulated at once, so a stalled frame doesn't jump.
 const MAX_STEP: f32 = 1. / 30.;
 
@@ -58,6 +66,10 @@ enum Mode {
     Bouncing {
         velocity: f32,
     },
+    /// Easing to the end, e.g. to reveal new content there.
+    Settling {
+        since: Instant,
+    },
 }
 
 #[derive(Debug)]
@@ -66,6 +78,9 @@ pub struct Physics {
     /// Displacement past an edge: negative before the start, positive after
     /// the end.
     overscroll: f32,
+    /// Offset the content is drawn at, easing to 0: positive below where
+    /// it is.
+    shift: f32,
     /// Recent touchpad deltas.
     samples: VecDeque<(Instant, f32)>,
     /// Typical time between touchpad events, s.
@@ -78,6 +93,7 @@ impl Default for Physics {
         Self {
             mode: Mode::Idle,
             overscroll: 0.,
+            shift: 0.,
             samples: VecDeque::new(),
             interval: None,
             stepped_at: None,
@@ -90,8 +106,35 @@ impl Physics {
         self.overscroll
     }
 
+    pub fn shift(&self) -> f32 {
+        self.shift
+    }
+
     pub fn is_animating(&self) -> bool {
-        self.mode != Mode::Idle
+        self.mode != Mode::Idle || self.shift != 0.
+    }
+
+    /// Eases to the end, unless the user is scrolling.
+    pub fn settle_to_end(&mut self, now: Instant) {
+        match self.mode {
+            Mode::Idle => {
+                self.stepped_at = Some(now);
+                self.mode = Mode::Settling { since: now };
+            }
+            Mode::Settling { .. } | Mode::Coasting { .. } => {
+                self.mode = Mode::Settling { since: now };
+            }
+            Mode::Tracking { .. } | Mode::Bouncing { .. } => {}
+        }
+    }
+
+    /// Draws the content `by` away from where it is, then eases it back:
+    /// content that jumped looks like it moves.
+    pub fn shift_by(&mut self, by: f32, now: Instant) {
+        if !self.is_animating() {
+            self.stepped_at = Some(now);
+        }
+        self.shift += by;
     }
 
     /// Stops all motion and snaps back to the edge.
@@ -163,8 +206,21 @@ impl Physics {
             .replace(now)
             .map_or(0., |at| now.duration_since(at).as_secs_f32())
             .min(MAX_STEP);
+        self.shift *= (-SETTLE * dt).exp();
+        if self.shift.abs() < SETTLED {
+            self.shift = 0.;
+        }
         match self.mode {
             Mode::Idle => 0.,
+            Mode::Settling { since } => {
+                let remaining = extent.max.max(0.) - extent.offset;
+                if remaining.abs() < SETTLED && now.duration_since(since) >= SETTLE_GRACE {
+                    self.mode = Mode::Idle;
+                    remaining
+                } else {
+                    remaining * (1. - (-SETTLE * dt).exp())
+                }
+            }
             Mode::Tracking { stretch } => {
                 let gap = self.interval.map_or(MAX_LIFT_GAP, |interval| {
                     (interval * LIFT_INTERVALS).clamp(MIN_LIFT_GAP, MAX_LIFT_GAP)
@@ -480,6 +536,47 @@ mod tests {
         let (_, _, settled) = settle(&mut physics, lift, extent);
         let back = settled.duration_since(lift);
         assert!(back > ms(450) && back < ms(1200), "returned in {back:?}");
+    }
+
+    #[test]
+    fn settling_eases_to_the_end() {
+        let mut physics = Physics::default();
+        let now = Instant::now();
+        physics.settle_to_end(now);
+        let mut extent = EXTENT;
+        let first = physics.step(now + ms(16), extent);
+        assert!(first > 0. && first < 500., "eases in: {first}");
+        extent.offset += first;
+        let (offset, _, end) = settle(&mut physics, now + ms(16), extent);
+        assert_eq!(offset, EXTENT.max);
+        assert!(end.duration_since(now) < ms(1000));
+    }
+
+    #[test]
+    fn dragging_interrupts_settling() {
+        let mut physics = Physics::default();
+        let now = Instant::now();
+        physics.settle_to_end(now);
+        physics.drag(-10., now, EXTENT);
+        physics.settle_to_end(now);
+        assert_eq!(physics.step(now + ms(5), EXTENT), 0., "still the user's");
+    }
+
+    #[test]
+    fn shifts_ease_back_to_zero() {
+        let mut physics = Physics::default();
+        let now = Instant::now();
+        physics.shift_by(-40., now);
+        assert_eq!(physics.shift(), -40.);
+        assert!(physics.is_animating());
+
+        physics.step(now + ms(16), EXTENT);
+        let after_one_frame = physics.shift();
+        assert!(after_one_frame > -40. && after_one_frame < 0.);
+        let (offset, _, end) = settle(&mut physics, now + ms(16), EXTENT);
+        assert_eq!(offset, EXTENT.offset, "doesn't scroll");
+        assert_eq!(physics.shift(), 0.);
+        assert!(end.duration_since(now) < ms(1000));
     }
 
     #[test]

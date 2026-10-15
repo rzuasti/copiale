@@ -1,5 +1,6 @@
 //! The core's phases: unlock storage, set up the account, serve.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,8 +17,8 @@ use super::probe::{Check, Probe};
 use super::{Command, CoreOptions, Event, StorageFailure};
 use crate::backend::{BackendError, Incoming, Linker, SignalBackend};
 use crate::model::{
-    Content, ConversationId, Destination, GroupRef, MessageBody, MessageId, MessageStatus,
-    ServiceId, Timestamp,
+    AccountSettings, Content, ConversationId, Destination, GroupRef, MessageBody, MessageId,
+    MessageStatus, ReceiptKind, ServiceId, Timestamp,
 };
 use crate::storage::{Database, KeyLookup, SecretStore, Storage, StorageError};
 
@@ -232,6 +233,24 @@ impl Core {
             }
         }
 
+        // Privacy settings: off until the phone says otherwise.
+        let mut settings = match db.settings().await {
+            Ok(Some(settings)) if !linked_now => settings,
+            known => {
+                if let Err(error) = known {
+                    self.database_error(error);
+                }
+                let request = backend.request_settings_sync();
+                match tokio::time::timeout(self.options.connect_timeout, request).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => tracing::warn!(%error, "requesting settings failed"),
+                    Err(_) => tracing::warn!("requesting settings timed out"),
+                }
+                AccountSettings::default()
+            }
+        };
+        let mut typing_sent = HashMap::new();
+
         let mut incoming: Option<LocalBoxStream<'static, Incoming>> = None;
         let mut connecting: Option<LocalBoxFuture<'static, Connecting>> = None;
         let mut retry_at = Some(Instant::now());
@@ -261,6 +280,8 @@ impl Core {
                 command = self.commands.recv() => match command {
                     Some(Command::SendText { conversation, body }) => {
                         self.send_text(db, &mut outbox, &mut backend, conversation, body).await;
+                        // Recipients stop showing us typing when the message arrives.
+                        typing_sent.remove(&conversation);
                     }
                     Some(Command::RetrySend(id)) => match db.retry_send(id).await {
                         Ok(Some((destination, message))) => {
@@ -287,10 +308,16 @@ impl Core {
                         }
                     }
                     Some(Command::MarkRead(conversation)) => match db.mark_read(conversation).await {
-                        Ok(true) => self.send_conversation(db, conversation).await,
-                        Ok(false) => {}
+                        Ok(read) if read.is_empty() => {}
+                        Ok(read) => {
+                            send_receipts(&mut backend, settings, read);
+                            self.send_conversation(db, conversation).await;
+                        }
                         Err(error) => self.database_error(error),
                     },
+                    Some(Command::Typing { conversation, typing }) if settings.typing_indicators => {
+                        self.typing(db, &mut backend, &mut typing_sent, conversation, typing).await;
+                    }
                     Some(Command::Shutdown) | None => break,
                     Some(other) => ignored(&other),
                 },
@@ -328,6 +355,53 @@ impl Core {
                         self.store(db, &message.destination, None, message.timestamp, &message.content).await;
                         if let Destination::Group(group) = message.destination {
                             self.check_group(db, &mut groups, &mut backend, group).await;
+                        }
+                    }
+                    Some(Incoming::Receipt { sender, kind, timestamps }) => {
+                        // Without our read receipts, theirs aren't shown either.
+                        if kind == ReceiptKind::Read && !settings.read_receipts {
+                            continue;
+                        }
+                        match db.apply_receipt(sender, kind, &timestamps).await {
+                            Ok(messages) => {
+                                for message in messages {
+                                    self.emit(Event::MessageUpdated(message));
+                                }
+                            }
+                            Err(error) => self.database_error(error),
+                        }
+                    }
+                    Some(Incoming::ReadElsewhere(read)) => match db.mark_read_elsewhere(&read).await {
+                        Ok(conversations) => {
+                            for conversation in conversations {
+                                self.send_conversation(db, conversation).await;
+                            }
+                        }
+                        Err(error) => self.database_error(error),
+                    },
+                    Some(Incoming::Typing { sender, group, typing }) if settings.typing_indicators => {
+                        match db.typing_conversation(sender, group).await {
+                            Ok(Some(conversation)) => self.emit(Event::Typing {
+                                conversation,
+                                member: sender,
+                                typing,
+                            }),
+                            Ok(None) => {}
+                            Err(error) => self.database_error(error),
+                        }
+                    }
+                    Some(Incoming::Typing { .. }) => {}
+                    Some(Incoming::Settings { read_receipts, typing_indicators }) => {
+                        match db.update_settings(read_receipts, typing_indicators).await {
+                            Ok(updated) => {
+                                tracing::info!(
+                                    read_receipts = updated.read_receipts,
+                                    typing_indicators = updated.typing_indicators,
+                                    "settings synced"
+                                );
+                                settings = updated;
+                            }
+                            Err(error) => self.database_error(error),
                         }
                     }
                     Some(Incoming::ContactsSynced) => {
@@ -387,6 +461,39 @@ impl Core {
                 retry_at = Some(self.disconnected(error, &mut delay));
             }
         }
+    }
+
+    /// Tells the conversation we're typing, at most every
+    /// [`TYPING_RESEND`], or that we stopped.
+    async fn typing<B: SignalBackend>(
+        &self,
+        db: &Database,
+        backend: &mut B,
+        typing_sent: &mut HashMap<ConversationId, Instant>,
+        conversation: ConversationId,
+        typing: bool,
+    ) {
+        if typing {
+            let recent = typing_sent
+                .get(&conversation)
+                .is_some_and(|at: &Instant| at.elapsed() < TYPING_RESEND);
+            if recent {
+                return;
+            }
+        } else if typing_sent.remove(&conversation).is_none() {
+            return;
+        }
+        let destination = match db.destination(conversation).await {
+            // Nobody else sees Note to Self.
+            Ok(Some(Destination::Contact(peer))) if peer == backend.own_id() => return,
+            Ok(Some(destination)) => destination,
+            Ok(None) => return,
+            Err(error) => return self.database_error(error),
+        };
+        if typing {
+            typing_sent.insert(conversation, Instant::now());
+        }
+        spawn_logged("sending typing", backend.send_typing(destination, typing));
     }
 
     /// Refreshes the group's stored state if it's missing or older than
@@ -522,6 +629,45 @@ fn failure(error: StorageError) -> StorageFailure {
         StorageError::WrongKey => StorageFailure::WrongKey,
         other => StorageFailure::Other(other.to_string()),
     }
+}
+
+/// How often a typing indicator is renewed while typing; recipients drop
+/// it after [`super::TYPING_TIMEOUT`].
+const TYPING_RESEND: Duration = Duration::from_secs(10);
+
+/// Tells our other devices we read these messages, and their authors too
+/// if the account sends read receipts.
+fn send_receipts<B: SignalBackend>(
+    backend: &mut B,
+    settings: AccountSettings,
+    read: Vec<(ServiceId, Timestamp)>,
+) {
+    if settings.read_receipts {
+        let me = backend.own_id();
+        let mut by_author: Vec<(ServiceId, Vec<Timestamp>)> = Vec::new();
+        for (author, sent_at) in read.iter().filter(|(author, _)| *author != me) {
+            match by_author.iter_mut().find(|(known, _)| known == author) {
+                Some((_, timestamps)) => timestamps.push(*sent_at),
+                None => by_author.push((*author, vec![*sent_at])),
+            }
+        }
+        for (author, timestamps) in by_author {
+            spawn_logged(
+                "sending read receipts",
+                backend.send_read_receipts(author, timestamps),
+            );
+        }
+    }
+    spawn_logged("syncing reads", backend.send_read_sync(read));
+}
+
+/// Runs a background send, logging failure. Must run inside a `LocalSet`.
+fn spawn_logged(what: &'static str, send: LocalBoxFuture<'static, Result<(), BackendError>>) {
+    tokio::task::spawn_local(async move {
+        if let Err(error) = send.await {
+            tracing::info!(%error, "{what} failed");
+        }
+    });
 }
 
 /// Largest page [`Command::LoadMessages`] returns.

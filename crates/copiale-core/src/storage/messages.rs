@@ -31,7 +31,8 @@ macro_rules! summary_query {
 /// Message columns, in [`MessageRow`] order.
 macro_rules! message_columns {
     () => {
-        "id, conversation_id, outgoing, author, sent_at, received_at, body, content, read, status"
+        "id, conversation_id, outgoing, author, sent_at, received_at, body, content, read, status, \
+         delivery"
     };
 }
 
@@ -56,6 +57,7 @@ type MessageRow = (
     String,
     Option<String>,
     bool,
+    Option<String>,
     Option<String>,
 );
 type DestinationRow = (Option<Vec<u8>>, Option<Vec<u8>>, Option<i64>);
@@ -134,15 +136,15 @@ impl Database {
         row.map(destination).transpose()
     }
 
-    /// Sets an outgoing message's status; returns it, or `None` if there is
-    /// no such outgoing message.
+    /// Sets a pending message's status, sent or failed; returns it, or
+    /// `None` if there is no such pending message.
     pub(crate) async fn set_status(
         &self,
         id: MessageId,
         status: MessageStatus,
     ) -> Result<Option<Message>, StorageError> {
         let row: Option<MessageRow> = sqlx::query_as(concat!(
-            "UPDATE messages SET status = ? WHERE id = ? AND outgoing = 1 RETURNING ",
+            "UPDATE messages SET status = ? WHERE id = ? AND status = 'pending' RETURNING ",
             message_columns!()
         ))
         .bind(status_name(status))
@@ -319,18 +321,36 @@ impl Database {
         rows.into_iter().rev().map(message).collect()
     }
 
-    /// Marks incoming messages read; `true` if any were unread.
+    pub(super) async fn message(&self, id: MessageId) -> Result<Option<Message>, StorageError> {
+        let row: Option<MessageRow> = sqlx::query_as(concat!(
+            "SELECT ",
+            message_columns!(),
+            " FROM messages WHERE id = ?"
+        ))
+        .bind(id.get())
+        .fetch_optional(&self.app)
+        .await
+        .map_err(database_error)?;
+        row.map(message).transpose()
+    }
+
+    /// Marks incoming messages read; returns the newly read ones by author
+    /// and sent time.
     pub(crate) async fn mark_read(
         &self,
         conversation: ConversationId,
-    ) -> Result<bool, StorageError> {
-        let result =
-            sqlx::query("UPDATE messages SET read = 1 WHERE conversation_id = ? AND read = 0")
-                .bind(conversation.get())
-                .execute(&self.app)
-                .await
-                .map_err(database_error)?;
-        Ok(result.rows_affected() > 0)
+    ) -> Result<Vec<(ServiceId, Timestamp)>, StorageError> {
+        let rows: Vec<(Vec<u8>, i64)> = sqlx::query_as(
+            "UPDATE messages SET read = 1 WHERE conversation_id = ? AND read = 0
+             RETURNING author, sent_at",
+        )
+        .bind(conversation.get())
+        .fetch_all(&self.app)
+        .await
+        .map_err(database_error)?;
+        rows.into_iter()
+            .map(|(author, sent_at)| Ok((service_id(&author)?, timestamp(sent_at))))
+            .collect()
     }
 
     /// Whether any contacts have been synced from the phone.
@@ -554,9 +574,24 @@ fn master_key(bytes: &[u8]) -> Result<GroupMasterKey, StorageError> {
 }
 
 fn message(row: MessageRow) -> Result<Message, StorageError> {
-    let (id, conversation, outgoing, author, sent_at, received_at, body, content, read, status) =
-        row;
-    let status = status.as_deref().map(parse_status).transpose()?;
+    let (
+        id,
+        conversation,
+        outgoing,
+        author,
+        sent_at,
+        received_at,
+        body,
+        content,
+        read,
+        status,
+        delivery,
+    ) = row;
+    let status = match (status.as_deref(), delivery.as_deref()) {
+        (Some("sent"), Some("delivered")) => Some(MessageStatus::Delivered),
+        (Some("sent"), Some("read")) => Some(MessageStatus::Read),
+        (status, _) => status.map(parse_status).transpose()?,
+    };
     let sender = if author.is_empty() {
         None
     } else {
@@ -581,10 +616,11 @@ fn service_id(peer: &[u8]) -> Result<ServiceId, StorageError> {
         .map_err(|_| StorageError::Database("invalid service ID".into()))
 }
 
+/// The `status` column's value; delivery is in its own column.
 fn status_name(status: MessageStatus) -> &'static str {
     match status {
         MessageStatus::Pending => "pending",
-        MessageStatus::Sent => "sent",
+        MessageStatus::Sent | MessageStatus::Delivered | MessageStatus::Read => "sent",
         MessageStatus::Failed => "failed",
     }
 }
@@ -607,7 +643,7 @@ fn direction(outgoing: bool) -> Direction {
 }
 
 /// SQLite integers are signed; millisecond timestamps fit.
-fn millis(timestamp: Timestamp) -> i64 {
+pub(super) fn millis(timestamp: Timestamp) -> i64 {
     i64::try_from(timestamp.as_millis()).unwrap_or(i64::MAX)
 }
 
@@ -913,8 +949,8 @@ mod tests {
         let message = add(&db, 1, Direction::Incoming, 100, "a").await.unwrap();
         add(&db, 1, Direction::Incoming, 101, "b").await;
 
-        assert!(db.mark_read(message.conversation).await.unwrap());
-        assert!(!db.mark_read(message.conversation).await.unwrap());
+        assert_eq!(db.mark_read(message.conversation).await.unwrap().len(), 2);
+        assert!(db.mark_read(message.conversation).await.unwrap().is_empty());
 
         let summary = db
             .conversation(message.conversation)
