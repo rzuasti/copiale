@@ -2,12 +2,13 @@
 //!
 //! Dev-dependency only; tests never reach real Signal servers.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use copiale_core::storage::{Database, SecretError, SecretStore};
 use copiale_core::{
-    BackendError, Incoming, Linker, MessageBody, ServiceId, SignalBackend, Timestamp,
+    BackendError, Destination, GroupInfo, GroupMasterKey, Incoming, Linker, MessageBody, ServiceId,
+    SignalBackend, Timestamp,
 };
 use futures::future::LocalBoxFuture;
 use futures::stream::LocalBoxStream;
@@ -35,10 +36,15 @@ pub fn fake_backend() -> (FakeBackend, FakeNetwork) {
     (backend, network)
 }
 
+/// Deterministic group master key for fixtures.
+pub fn group_key(n: u8) -> GroupMasterKey {
+    GroupMasterKey::new([n; 32])
+}
+
 /// A text message the backend was asked to send.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SentText {
-    pub recipient: ServiceId,
+    pub destination: Destination,
     pub body: MessageBody,
     pub timestamp: Timestamp,
 }
@@ -60,6 +66,11 @@ struct State {
     sends_started: usize,
     send_failures: VecDeque<BackendError>,
     contact_sync_requests: usize,
+    groups: HashMap<GroupMasterKey, GroupInfo>,
+    /// Profile names, known once fetched.
+    profile_names: HashMap<ServiceId, String>,
+    profiles_fetched: HashSet<ServiceId>,
+    profile_fetches: usize,
 }
 
 /// [`SignalBackend`] driven by a [`FakeNetwork`]. Each `receive` opens a
@@ -101,7 +112,7 @@ impl SignalBackend for FakeBackend {
     /// the network is up.
     fn send_text(
         &mut self,
-        recipient: ServiceId,
+        destination: Destination,
         body: MessageBody,
         timestamp: Timestamp,
     ) -> LocalBoxFuture<'static, Result<(), BackendError>> {
@@ -121,7 +132,7 @@ impl SignalBackend for FakeBackend {
                 return Err(error);
             }
             state.lock().unwrap().sent.push(SentText {
-                recipient,
+                destination,
                 body,
                 timestamp,
             });
@@ -143,6 +154,57 @@ impl SignalBackend for FakeBackend {
     async fn request_contact_sync(&mut self) -> Result<(), BackendError> {
         self.state.lock().unwrap().contact_sync_requests += 1;
         Ok(())
+    }
+
+    /// The scripted group, with fetched profile names filled in.
+    fn group(
+        &mut self,
+        key: GroupMasterKey,
+    ) -> LocalBoxFuture<'static, Result<Option<GroupInfo>, BackendError>> {
+        let state = self.state.clone();
+        async move {
+            let state = state.lock().unwrap();
+            let Some(mut info) = state.groups.get(&key).cloned() else {
+                return Ok(None);
+            };
+            for member in &mut info.members {
+                if member.name.is_none() && state.profiles_fetched.contains(&member.id) {
+                    member.name = state.profile_names.get(&member.id).cloned();
+                }
+            }
+            Ok(Some(info))
+        }
+        .boxed_local()
+    }
+
+    /// Fails while offline.
+    fn fetch_member_profiles(
+        &mut self,
+        key: GroupMasterKey,
+    ) -> LocalBoxFuture<'static, Result<(), BackendError>> {
+        let state = self.state.clone();
+        let offline = self.link.borrow().offline;
+        async move {
+            if offline {
+                return Err(BackendError::network("offline"));
+            }
+            let mut state = state.lock().unwrap();
+            let unnamed: Vec<_> = state
+                .groups
+                .get(&key)
+                .into_iter()
+                .flat_map(|info| &info.members)
+                .filter(|member| member.name.is_none())
+                .map(|member| member.id)
+                .collect();
+            for id in unnamed {
+                if state.profiles_fetched.insert(id) {
+                    state.profile_fetches += 1;
+                }
+            }
+            Ok(())
+        }
+        .boxed_local()
     }
 }
 
@@ -225,6 +287,26 @@ impl FakeNetwork {
 
     pub fn contact_sync_requests(&self) -> usize {
         self.state.lock().unwrap().contact_sync_requests
+    }
+
+    /// Sets the group state the backend reports; members' names are their
+    /// contact names, if any.
+    pub fn set_group(&self, key: GroupMasterKey, info: GroupInfo) {
+        self.state.lock().unwrap().groups.insert(key, info);
+    }
+
+    /// Gives an account a profile name, known once fetched.
+    pub fn set_profile_name(&self, id: ServiceId, name: &str) {
+        self.state
+            .lock()
+            .unwrap()
+            .profile_names
+            .insert(id, name.into());
+    }
+
+    /// Profiles fetched so far.
+    pub fn profile_fetches(&self) -> usize {
+        self.state.lock().unwrap().profile_fetches
     }
 }
 

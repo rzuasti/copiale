@@ -5,8 +5,9 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use copiale_core::{
-    BackendError, Command, ConversationId, ConversationSummary, Direction, Event, Message,
-    MessageBody, MessageId, MessageStatus, Peer, ServiceId, StorageFailure, Timestamp,
+    BackendError, Command, ConversationId, ConversationSummary, Direction, Event, GroupMasterKey,
+    Member, Message, MessageBody, MessageId, MessageStatus, Peer, ServiceId, StorageFailure,
+    Timestamp,
 };
 use copiale_ui::onboarding::Screen;
 use copiale_ui::theme::{self, ActivePalette as _, Appearance, Scheme, Theme};
@@ -170,6 +171,7 @@ fn summary(id: i64, name: &str, unread: u32) -> ConversationSummary {
         id: ConversationId::new(id),
         peer: Peer::Contact(peer(id)),
         title: Some(name.into()),
+        members: Vec::new(),
         last_activity: Some(Timestamp::from_millis(1_000 - id as u64)),
         unread,
         last_message: None,
@@ -185,6 +187,7 @@ fn message(id: i64, direction: Direction, status: Option<MessageStatus>) -> Mess
         id: MessageId::new(id),
         conversation: ConversationId::new(1),
         direction,
+        sender: (direction == Direction::Incoming).then(|| peer(1)),
         sent_at: Timestamp::from_millis(id as u64 * 1000),
         received_at: Timestamp::from_millis(id as u64 * 1000),
         body: MessageBody::new(format!("*message* {id}")),
@@ -374,8 +377,8 @@ fn composer_sends_to_the_open_chat(cx: &mut TestAppContext) {
     assert!(
         matches!(
             commands.as_slice(),
-            [Command::SendText { recipient, body }]
-                if *recipient == peer(1) && body.as_str() == "hello\nthere"
+            [Command::SendText { conversation, body }]
+                if *conversation == ConversationId::new(1) && body.as_str() == "hello\nthere"
         ),
         "{commands:?}"
     );
@@ -616,4 +619,46 @@ fn wheel_scrolls_the_log_smoothly(cx: &mut TestAppContext) {
     );
     assert!(path[0] < px(30.), "eases in instead of jumping: {path:?}");
     assert!(path.windows(2).all(|pair| pair[0] <= pair[1]), "{path:?}");
+}
+
+#[gpui_kit::test]
+fn group_header_lists_members(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    let group = ConversationSummary {
+        peer: Peer::Group(GroupMasterKey::new([3; 32]).id()),
+        members: vec![
+            Member {
+                id: peer(1),
+                name: Some("Alice".into()),
+            },
+            Member {
+                id: peer(4),
+                name: None,
+            },
+        ],
+        ..summary(3, "Dev", 0)
+    };
+    ui.event(Event::ConversationUpdated(group), cx);
+    assert!(!ui.shows("members", cx));
+
+    ui.click(("conversation", 3u64), cx);
+    ui.event(
+        Event::Messages {
+            conversation: ConversationId::new(3),
+            before: None,
+            messages: vec![Message {
+                conversation: ConversationId::new(3),
+                sender: Some(peer(4)),
+                ..message(10, Direction::Incoming, None)
+            }],
+        },
+        cx,
+    );
+
+    assert!(ui.shows("members", cx));
+    let row = cx.update(|cx| {
+        let chat = ui.shell.read(cx).chat().unwrap().read(cx).chat();
+        chat.row(0).unwrap().prefix.sender.clone()
+    });
+    assert_eq!(row, "Unknown (0004)");
 }

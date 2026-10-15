@@ -10,12 +10,14 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
 use tokio::time::Instant;
 
+use super::groups::{Groups, Update};
 use super::outbox::{Outbox, Outcome};
 use super::probe::{Check, Probe};
 use super::{Command, CoreOptions, Event, StorageFailure};
 use crate::backend::{BackendError, Incoming, Linker, SignalBackend};
 use crate::model::{
-    ConversationId, Direction, MessageBody, MessageId, MessageStatus, ServiceId, Timestamp,
+    ConversationId, Destination, GroupRef, MessageBody, MessageId, MessageStatus, ServiceId,
+    Timestamp,
 };
 use crate::storage::{Database, KeyLookup, SecretStore, Storage, StorageError};
 
@@ -236,6 +238,7 @@ impl Core {
         let mut delay = self.options.reconnect_initial;
         let mut outbox = Outbox::new(self.options.send_timeout);
         let mut probe = Probe::new(self.options.probe_interval, self.options.probe_timeout);
+        let mut groups = Groups::new();
         loop {
             if retry_at.is_some_and(|at| at <= Instant::now()) {
                 retry_at = None;
@@ -256,19 +259,25 @@ impl Core {
 
             tokio::select! {
                 command = self.commands.recv() => match command {
-                    Some(Command::SendText { recipient, body }) => {
-                        self.send_text(db, &mut outbox, &mut backend, recipient, body).await;
+                    Some(Command::SendText { conversation, body }) => {
+                        self.send_text(db, &mut outbox, &mut backend, conversation, body).await;
                     }
                     Some(Command::RetrySend(id)) => match db.retry_send(id).await {
-                        Ok(Some((recipient, message))) => {
+                        Ok(Some((destination, message))) => {
                             self.emit(Event::MessageUpdated(message.clone()));
-                            outbox.push(recipient, &message, &mut backend);
+                            outbox.push(destination, &message, &mut backend);
                         }
                         Ok(None) => tracing::debug!(message = id.get(), "nothing to retry"),
                         Err(error) => self.database_error(error),
                     },
                     Some(Command::Reconnect) if incoming.is_none() && connecting.is_none() => {
                         retry_at = Some(Instant::now());
+                    }
+                    Some(Command::OpenConversation(peer)) => {
+                        match db.open_conversation(&Destination::Contact(peer)).await {
+                            Ok(conversation) => self.send_conversation(db, conversation).await,
+                            Err(error) => self.database_error(error),
+                        }
                     }
                     Some(Command::LoadConversations) => self.send_conversations(db).await,
                     Some(Command::LoadMessages { conversation, before, limit }) => {
@@ -307,10 +316,19 @@ impl Core {
                         self.emit(Event::Synced);
                     }
                     Some(Incoming::Message(message)) => {
-                        self.store(db, message.sender, Direction::Incoming, message.timestamp, &message.body).await;
+                        let destination = message
+                            .group
+                            .map_or(Destination::Contact(message.sender), Destination::Group);
+                        self.store(db, &destination, Some(message.sender), message.timestamp, &message.body).await;
+                        if let Some(group) = message.group {
+                            self.check_group(db, &mut groups, &mut backend, group).await;
+                        }
                     }
                     Some(Incoming::Sent(message)) => {
-                        self.store(db, message.recipient, Direction::Outgoing, message.timestamp, &message.body).await;
+                        self.store(db, &message.destination, None, message.timestamp, &message.body).await;
+                        if let Destination::Group(group) = message.destination {
+                            self.check_group(db, &mut groups, &mut backend, group).await;
+                        }
                     }
                     Some(Incoming::ContactsSynced) => {
                         match db.contact_count().await {
@@ -318,11 +336,24 @@ impl Core {
                             Err(error) => self.database_error(error),
                         }
                         self.send_conversations(db).await;
+                        // Member names may come from contacts.
+                        match db.group_keys().await {
+                            Ok(keys) => keys.into_iter().for_each(|key| groups.refresh(key, &mut backend)),
+                            Err(error) => self.database_error(error),
+                        }
                     }
                     None => {
                         tracing::info!("connection closed");
                         lost = Some(None);
                     }
+                },
+                update = groups.next() => match update {
+                    Update::Info(key, info) => match db.set_group(key, &info).await {
+                        Ok(Some(conversation)) => self.send_conversation(db, conversation).await,
+                        Ok(None) => {}
+                        Err(error) => self.database_error(error),
+                    },
+                    Update::Done(key) => groups.finished(key),
                 },
                 check = probe.next() => match check {
                     Check::Due => probe.run(&mut backend),
@@ -358,33 +389,58 @@ impl Core {
         }
     }
 
+    /// Refreshes the group's stored state if it's missing or older than
+    /// `group`'s revision.
+    async fn check_group<B: SignalBackend>(
+        &self,
+        db: &Database,
+        groups: &mut Groups,
+        backend: &mut B,
+        group: GroupRef,
+    ) {
+        match db.group_revision(group.key).await {
+            Ok(Some(stored)) if stored.is_none_or(|stored| stored < group.revision) => {
+                groups.refresh(group.key, backend);
+            }
+            Ok(_) => {}
+            Err(error) => self.database_error(error),
+        }
+    }
+
     /// Stores the text as pending and queues it.
     async fn send_text<B: SignalBackend>(
         &self,
         db: &Database,
         outbox: &mut Outbox,
         backend: &mut B,
-        recipient: ServiceId,
+        conversation: ConversationId,
         body: MessageBody,
     ) {
         if body.as_str().trim().is_empty() {
             tracing::debug!("empty message not sent");
             return;
         }
+        let destination = match db.destination(conversation).await {
+            Ok(Some(destination)) => destination,
+            Ok(None) => {
+                tracing::debug!(conversation = conversation.get(), "no such conversation");
+                return;
+            }
+            Err(error) => return self.database_error(error),
+        };
         // Signal identifies a message by author and sent time, so each needs
         // its own.
         let mut sent_at = Timestamp::now();
         let message = loop {
-            match db.add_pending(recipient, sent_at, &body).await {
+            match db.add_pending(conversation, sent_at, &body).await {
                 Ok(Some(message)) => break message,
                 Ok(None) => sent_at = Timestamp::from_millis(sent_at.as_millis() + 1),
                 Err(error) => return self.database_error(error),
             }
         };
-        let conversation = message.conversation;
         self.emit(Event::MessageAdded(message.clone()));
         self.send_conversation(db, conversation).await;
-        outbox.push(recipient, &message, backend);
+        outbox.push(destination, &message, backend);
     }
 
     async fn send_finished(&self, db: &Database, id: MessageId, result: Result<(), BackendError>) {
@@ -417,15 +473,16 @@ impl Core {
         Instant::now() + retry_in
     }
 
+    /// Stores a received message; `author` is `None` for this account's.
     async fn store(
         &self,
         db: &Database,
-        peer: ServiceId,
-        direction: Direction,
+        destination: &Destination,
+        author: Option<ServiceId>,
         sent_at: Timestamp,
         body: &MessageBody,
     ) {
-        match db.add_message(peer, direction, sent_at, body).await {
+        match db.add_message(destination, author, sent_at, body).await {
             Ok(Some(message)) => {
                 let conversation = message.conversation;
                 tracing::debug!(conversation = conversation.get(), "message stored");

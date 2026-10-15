@@ -10,7 +10,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 use crate::backend::{BackendError, SignalBackend};
-use crate::model::{Message, MessageBody, MessageId, ServiceId, Timestamp};
+use crate::model::{Destination, Message, MessageBody, MessageId, Timestamp};
 
 pub(super) struct Outbox {
     queue: VecDeque<Outgoing>,
@@ -22,7 +22,7 @@ pub(super) struct Outbox {
 
 struct Outgoing {
     id: MessageId,
-    recipient: ServiceId,
+    destination: Destination,
     body: MessageBody,
     sent_at: Timestamp,
     deadline: Instant,
@@ -57,13 +57,13 @@ impl Outbox {
     /// a `LocalSet`.
     pub(super) fn push<B: SignalBackend>(
         &mut self,
-        recipient: ServiceId,
+        destination: Destination,
         message: &Message,
         backend: &mut B,
     ) {
         self.queue.push_back(Outgoing {
             id: message.id,
-            recipient,
+            destination,
             body: message.body.clone(),
             sent_at: message.sent_at,
             deadline: Instant::now() + self.timeout,
@@ -130,7 +130,7 @@ impl Outbox {
         let Some(next) = self.queue.pop_front() else {
             return;
         };
-        let send = backend.send_text(next.recipient, next.body.clone(), next.sent_at);
+        let send = backend.send_text(next.destination, next.body.clone(), next.sent_at);
         self.sending = Some(Sending {
             outgoing: next,
             task: tokio::task::spawn_local(send),

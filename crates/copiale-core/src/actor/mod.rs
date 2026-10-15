@@ -1,6 +1,7 @@
 //! The core actor: owns storage and the Signal account on a dedicated
 //! thread, and walks through startup (unlock, then link) before serving.
 
+mod groups;
 mod outbox;
 mod probe;
 mod run;
@@ -43,7 +44,7 @@ pub enum Command {
     /// in the background: [`Event::MessageUpdated`] once sent, or
     /// [`Event::SendFailed`]. Sends go out one at a time, in order.
     SendText {
-        recipient: ServiceId,
+        conversation: ConversationId,
         body: MessageBody,
     },
     /// Sends a failed message again: [`Event::MessageUpdated`] as pending,
@@ -51,6 +52,9 @@ pub enum Command {
     RetrySend(MessageId),
     /// Reconnects now instead of waiting for the next retry.
     Reconnect,
+    /// Finds or creates the 1:1 conversation with an account; answered with
+    /// [`Event::ConversationUpdated`].
+    OpenConversation(ServiceId),
     /// Answered with [`Event::Conversations`].
     LoadConversations,
     /// Up to `limit` messages before `before` (or the newest); answered

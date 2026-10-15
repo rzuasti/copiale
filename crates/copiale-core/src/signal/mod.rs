@@ -12,18 +12,21 @@ use presage::Manager;
 use presage::libsignal_service::configuration::SignalServers;
 use presage::libsignal_service::content::{Content, ContentBody};
 use presage::libsignal_service::proto::sync_message::{Content as SyncContent, Sent};
-use presage::libsignal_service::proto::{DataMessage, SyncMessage};
+use presage::libsignal_service::proto::{DataMessage, GroupContextV2, SyncMessage};
 use presage::libsignal_service::protocol::{Aci, ServiceId as SignalServiceId};
 use presage::libsignal_service::push_service::ServiceError;
 use presage::libsignal_service::sender::MessageSenderError;
 use presage::manager::Registered;
 use presage::model::messages::Received;
-use presage::store::StateStore as _;
+use presage::store::{ContentsStore as _, StateStore as _};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::backend::{BackendError, Incoming, Linker, SignalBackend};
-use crate::model::{IncomingMessage, MessageBody, SentMessage, ServiceId, Timestamp};
+use crate::model::{
+    Destination, GroupInfo, GroupMasterKey, GroupRef, IncomingMessage, Member, MessageBody,
+    SentMessage, ServiceId, Timestamp,
+};
 use crate::storage::Database;
 use store::AppStore;
 
@@ -143,7 +146,7 @@ impl SignalBackend for PresageBackend {
     /// copy for the other devices.
     fn send_text(
         &mut self,
-        recipient: ServiceId,
+        destination: Destination,
         body: MessageBody,
         timestamp: Timestamp,
     ) -> LocalBoxFuture<'static, Result<(), BackendError>> {
@@ -154,10 +157,107 @@ impl SignalBackend for PresageBackend {
             ..Default::default()
         };
         async move {
-            manager
-                .send_message(Aci::from(recipient.uuid()), message, timestamp.as_millis())
+            match destination {
+                Destination::Contact(recipient) => {
+                    manager
+                        .send_message(Aci::from(recipient.uuid()), message, timestamp.as_millis())
+                        .await
+                }
+                Destination::Group(group) => {
+                    // presage's copy may be newer than the core's.
+                    let revision = match manager.store().group(*group.key.as_bytes()).await {
+                        Ok(Some(stored)) => stored.revision.max(group.revision),
+                        _ => group.revision,
+                    };
+                    let message = DataMessage {
+                        group_v2: Some(GroupContextV2 {
+                            master_key: Some(group.key.as_bytes().to_vec()),
+                            revision: Some(revision),
+                            ..Default::default()
+                        }),
+                        ..message
+                    };
+                    manager
+                        .send_message_to_group(group.key.as_bytes(), message, timestamp.as_millis())
+                        .await
+                }
+            }
+            .map_err(presage_error)
+        }
+        .boxed_local()
+    }
+
+    /// Reads presage's copy, which it refreshes when a message shows a newer
+    /// revision.
+    fn group(
+        &mut self,
+        key: GroupMasterKey,
+    ) -> LocalBoxFuture<'static, Result<Option<GroupInfo>, BackendError>> {
+        let manager = self.manager.clone();
+        async move {
+            let store = manager.store();
+            let Some(group) = store.group(*key.as_bytes()).await.map_err(store_error)? else {
+                return Ok(None);
+            };
+            let me = manager.registration_data().service_ids.aci;
+            let mut members = Vec::with_capacity(group.members.len());
+            for member in group
+                .members
+                .iter()
+                .filter(|member| member.aci != Aci::from(me))
+            {
+                members.push(Member {
+                    id: ServiceId::new(member.aci.into()),
+                    name: member_name(store, member).await,
+                });
+            }
+            Ok(Some(GroupInfo {
+                title: group.title,
+                revision: group.revision,
+                members,
+            }))
+        }
+        .boxed_local()
+    }
+
+    /// One request per member, one at a time, up to [`MAX_PROFILE_FETCHES`].
+    fn fetch_member_profiles(
+        &mut self,
+        key: GroupMasterKey,
+    ) -> LocalBoxFuture<'static, Result<(), BackendError>> {
+        let mut manager = self.manager.clone();
+        async move {
+            let Some(group) = manager
+                .store()
+                .group(*key.as_bytes())
                 .await
-                .map_err(presage_error)
+                .map_err(store_error)?
+            else {
+                return Ok(());
+            };
+            let me = Aci::from(manager.registration_data().service_ids.aci);
+            let mut fetched = 0;
+            for member in &group.members {
+                if member.aci == me || member_name(manager.store(), member).await.is_some() {
+                    continue;
+                }
+                if fetched == MAX_PROFILE_FETCHES {
+                    tracing::info!("profile fetches capped for a large group");
+                    break;
+                }
+                fetched += 1;
+                if let Err(error) = manager
+                    .retrieve_profile_by_uuid(member.aci, member.profile_key)
+                    .await
+                {
+                    let error = presage_error(error);
+                    if error.is_network() {
+                        return Err(error);
+                    }
+                    tracing::debug!(%error, "fetching a member profile failed");
+                }
+            }
+            Ok(())
         }
         .boxed_local()
     }
@@ -175,6 +275,32 @@ impl SignalBackend for PresageBackend {
     async fn request_contact_sync(&mut self) -> Result<(), BackendError> {
         self.manager.request_contacts().await.map_err(presage_error)
     }
+}
+
+/// Most profiles one [`SignalBackend::fetch_member_profiles`] call fetches.
+const MAX_PROFILE_FETCHES: usize = 100;
+
+/// A member's contact name, else cached profile name; blank ones count as
+/// unknown.
+async fn member_name(store: &AppStore, member: &presage::model::groups::Member) -> Option<String> {
+    let id: SignalServiceId = member.aci.into();
+    if let Ok(Some(contact)) = store.contact_by_id(&id).await
+        && !contact.name.trim().is_empty()
+    {
+        return Some(contact.name);
+    }
+    let profile = store
+        .profile(member.aci.into(), member.profile_key)
+        .await
+        .ok()
+        .flatten()?;
+    let name = profile.name?.to_string();
+    let name = name.trim();
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+fn store_error(error: impl std::error::Error) -> BackendError {
+    BackendError::new(error.to_string())
 }
 
 /// Marks connection failures as network errors.
@@ -220,27 +346,33 @@ fn incoming(received: Received) -> Option<Incoming> {
     }
 }
 
-/// A 1:1 text message from another account.
+/// A 1:1 or group text message from another account.
 fn text_message(content: &Content) -> Option<IncomingMessage> {
-    let ContentBody::DataMessage(DataMessage {
-        body: Some(body),
-        group_v2: None,
-        timestamp,
-        ..
-    }) = &content.body
+    let ContentBody::DataMessage(
+        message @ DataMessage {
+            body: Some(body),
+            timestamp,
+            ..
+        },
+    ) = &content.body
     else {
         return None;
+    };
+    let group = match &message.group_v2 {
+        Some(context) => Some(group_ref(context)?),
+        None => None,
     };
     let timestamp = timestamp
         .unwrap_or_else(|| content.metadata.client_timestamp.timestamp_millis().max(0) as u64);
     Some(IncomingMessage {
         sender: ServiceId::new(content.metadata.sender.raw_uuid()),
+        group,
         timestamp: Timestamp::from_millis(timestamp),
         body: MessageBody::new(body.clone()),
     })
 }
 
-/// A 1:1 text message this account sent from another device.
+/// A 1:1 or group text message this account sent from another device.
 fn sent_text(content: &Content) -> Option<SentMessage> {
     let ContentBody::SynchronizeMessage(SyncMessage {
         content: Some(SyncContent::Sent(sent)),
@@ -251,30 +383,45 @@ fn sent_text(content: &Content) -> Option<SentMessage> {
     };
     let Sent {
         message:
-            Some(DataMessage {
-                body: Some(body),
-                group_v2: None,
-                ..
-            }),
+            Some(
+                message @ DataMessage {
+                    body: Some(body), ..
+                },
+            ),
         timestamp: Some(timestamp),
         ..
     } = sent
     else {
         return None;
     };
-    let recipient = sent
-        .destination_service_id_binary
-        .as_deref()
-        .and_then(SignalServiceId::parse_from_service_id_binary)
-        .or_else(|| {
-            sent.destination_service_id
+    let destination = match &message.group_v2 {
+        Some(context) => Destination::Group(group_ref(context)?),
+        None => {
+            let recipient = sent
+                .destination_service_id_binary
                 .as_deref()
-                .and_then(SignalServiceId::parse_from_service_id_string)
-        })?;
+                .and_then(SignalServiceId::parse_from_service_id_binary)
+                .or_else(|| {
+                    sent.destination_service_id
+                        .as_deref()
+                        .and_then(SignalServiceId::parse_from_service_id_string)
+                })?;
+            Destination::Contact(ServiceId::new(recipient.raw_uuid()))
+        }
+    };
     Some(SentMessage {
-        recipient: ServiceId::new(recipient.raw_uuid()),
+        destination,
         timestamp: Timestamp::from_millis(*timestamp),
         body: MessageBody::new(body.clone()),
+    })
+}
+
+/// The group a message belongs to; `None` if its master key is malformed.
+fn group_ref(context: &GroupContextV2) -> Option<GroupRef> {
+    let key = <[u8; 32]>::try_from(context.master_key.as_deref()?).ok()?;
+    Some(GroupRef {
+        key: GroupMasterKey::new(key),
+        revision: context.revision.unwrap_or(0),
     })
 }
 
@@ -324,6 +471,7 @@ mod tests {
             incoming(received),
             Some(Incoming::Message(IncomingMessage {
                 sender: ServiceId::new(SENDER),
+                group: None,
                 timestamp: Timestamp::from_millis(42),
                 body: MessageBody::new("hi"),
             }))
@@ -336,14 +484,44 @@ mod tests {
         assert_eq!(message.timestamp, Timestamp::from_millis(1_700_000_000_123));
     }
 
+    fn group_context(key: Option<Vec<u8>>) -> Option<GroupContextV2> {
+        Some(GroupContextV2 {
+            master_key: key,
+            revision: Some(3),
+            ..Default::default()
+        })
+    }
+
     #[test]
-    fn skips_group_messages_for_now() {
+    fn maps_group_text() {
         let body = ContentBody::DataMessage(DataMessage {
             body: Some("hi all".into()),
-            group_v2: Some(GroupContextV2::default()),
+            group_v2: group_context(Some(vec![9; 32])),
             ..Default::default()
         });
-        assert_eq!(text_message(&content(body)), None);
+
+        let message = text_message(&content(body)).unwrap();
+
+        assert_eq!(message.sender, ServiceId::new(SENDER));
+        assert_eq!(
+            message.group,
+            Some(GroupRef {
+                key: GroupMasterKey::new([9; 32]),
+                revision: 3,
+            })
+        );
+    }
+
+    #[test]
+    fn skips_group_messages_with_a_bad_master_key() {
+        for key in [None, Some(vec![9; 31])] {
+            let body = ContentBody::DataMessage(DataMessage {
+                body: Some("hi all".into()),
+                group_v2: group_context(key),
+                ..Default::default()
+            });
+            assert_eq!(text_message(&content(body)), None);
+        }
     }
 
     #[test]
@@ -376,7 +554,11 @@ mod tests {
     fn sent_data(body: &str, group: bool) -> Option<DataMessage> {
         Some(DataMessage {
             body: Some(body.into()),
-            group_v2: group.then(GroupContextV2::default),
+            group_v2: if group {
+                group_context(Some(vec![9; 32]))
+            } else {
+                None
+            },
             ..Default::default()
         })
     }
@@ -394,7 +576,7 @@ mod tests {
         assert_eq!(
             incoming(Received::Content(Box::new(content(body)))),
             Some(Incoming::Sent(SentMessage {
-                recipient: ServiceId::new(RECIPIENT),
+                destination: Destination::Contact(ServiceId::new(RECIPIENT)),
                 timestamp: Timestamp::from_millis(77),
                 body: MessageBody::new("from phone"),
             }))
@@ -411,24 +593,39 @@ mod tests {
         });
 
         let sent = sent_text(&content(body)).unwrap();
-        assert_eq!(sent.recipient, ServiceId::new(RECIPIENT));
+        assert_eq!(
+            sent.destination,
+            Destination::Contact(ServiceId::new(RECIPIENT))
+        );
     }
 
     #[test]
-    fn skips_sent_group_messages_and_missing_recipients() {
-        let group = sent(Sent {
-            destination_service_id: Some(RECIPIENT.to_string()),
+    fn maps_group_text_sent_from_the_phone() {
+        let body = sent(Sent {
             timestamp: Some(77),
-            message: sent_data("x", true),
+            message: sent_data("to all", true),
             ..Default::default()
         });
+
+        let sent = sent_text(&content(body)).unwrap();
+
+        assert_eq!(
+            sent.destination,
+            Destination::Group(GroupRef {
+                key: GroupMasterKey::new([9; 32]),
+                revision: 3,
+            })
+        );
+    }
+
+    #[test]
+    fn skips_sent_messages_without_a_recipient() {
         let no_recipient = sent(Sent {
             timestamp: Some(77),
             message: sent_data("x", false),
             ..Default::default()
         });
 
-        assert_eq!(sent_text(&content(group)), None);
         assert_eq!(sent_text(&content(no_recipient)), None);
     }
 

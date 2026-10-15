@@ -22,7 +22,7 @@ use gpui_kit::{
     TestSupportExt as _, TextRun, Window, actions, canvas, div, font, list, px, rems,
 };
 
-use super::model::{Chat, Connection, Effects, LogChange, Row, title};
+use super::model::{Chat, Connection, Effects, LogChange, Row, member_list, title};
 use super::text::message_markdown;
 use super::time::Clock;
 use crate::CoreSink;
@@ -470,7 +470,25 @@ impl ChatView {
             .border_color(cx.palette().border)
             .font_family(cx.theme().mono_font_family.clone())
             .child(div().text_color(cx.palette().text_muted).child("# "))
-            .child(div().truncate().child(title(summary)));
+            .child(
+                div()
+                    .flex_none()
+                    .max_w_1_2()
+                    .truncate()
+                    .child(title(summary)),
+            )
+            .children(member_list(summary).map(|members| {
+                div()
+                    .id("members")
+                    .flex_1()
+                    .min_w_0()
+                    .ml_3()
+                    .truncate()
+                    .text_sm()
+                    .text_color(cx.palette().text_muted)
+                    .child(members)
+                    .test_support()
+            }));
 
         if self.log.logical_scroll_top().item_ix < LOAD_OLDER_WITHIN {
             let command = self.chat.load_older();

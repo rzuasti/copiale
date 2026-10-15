@@ -104,6 +104,6 @@ went unsolved until 2011.
 ## Status
 
 Pre-development. MVP planned (`docs/mvp.md`, Codeberg issues #1–#28);
-M0 (foundations) done; linking (#7) and receiving 1:1 text (#8) work end to
-end; sending 1:1 text (#9), the app shell (#10) and dark/light themes (#11)
-are done. Next: M2, starting with groups (#12).
+M0 (foundations) and M1 (walking skeleton, #7–#11) done. M2: group text
+(#12) done. Next: placeholders for non-text content and group updates
+(#13).

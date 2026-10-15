@@ -7,16 +7,17 @@ use uuid::Uuid;
 use super::StorageError;
 use super::database::{Database, database_error};
 use crate::model::{
-    ConversationId, ConversationSummary, Direction, Message, MessageBody, MessageId,
-    MessagePreview, MessageStatus, Peer, ServiceId, Timestamp,
+    ConversationId, ConversationSummary, Destination, Direction, GroupId, GroupInfo,
+    GroupMasterKey, GroupRef, Member, Message, MessageBody, MessageId, MessagePreview,
+    MessageStatus, Peer, ServiceId, Timestamp,
 };
 
-/// Summary columns: id, peer, last_activity, unread, last message
-/// direction and body. A macro so queries stay string literals, which sqlx
-/// requires.
+/// Summary columns: id, peer, group ID, group title, last_activity,
+/// unread, last message direction and body. A macro so queries stay string
+/// literals, which sqlx requires.
 macro_rules! summary_query {
     () => {
-        "SELECT c.id, c.peer, c.last_activity,
+        "SELECT c.id, c.peer, c.group_id, c.group_title, c.last_activity,
                 (SELECT count(*) FROM messages u WHERE u.conversation_id = c.id AND u.read = 0),
                 m.outgoing, m.body
          FROM conversations c
@@ -30,108 +31,99 @@ macro_rules! summary_query {
 /// Message columns, in [`MessageRow`] order.
 macro_rules! message_columns {
     () => {
-        "id, conversation_id, outgoing, sent_at, received_at, body, read, status"
+        "id, conversation_id, outgoing, author, sent_at, received_at, body, read, status"
     };
 }
 
-type SummaryRow = (i64, Vec<u8>, Option<i64>, i64, Option<bool>, Option<String>);
-type MessageRow = (i64, i64, bool, i64, i64, String, bool, Option<String>);
+type SummaryRow = (
+    i64,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+    Option<String>,
+    Option<i64>,
+    i64,
+    Option<bool>,
+    Option<String>,
+);
+type MessageRow = (
+    i64,
+    i64,
+    bool,
+    Vec<u8>,
+    i64,
+    i64,
+    String,
+    bool,
+    Option<String>,
+);
+type DestinationRow = (Option<Vec<u8>>, Option<Vec<u8>>, Option<i64>);
 
 impl Database {
-    /// Stores a received 1:1 message, or one sent from another device,
-    /// unless it's already stored (same peer, direction and sent time).
-    /// Returns it if new.
+    /// Stores a received message, or one sent from another device, unless
+    /// it's already stored (same conversation, author and sent time).
+    /// `author` is `None` for this account. Returns it if new.
     pub(crate) async fn add_message(
         &self,
-        peer: ServiceId,
-        direction: Direction,
+        destination: &Destination,
+        author: Option<ServiceId>,
         sent_at: Timestamp,
         body: &MessageBody,
     ) -> Result<Option<Message>, StorageError> {
-        let status = (direction == Direction::Outgoing).then_some(MessageStatus::Sent);
-        self.insert_message(peer, direction, status, sent_at, body)
-            .await
+        let mut tx = self.app.begin().await.map_err(database_error)?;
+        let conversation = conversation_id(&mut tx, destination).await?;
+        let status = author.is_none().then_some(MessageStatus::Sent);
+        let message = insert_message(&mut tx, conversation, author, status, sent_at, body).await?;
+        tx.commit().await.map_err(database_error)?;
+        Ok(message)
     }
 
-    /// Stores a message this device is about to send. `None` if one to
-    /// `peer` with the same sent time exists.
+    /// Stores a message this device is about to send. `None` if one with the
+    /// same sent time exists, or there is no such conversation.
     pub(crate) async fn add_pending(
         &self,
-        peer: ServiceId,
+        conversation: ConversationId,
         sent_at: Timestamp,
         body: &MessageBody,
     ) -> Result<Option<Message>, StorageError> {
-        let status = Some(MessageStatus::Pending);
-        self.insert_message(peer, Direction::Outgoing, status, sent_at, body)
-            .await
-    }
-
-    async fn insert_message(
-        &self,
-        peer: ServiceId,
-        direction: Direction,
-        status: Option<MessageStatus>,
-        sent_at: Timestamp,
-        body: &MessageBody,
-    ) -> Result<Option<Message>, StorageError> {
-        let received_at = Timestamp::now();
-        let outgoing = direction == Direction::Outgoing;
         let mut tx = self.app.begin().await.map_err(database_error)?;
-
-        // `DO UPDATE` rather than `DO NOTHING` so `RETURNING` yields the id.
-        let conversation: i64 = sqlx::query_scalar(
-            "INSERT INTO conversations (peer) VALUES (?)
-             ON CONFLICT (peer) DO UPDATE SET peer = excluded.peer
-             RETURNING id",
-        )
-        .bind(peer.uuid().as_bytes().as_slice())
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(database_error)?;
-
-        let id: Option<i64> = sqlx::query_scalar(
-            "INSERT INTO messages
-                 (conversation_id, outgoing, sent_at, received_at, body, read, status)
-             VALUES (?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT DO NOTHING
-             RETURNING id",
-        )
-        .bind(conversation)
-        .bind(outgoing)
-        .bind(millis(sent_at))
-        .bind(millis(received_at))
-        .bind(body.as_str())
-        .bind(outgoing)
-        .bind(status.map(status_name))
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(database_error)?;
-
-        let Some(id) = id else {
-            tx.commit().await.map_err(database_error)?;
+        let exists: Option<i64> = sqlx::query_scalar("SELECT id FROM conversations WHERE id = ?")
+            .bind(conversation.get())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(database_error)?;
+        let Some(conversation) = exists else {
             return Ok(None);
         };
-        sqlx::query(
-            "UPDATE conversations SET last_activity = max(coalesce(last_activity, 0), ?)
-             WHERE id = ?",
+        let status = Some(MessageStatus::Pending);
+        let message = insert_message(&mut tx, conversation, None, status, sent_at, body).await?;
+        tx.commit().await.map_err(database_error)?;
+        Ok(message)
+    }
+
+    /// The conversation with `destination`, created if new.
+    pub(crate) async fn open_conversation(
+        &self,
+        destination: &Destination,
+    ) -> Result<ConversationId, StorageError> {
+        let mut tx = self.app.begin().await.map_err(database_error)?;
+        let id = conversation_id(&mut tx, destination).await?;
+        tx.commit().await.map_err(database_error)?;
+        Ok(ConversationId::new(id))
+    }
+
+    /// Where messages in `conversation` go.
+    pub(crate) async fn destination(
+        &self,
+        conversation: ConversationId,
+    ) -> Result<Option<Destination>, StorageError> {
+        let row: Option<DestinationRow> = sqlx::query_as(
+            "SELECT peer, group_master_key, group_revision FROM conversations WHERE id = ?",
         )
-        .bind(millis(received_at))
-        .bind(conversation)
-        .execute(&mut *tx)
+        .bind(conversation.get())
+        .fetch_optional(&self.app)
         .await
         .map_err(database_error)?;
-        tx.commit().await.map_err(database_error)?;
-
-        Ok(Some(Message {
-            id: MessageId::new(id),
-            conversation: ConversationId::new(conversation),
-            direction,
-            sent_at,
-            received_at,
-            body: body.clone(),
-            read: outgoing,
-            status,
-        }))
+        row.map(destination).transpose()
     }
 
     /// Sets an outgoing message's status; returns it, or `None` if there is
@@ -153,12 +145,12 @@ impl Database {
         row.map(message).transpose()
     }
 
-    /// Marks a failed message pending again; returns it with its recipient,
+    /// Marks a failed message pending again; returns it with where it goes,
     /// or `None` if it hasn't failed.
     pub(crate) async fn retry_send(
         &self,
         id: MessageId,
-    ) -> Result<Option<(ServiceId, Message)>, StorageError> {
+    ) -> Result<Option<(Destination, Message)>, StorageError> {
         let mut tx = self.app.begin().await.map_err(database_error)?;
         let row: Option<MessageRow> = sqlx::query_as(concat!(
             "UPDATE messages SET status = 'pending' WHERE id = ? AND status = 'failed' RETURNING ",
@@ -171,13 +163,15 @@ impl Database {
         let Some(message) = row.map(message).transpose()? else {
             return Ok(None);
         };
-        let peer: Vec<u8> = sqlx::query_scalar("SELECT peer FROM conversations WHERE id = ?")
-            .bind(message.conversation.get())
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(database_error)?;
+        let row: DestinationRow = sqlx::query_as(
+            "SELECT peer, group_master_key, group_revision FROM conversations WHERE id = ?",
+        )
+        .bind(message.conversation.get())
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(database_error)?;
         tx.commit().await.map_err(database_error)?;
-        Ok(Some((service_id(&peer)?, message)))
+        Ok(Some((destination(row)?, message)))
     }
 
     /// Marks messages left pending, e.g. by a quit mid-send, failed;
@@ -188,6 +182,76 @@ impl Database {
             .await
             .map_err(database_error)?;
         Ok(result.rows_affected())
+    }
+
+    /// The stored revision of a known group's state: `Some(None)` if it
+    /// hasn't been fetched, `None` if there is no such group.
+    pub(crate) async fn group_revision(
+        &self,
+        key: GroupMasterKey,
+    ) -> Result<Option<Option<u32>>, StorageError> {
+        let revision: Option<Option<i64>> = sqlx::query_scalar(
+            "SELECT group_revision FROM conversations WHERE group_master_key = ?",
+        )
+        .bind(key.as_bytes().as_slice())
+        .fetch_optional(&self.app)
+        .await
+        .map_err(database_error)?;
+        Ok(revision.map(|revision| revision.and_then(|r| u32::try_from(r).ok())))
+    }
+
+    /// All groups' master keys.
+    pub(crate) async fn group_keys(&self) -> Result<Vec<GroupMasterKey>, StorageError> {
+        let keys: Vec<Vec<u8>> = sqlx::query_scalar(
+            "SELECT group_master_key FROM conversations WHERE group_master_key IS NOT NULL",
+        )
+        .fetch_all(&self.app)
+        .await
+        .map_err(database_error)?;
+        keys.iter().map(|key| master_key(key)).collect()
+    }
+
+    /// Stores a group's fetched state; returns its conversation, or `None`
+    /// if there is no such group.
+    pub(crate) async fn set_group(
+        &self,
+        key: GroupMasterKey,
+        info: &GroupInfo,
+    ) -> Result<Option<ConversationId>, StorageError> {
+        let mut tx = self.app.begin().await.map_err(database_error)?;
+        let id: Option<i64> = sqlx::query_scalar(
+            "UPDATE conversations SET group_title = ?, group_revision = ?
+             WHERE group_master_key = ? RETURNING id",
+        )
+        .bind(&info.title)
+        .bind(i64::from(info.revision))
+        .bind(key.as_bytes().as_slice())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(database_error)?;
+        let Some(id) = id else {
+            return Ok(None);
+        };
+        sqlx::query("DELETE FROM group_members WHERE conversation_id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(database_error)?;
+        for (position, member) in info.members.iter().enumerate() {
+            sqlx::query(
+                "INSERT OR IGNORE INTO group_members (conversation_id, member, name, position)
+                 VALUES (?, ?, ?, ?)",
+            )
+            .bind(id)
+            .bind(member.id.uuid().as_bytes().as_slice())
+            .bind(member.name.as_deref())
+            .bind(position as i64)
+            .execute(&mut *tx)
+            .await
+            .map_err(database_error)?;
+        }
+        tx.commit().await.map_err(database_error)?;
+        Ok(Some(ConversationId::new(id)))
     }
 
     /// All conversations, most recently active first.
@@ -277,20 +341,59 @@ impl Database {
     }
 
     async fn summary(&self, row: SummaryRow) -> Result<ConversationSummary, StorageError> {
-        let (id, peer, last_activity, unread, outgoing, body) = row;
-        let peer = service_id(&peer)?;
+        let (id, peer, group_id, group_title, last_activity, unread, outgoing, body) = row;
         let last_message = outgoing.zip(body).map(|(outgoing, body)| MessagePreview {
             direction: direction(outgoing),
             body: MessageBody::new(body),
         });
+        let (peer, title, members) = match (peer, group_id) {
+            (Some(peer), _) => {
+                let peer = service_id(&peer)?;
+                (
+                    Peer::Contact(peer),
+                    self.contact_name(peer).await,
+                    Vec::new(),
+                )
+            }
+            (None, Some(group_id)) => {
+                let bytes = <[u8; 32]>::try_from(group_id.as_slice())
+                    .map_err(|_| StorageError::Database("invalid group ID".into()))?;
+                let title = group_title.filter(|title| !title.trim().is_empty());
+                (
+                    Peer::Group(GroupId::new(bytes)),
+                    title,
+                    self.members(id).await?,
+                )
+            }
+            (None, None) => return Err(StorageError::Database("conversation without peer".into())),
+        };
         Ok(ConversationSummary {
             id: ConversationId::new(id),
-            peer: Peer::Contact(peer),
-            title: self.contact_name(peer).await,
+            peer,
+            title,
+            members,
             last_activity: last_activity.map(timestamp),
             unread: u32::try_from(unread).unwrap_or(u32::MAX),
             last_message,
         })
+    }
+
+    async fn members(&self, conversation: i64) -> Result<Vec<Member>, StorageError> {
+        let rows: Vec<(Vec<u8>, Option<String>)> = sqlx::query_as(
+            "SELECT member, name FROM group_members WHERE conversation_id = ? ORDER BY position",
+        )
+        .bind(conversation)
+        .fetch_all(&self.app)
+        .await
+        .map_err(database_error)?;
+        rows.into_iter()
+            .map(|(member, name)| {
+                Ok(Member {
+                    id: service_id(&member)?,
+                    name,
+                })
+            })
+            .collect()
     }
 
     /// The synced contact name; `None` if unknown or blank.
@@ -307,13 +410,127 @@ impl Database {
     }
 }
 
+/// The conversation with `destination`, created if new.
+async fn conversation_id(
+    tx: &mut sqlx::SqliteConnection,
+    destination: &Destination,
+) -> Result<i64, StorageError> {
+    match destination {
+        Destination::Contact(peer) => {
+            // `DO UPDATE` rather than `DO NOTHING` so `RETURNING` yields the id.
+            sqlx::query_scalar(
+                "INSERT INTO conversations (peer) VALUES (?)
+                 ON CONFLICT (peer) DO UPDATE SET peer = excluded.peer
+                 RETURNING id",
+            )
+            .bind(peer.uuid().as_bytes().as_slice())
+            .fetch_one(&mut *tx)
+            .await
+        }
+        Destination::Group(group) => {
+            sqlx::query_scalar(
+                "INSERT INTO conversations (group_master_key, group_id) VALUES (?, ?)
+                 ON CONFLICT (group_master_key) DO UPDATE
+                     SET group_master_key = excluded.group_master_key
+                 RETURNING id",
+            )
+            .bind(group.key.as_bytes().as_slice())
+            .bind(group.key.id().as_bytes().as_slice())
+            .fetch_one(&mut *tx)
+            .await
+        }
+    }
+    .map_err(database_error)
+}
+
+/// Inserts a message into `conversation` unless it's a duplicate, and
+/// bumps the conversation's activity.
+async fn insert_message(
+    tx: &mut sqlx::SqliteConnection,
+    conversation: i64,
+    author: Option<ServiceId>,
+    status: Option<MessageStatus>,
+    sent_at: Timestamp,
+    body: &MessageBody,
+) -> Result<Option<Message>, StorageError> {
+    let received_at = Timestamp::now();
+    let outgoing = author.is_none();
+    let author_bytes = author.map(|author| author.uuid().as_bytes().to_vec());
+    let id: Option<i64> = sqlx::query_scalar(
+        "INSERT INTO messages
+             (conversation_id, outgoing, author, sent_at, received_at, body, read, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT DO NOTHING
+         RETURNING id",
+    )
+    .bind(conversation)
+    .bind(outgoing)
+    .bind(author_bytes.unwrap_or_default())
+    .bind(millis(sent_at))
+    .bind(millis(received_at))
+    .bind(body.as_str())
+    .bind(outgoing)
+    .bind(status.map(status_name))
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(database_error)?;
+
+    let Some(id) = id else {
+        return Ok(None);
+    };
+    sqlx::query(
+        "UPDATE conversations SET last_activity = max(coalesce(last_activity, 0), ?)
+         WHERE id = ?",
+    )
+    .bind(millis(received_at))
+    .bind(conversation)
+    .execute(&mut *tx)
+    .await
+    .map_err(database_error)?;
+
+    Ok(Some(Message {
+        id: MessageId::new(id),
+        conversation: ConversationId::new(conversation),
+        direction: direction(outgoing),
+        sender: author,
+        sent_at,
+        received_at,
+        body: body.clone(),
+        read: outgoing,
+        status,
+    }))
+}
+
+fn destination(row: DestinationRow) -> Result<Destination, StorageError> {
+    match row {
+        (Some(peer), _, _) => Ok(Destination::Contact(service_id(&peer)?)),
+        (None, Some(key), revision) => Ok(Destination::Group(GroupRef {
+            key: master_key(&key)?,
+            revision: revision.and_then(|r| u32::try_from(r).ok()).unwrap_or(0),
+        })),
+        (None, None, _) => Err(StorageError::Database("conversation without peer".into())),
+    }
+}
+
+fn master_key(bytes: &[u8]) -> Result<GroupMasterKey, StorageError> {
+    <[u8; 32]>::try_from(bytes)
+        .map(GroupMasterKey::new)
+        .map_err(|_| StorageError::Database("invalid group master key".into()))
+}
+
 fn message(row: MessageRow) -> Result<Message, StorageError> {
-    let (id, conversation, outgoing, sent_at, received_at, body, read, status) = row;
+    let (id, conversation, outgoing, author, sent_at, received_at, body, read, status) = row;
     let status = status.as_deref().map(parse_status).transpose()?;
+    let sender = if author.is_empty() {
+        None
+    } else {
+        Some(service_id(&author)?)
+    };
     Ok(Message {
         id: MessageId::new(id),
         conversation: ConversationId::new(conversation),
         direction: direction(outgoing),
+        sender,
         sent_at: timestamp(sent_at),
         received_at: timestamp(received_at),
         body: MessageBody::new(body),
@@ -325,7 +542,7 @@ fn message(row: MessageRow) -> Result<Message, StorageError> {
 fn service_id(peer: &[u8]) -> Result<ServiceId, StorageError> {
     Uuid::from_slice(peer)
         .map(ServiceId::new)
-        .map_err(|_| StorageError::Database("invalid peer in conversations".into()))
+        .map_err(|_| StorageError::Database("invalid service ID".into()))
 }
 
 fn status_name(status: MessageStatus) -> &'static str {
@@ -389,14 +606,42 @@ mod tests {
         sent_at: u64,
         body: &str,
     ) -> Option<Message> {
+        let author = (direction == Direction::Incoming).then(|| peer(from));
         db.add_message(
-            peer(from),
-            direction,
+            &Destination::Contact(peer(from)),
+            author,
             Timestamp::from_millis(sent_at),
             &MessageBody::new(body),
         )
         .await
         .unwrap()
+    }
+
+    fn group(n: u8) -> GroupRef {
+        GroupRef {
+            key: GroupMasterKey::new([n; 32]),
+            revision: 1,
+        }
+    }
+
+    async fn add_to_group(
+        db: &Database,
+        group: GroupRef,
+        from: Option<u128>,
+        sent_at: u64,
+    ) -> Option<Message> {
+        db.add_message(
+            &Destination::Group(group),
+            from.map(peer),
+            Timestamp::from_millis(sent_at),
+            &MessageBody::new("hi all"),
+        )
+        .await
+        .unwrap()
+    }
+
+    async fn conversation_with(db: &Database, destination: Destination) -> ConversationId {
+        db.open_conversation(&destination).await.unwrap()
     }
 
     #[tokio::test]
@@ -481,8 +726,9 @@ mod tests {
     }
 
     async fn pending(db: &Database, to: u128, sent_at: u64) -> Option<Message> {
+        let conversation = conversation_with(db, Destination::Contact(peer(to))).await;
         db.add_pending(
-            peer(to),
+            conversation,
             Timestamp::from_millis(sent_at),
             &MessageBody::new("out"),
         )
@@ -551,9 +797,9 @@ mod tests {
             .await
             .unwrap();
 
-        let (recipient, retried) = db.retry_send(message.id).await.unwrap().unwrap();
+        let (destination, retried) = db.retry_send(message.id).await.unwrap().unwrap();
 
-        assert_eq!(recipient, peer(7));
+        assert_eq!(destination, Destination::Contact(peer(7)));
         assert_eq!(retried.status, Some(MessageStatus::Pending));
         assert_eq!(retried.sent_at, message.sent_at);
         assert_eq!(db.retry_send(message.id).await.unwrap(), None);
@@ -678,12 +924,137 @@ mod tests {
         db.close().await;
     }
 
+    #[tokio::test]
+    async fn incoming_messages_keep_their_author() {
+        let (_dir, db) = db().await;
+
+        let incoming = add(&db, 1, Direction::Incoming, 100, "a").await.unwrap();
+        let outgoing = add(&db, 1, Direction::Outgoing, 101, "b").await.unwrap();
+
+        assert_eq!(incoming.sender, Some(peer(1)));
+        assert_eq!(outgoing.sender, None);
+        let stored = db.messages(incoming.conversation, None, 10).await.unwrap();
+        assert_eq!(stored, [incoming, outgoing]);
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn group_messages_share_a_conversation_by_master_key() {
+        let (_dir, db) = db().await;
+
+        let from_alice = add_to_group(&db, group(1), Some(1), 100).await.unwrap();
+        // Same time, other author: a different message.
+        let from_bob = add_to_group(&db, group(1), Some(2), 100).await.unwrap();
+        let mine = add_to_group(&db, group(1), None, 100).await.unwrap();
+        let elsewhere = add_to_group(&db, group(2), Some(1), 100).await.unwrap();
+
+        assert_eq!(add_to_group(&db, group(1), Some(1), 100).await, None);
+        assert_eq!(from_alice.conversation, from_bob.conversation);
+        assert_eq!(from_alice.conversation, mine.conversation);
+        assert_ne!(from_alice.conversation, elsewhere.conversation);
+        assert_eq!(from_bob.sender, Some(peer(2)));
+        assert_eq!(mine.direction, Direction::Outgoing);
+        assert_eq!(mine.status, Some(MessageStatus::Sent));
+
+        let summary = db
+            .conversation(from_alice.conversation)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(summary.peer, Peer::Group(group(1).key.id()));
+        assert_eq!(summary.title, None);
+        assert_eq!(summary.members, []);
+        assert_eq!(summary.unread, 2);
+        let destination = db.destination(from_alice.conversation).await.unwrap();
+        assert_eq!(
+            destination,
+            Some(Destination::Group(GroupRef {
+                key: group(1).key,
+                revision: 0,
+            }))
+        );
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn group_state_is_stored() {
+        let (_dir, db) = db().await;
+        let key = group(1).key;
+        let info = GroupInfo {
+            title: "Dev".into(),
+            revision: 4,
+            members: vec![
+                Member {
+                    id: peer(2),
+                    name: Some("Bob".into()),
+                },
+                Member {
+                    id: peer(1),
+                    name: None,
+                },
+            ],
+        };
+        assert_eq!(db.group_revision(key).await.unwrap(), None);
+        assert_eq!(db.set_group(key, &info).await.unwrap(), None);
+
+        let message = add_to_group(&db, group(1), Some(1), 100).await.unwrap();
+        assert_eq!(db.group_revision(key).await.unwrap(), Some(None));
+        assert_eq!(db.group_keys().await.unwrap(), [key]);
+
+        assert_eq!(
+            db.set_group(key, &info).await.unwrap(),
+            Some(message.conversation)
+        );
+        assert_eq!(db.group_revision(key).await.unwrap(), Some(Some(4)));
+        let summary = db
+            .conversation(message.conversation)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(summary.title.as_deref(), Some("Dev"));
+        assert_eq!(summary.members, info.members);
+        let Some(Destination::Group(group)) = db.destination(message.conversation).await.unwrap()
+        else {
+            panic!("not a group");
+        };
+        assert_eq!(group.revision, 4);
+
+        let fewer = GroupInfo {
+            members: info.members[..1].to_vec(),
+            ..info
+        };
+        db.set_group(key, &fewer).await.unwrap();
+        let summary = db
+            .conversation(message.conversation)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(summary.members, fewer.members);
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn pending_needs_an_existing_conversation() {
+        let (_dir, db) = db().await;
+        let missing = db
+            .add_pending(
+                ConversationId::new(42),
+                Timestamp::from_millis(1),
+                &MessageBody::new("x"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing, None);
+        db.close().await;
+    }
+
     #[test]
     fn summary_debug_hides_the_title() {
         let summary = ConversationSummary {
             id: ConversationId::new(1),
             peer: Peer::Contact(peer(1)),
             title: Some("Alice Secret".into()),
+            members: Vec::new(),
             last_activity: None,
             unread: 0,
             last_message: None,

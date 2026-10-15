@@ -92,7 +92,6 @@ pub struct Chat {
 #[derive(Debug)]
 struct Log {
     id: ConversationId,
-    peer: ServiceId,
     /// Oldest first, by sent time.
     messages: Vec<Message>,
     /// Index of each message's group's first message.
@@ -120,9 +119,11 @@ impl Log {
     }
 }
 
-/// Whether `next` joins `previous`'s group: same side, same day, close in time.
+/// Whether `next` joins `previous`'s group: same author, same day, close in
+/// time.
 fn continues(clock: &Clock, previous: &Message, next: &Message) -> bool {
     previous.direction == next.direction
+        && previous.sender == next.sender
         && clock.day(previous.sent_at) == clock.day(next.sent_at)
         && next
             .sent_at
@@ -220,13 +221,9 @@ impl Chat {
         let new_day = previous.is_none_or(|previous| self.clock.day(previous.sent_at) != day);
         let start = log.starts[ix];
         let first = &log.messages[start];
-        let (sender, peer) = match first.direction {
-            Direction::Outgoing => ("you".into(), None),
-            Direction::Incoming => (
-                self.open_conversation()
-                    .map_or_else(|| unknown(log.peer), title),
-                Some(log.peer),
-            ),
+        let (sender, peer) = match (first.direction, first.sender) {
+            (Direction::Incoming, Some(author)) => (self.author_name(author), Some(author)),
+            _ => ("you".into(), None),
         };
         Some(Row {
             message,
@@ -239,6 +236,22 @@ impl Chat {
             day: new_day.then(|| self.clock.day_label(day)),
             error: log.errors.get(&message.id),
         })
+    }
+
+    /// An incoming message's author as the open conversation knows them.
+    fn author_name(&self, author: ServiceId) -> String {
+        let Some(summary) = self.open_conversation() else {
+            return unknown(author);
+        };
+        match summary.peer {
+            Peer::Contact(_) => title(summary),
+            Peer::Group(_) => summary
+                .members
+                .iter()
+                .find(|member| member.id == author)
+                .and_then(|member| member.name.clone())
+                .unwrap_or_else(|| unknown(author)),
+        }
     }
 
     /// Whether older messages are being loaded.
@@ -293,11 +306,9 @@ impl Chat {
         let Some(summary) = self.conversations.iter().find(|c| c.id == id) else {
             return Effects::default();
         };
-        let Peer::Contact(peer) = summary.peer;
         let unread = summary.unread > 0;
         self.open = Some(Log {
             id,
-            peer,
             messages: Vec::new(),
             starts: Vec::new(),
             loaded: false,
@@ -344,7 +355,7 @@ impl Chat {
             return None;
         }
         Some(Command::SendText {
-            recipient: log.peer,
+            conversation: log.id,
             body: MessageBody::new(text),
         })
     }
@@ -456,11 +467,36 @@ impl Chat {
     }
 }
 
-/// The contact name, or a stand-in naming the end of the account ID.
+/// The contact name or group title, or a stand-in.
 pub fn title(summary: &ConversationSummary) -> String {
-    let Peer::Contact(peer) = summary.peer;
-    summary.title.clone().unwrap_or_else(|| unknown(peer))
+    summary.title.clone().unwrap_or_else(|| match summary.peer {
+        Peer::Contact(peer) => unknown(peer),
+        Peer::Group(_) => "Unknown group".into(),
+    })
 }
+
+/// A group's members as the header lists them: the first few names and a
+/// count of the rest; `None` for 1:1 or before the members are known.
+pub fn member_list(summary: &ConversationSummary) -> Option<String> {
+    if summary.members.is_empty() {
+        return None;
+    }
+    let names: Vec<_> = summary
+        .members
+        .iter()
+        .take(LISTED_MEMBERS)
+        .map(|member| member.name.clone().unwrap_or_else(|| unknown(member.id)))
+        .collect();
+    let rest = summary.members.len().saturating_sub(LISTED_MEMBERS);
+    let mut list = names.join(", ");
+    if rest > 0 {
+        list.push_str(&format!(" +{rest}"));
+    }
+    Some(list)
+}
+
+/// Members named in [`member_list`].
+const LISTED_MEMBERS: usize = 5;
 
 fn unknown(peer: ServiceId) -> String {
     let hex = peer.uuid().simple().to_string();
@@ -470,6 +506,7 @@ fn unknown(peer: ServiceId) -> String {
 #[cfg(test)]
 mod tests {
     use chrono::FixedOffset;
+    use copiale_core::{GroupMasterKey, Member};
     use uuid::Uuid;
 
     use super::*;
@@ -498,6 +535,7 @@ mod tests {
             id: ConversationId::new(id),
             peer: Peer::Contact(peer(id as u128)),
             title: title.map(Into::into),
+            members: Vec::new(),
             last_activity: Some(Timestamp::from_millis(activity)),
             unread,
             last_message: None,
@@ -510,6 +548,7 @@ mod tests {
             id: MessageId::new(id),
             conversation: ConversationId::new(1),
             direction,
+            sender: (!outgoing).then(|| peer(1)),
             sent_at: Timestamp::from_millis(sent_at),
             received_at: Timestamp::from_millis(sent_at),
             body: MessageBody::new(format!("message {id}")),
@@ -843,10 +882,10 @@ mod tests {
         chat.open(ConversationId::new(1));
 
         assert!(chat.submit(" \n ").is_none());
-        let Some(Command::SendText { recipient, body }) = chat.submit("  hi\nthere \n") else {
+        let Some(Command::SendText { conversation, body }) = chat.submit("  hi\nthere \n") else {
             panic!("expected SendText");
         };
-        assert_eq!(recipient, peer(1));
+        assert_eq!(conversation, ConversationId::new(1));
         assert_eq!(body, MessageBody::new("hi\nthere"));
     }
 
@@ -902,5 +941,77 @@ mod tests {
 
         chat.apply(&Event::Connected, true);
         assert_eq!(chat.connection_label_changes_in(later(0)), None);
+    }
+
+    fn group_summary(members: Vec<Member>, title: Option<&str>) -> ConversationSummary {
+        ConversationSummary {
+            peer: Peer::Group(GroupMasterKey::new([1; 32]).id()),
+            members,
+            ..summary(1, NOW, 0, title)
+        }
+    }
+
+    fn member(n: u128, name: Option<&str>) -> Member {
+        Member {
+            id: peer(n),
+            name: name.map(Into::into),
+        }
+    }
+
+    fn from(id: i64, author: u128, sent_at: u64) -> Message {
+        Message {
+            sender: Some(peer(author)),
+            ..incoming(id, sent_at)
+        }
+    }
+
+    #[test]
+    fn groups_without_a_title_are_unknown_groups() {
+        assert_eq!(title(&group_summary(vec![], None)), "Unknown group");
+        assert_eq!(title(&group_summary(vec![], Some("Dev"))), "Dev");
+    }
+
+    #[test]
+    fn member_list_names_the_first_few() {
+        assert_eq!(member_list(&summary(1, NOW, 0, Some("Alice"))), None);
+        let few = group_summary(vec![member(1, Some("Alice")), member(0xab12, None)], None);
+        assert_eq!(member_list(&few).as_deref(), Some("Alice, Unknown (ab12)"));
+        let many = group_summary((1..=8).map(|n| member(n, Some("M"))).collect(), None);
+        assert_eq!(member_list(&many).as_deref(), Some("M, M, M, M, M +3"));
+    }
+
+    #[test]
+    fn group_rows_name_and_group_by_author() {
+        let mut chat = chat();
+        chat.apply(
+            &Event::Conversations(vec![group_summary(
+                vec![member(1, Some("Alice")), member(2, None)],
+                Some("Dev"),
+            )]),
+            true,
+        );
+        chat.open(ConversationId::new(1));
+        let today = NOW - 5 * MINUTE;
+        chat.apply(
+            &Event::Messages {
+                conversation: ConversationId::new(1),
+                before: None,
+                messages: vec![
+                    from(1, 1, today),
+                    from(2, 1, today + MINUTE),
+                    from(3, 2, today + 2 * MINUTE),
+                    from(4, 3, today + 3 * MINUTE),
+                ],
+            },
+            true,
+        );
+        let row = |ix| chat.row(ix).unwrap();
+
+        assert_eq!(row(0).prefix.sender, "Alice");
+        assert_eq!(row(0).prefix.peer, Some(peer(1)));
+        assert!(!row(1).leads);
+        assert!(row(2).leads, "another author starts a group");
+        assert_eq!(row(2).prefix.sender, "Unknown (0002)");
+        assert_eq!(row(3).prefix.sender, "Unknown (0003)", "no longer a member");
     }
 }

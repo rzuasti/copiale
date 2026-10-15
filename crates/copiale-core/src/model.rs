@@ -3,6 +3,7 @@
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use presage::libsignal_service::zkgroup::groups;
 use uuid::Uuid;
 
 /// Signal account identifier. `Debug` shows only the last 4 hex digits.
@@ -49,7 +50,8 @@ impl fmt::Debug for PhoneNumber {
     }
 }
 
-/// Signal group identifier. `Debug` shows only the last 2 bytes.
+/// Public Signal group identifier, derived from the master key. `Debug`
+/// shows only the last 2 bytes.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GroupId([u8; 32]);
 
@@ -67,6 +69,49 @@ impl fmt::Debug for GroupId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "GroupId(…{:02x}{:02x})", self.0[30], self.0[31])
     }
+}
+
+/// Groups v2 master key: grants access to the group's state, so it is
+/// secret. `Debug` shows nothing of it.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GroupMasterKey([u8; 32]);
+
+impl GroupMasterKey {
+    pub fn new(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    /// The group's public identifier.
+    pub fn id(&self) -> GroupId {
+        let key = groups::GroupMasterKey::new(self.0);
+        let params = groups::GroupSecretParams::derive_from_master_key(key);
+        GroupId(params.get_group_identifier())
+    }
+}
+
+impl fmt::Debug for GroupMasterKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("GroupMasterKey(…)")
+    }
+}
+
+/// A group as a message refers to it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GroupRef {
+    pub key: GroupMasterKey,
+    /// The group state's revision when the message was sent.
+    pub revision: u32,
+}
+
+/// Where a message goes: one account, or a group.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Destination {
+    Contact(ServiceId),
+    Group(GroupRef),
 }
 
 /// Message text. `Debug` shows only its length.
@@ -114,6 +159,8 @@ impl Timestamp {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IncomingMessage {
     pub sender: ServiceId,
+    /// The group it was sent in; `None` for 1:1.
+    pub group: Option<GroupRef>,
     pub timestamp: Timestamp,
     pub body: MessageBody,
 }
@@ -121,9 +168,35 @@ pub struct IncomingMessage {
 /// A text message this account sent from another device (the phone).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SentMessage {
-    pub recipient: ServiceId,
+    pub destination: Destination,
     pub timestamp: Timestamp,
     pub body: MessageBody,
+}
+
+/// A group's state as last fetched.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GroupInfo {
+    pub title: String,
+    pub revision: u32,
+    /// Other members, in the group's order; this account is left out.
+    pub members: Vec<Member>,
+}
+
+/// A group member. `Debug` hides the name.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Member {
+    pub id: ServiceId,
+    /// Contact or profile name, if known.
+    pub name: Option<String>,
+}
+
+impl fmt::Debug for Member {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Member")
+            .field("id", &self.id)
+            .field("named", &self.name.is_some())
+            .finish()
+    }
 }
 
 /// Local ID of a conversation.
@@ -154,10 +227,11 @@ impl MessageId {
     }
 }
 
-/// Who a conversation is with. Groups come with #12.
+/// Who a conversation is with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Peer {
     Contact(ServiceId),
+    Group(GroupId),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -184,6 +258,8 @@ pub struct Message {
     pub id: MessageId,
     pub conversation: ConversationId,
     pub direction: Direction,
+    /// Author of an incoming message; `None` for outgoing ones.
+    pub sender: Option<ServiceId>,
     /// The sender's timestamp; with the author, Signal's message identity.
     pub sent_at: Timestamp,
     /// When this device stored it, by the local clock.
@@ -199,8 +275,10 @@ pub struct Message {
 pub struct ConversationSummary {
     pub id: ConversationId,
     pub peer: Peer,
-    /// Synced contact name, if known.
+    /// Synced contact name or group title, if known.
     pub title: Option<String>,
+    /// A group's other members; empty for 1:1.
+    pub members: Vec<Member>,
     /// Local time of the newest message.
     pub last_activity: Option<Timestamp>,
     pub unread: u32,
@@ -213,6 +291,7 @@ impl fmt::Debug for ConversationSummary {
             .field("id", &self.id)
             .field("peer", &self.peer)
             .field("titled", &self.title.is_some())
+            .field("members", &self.members)
             .field("last_activity", &self.last_activity)
             .field("unread", &self.unread)
             .field("last_message", &self.last_message)
@@ -251,6 +330,29 @@ mod tests {
         bytes[30] = 0xab;
         bytes[31] = 0xcd;
         assert_eq!(format!("{:?}", GroupId::new(bytes)), "GroupId(…abcd)");
+    }
+
+    #[test]
+    fn group_master_key_debug_shows_nothing() {
+        let debug = format!("{:?}", GroupMasterKey::new([0xab; 32]));
+        assert_eq!(debug, "GroupMasterKey(…)");
+    }
+
+    #[test]
+    fn group_ids_derive_from_master_keys() {
+        let key = GroupMasterKey::new([7; 32]);
+        assert_eq!(key.id(), key.id());
+        assert_ne!(key.id(), GroupMasterKey::new([8; 32]).id());
+        assert_ne!(key.id().as_bytes(), key.as_bytes());
+    }
+
+    #[test]
+    fn member_debug_hides_the_name() {
+        let member = Member {
+            id: ServiceId::new(Uuid::from_u128(1)),
+            name: Some("Alice Secret".into()),
+        };
+        assert!(!format!("{member:?}").contains("Alice"));
     }
 
     #[test]

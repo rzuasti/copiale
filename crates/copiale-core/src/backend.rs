@@ -4,7 +4,9 @@ use futures::future::LocalBoxFuture;
 use futures::stream::LocalBoxStream;
 use tokio::sync::oneshot;
 
-use crate::model::{IncomingMessage, MessageBody, SentMessage, ServiceId, Timestamp};
+use crate::model::{
+    Destination, GroupInfo, GroupMasterKey, IncomingMessage, MessageBody, SentMessage, Timestamp,
+};
 use crate::storage::Database;
 
 /// Content delivered by the backend.
@@ -62,16 +64,32 @@ pub trait SignalBackend {
         &mut self,
     ) -> LocalBoxFuture<'static, Result<LocalBoxStream<'static, Incoming>, BackendError>>;
 
-    /// Sends a text message to one account, with a copy to this account's
-    /// other devices.
+    /// Sends a text message to one account or a group, with a copy to this
+    /// account's other devices.
     ///
     /// The future doesn't borrow the backend, so the core can keep serving
     /// while it runs.
     fn send_text(
         &mut self,
-        recipient: ServiceId,
+        destination: Destination,
         body: MessageBody,
         timestamp: Timestamp,
+    ) -> LocalBoxFuture<'static, Result<(), BackendError>>;
+
+    /// A group's state as last fetched, with member names from contacts and
+    /// cached profiles; `None` if the group is unknown. Doesn't use the
+    /// network, nor borrow the backend.
+    fn group(
+        &mut self,
+        key: GroupMasterKey,
+    ) -> LocalBoxFuture<'static, Result<Option<GroupInfo>, BackendError>>;
+
+    /// Fetches and caches the profiles of the group's members that have no
+    /// name yet; [`Self::group`] then has their names. Doesn't borrow the
+    /// backend.
+    fn fetch_member_profiles(
+        &mut self,
+        key: GroupMasterKey,
     ) -> LocalBoxFuture<'static, Result<(), BackendError>>;
 
     /// Checks the open connection with a round trip to the server. The core

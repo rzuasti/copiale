@@ -7,13 +7,14 @@ use std::time::Duration;
 
 use copiale_core::storage::{KdfParams, Passphrase, Storage, StoragePaths};
 use copiale_core::{
-    BackendError, Command, ConversationId, ConversationSummary, CoreHandle, CoreOptions, Direction,
-    Event, Events, Incoming, IncomingMessage, Message, MessageBody, MessagePreview, MessageStatus,
-    Peer, SentMessage, StorageFailure, Timestamp,
+    BackendError, Command, ConversationId, ConversationSummary, CoreHandle, CoreOptions,
+    Destination, Direction, Event, Events, GroupInfo, GroupRef, Incoming, IncomingMessage, Member,
+    Message, MessageBody, MessagePreview, MessageStatus, Peer, SentMessage, StorageFailure,
+    Timestamp,
 };
 use copiale_testkit::{
     FAKE_LINK_URL, FakeNetwork, FakePhone, MemorySecretStore, SentText, fake_backend, fake_linker,
-    service_id,
+    group_key, service_id,
 };
 use tempfile::TempDir;
 
@@ -89,6 +90,7 @@ async fn ready() -> (TempDir, Running) {
 fn incoming(from: u128, sent_at: u64, body: &str) -> Incoming {
     Incoming::Message(IncomingMessage {
         sender: service_id(from),
+        group: None,
         timestamp: Timestamp::from_millis(sent_at),
         body: MessageBody::new(body),
     })
@@ -204,7 +206,7 @@ async fn message_sent_from_the_phone_is_stored_as_outgoing() {
     let (_dir, mut running) = ready().await;
 
     running.network.deliver(Incoming::Sent(SentMessage {
-        recipient: service_id(2),
+        destination: Destination::Contact(service_id(2)),
         timestamp: Timestamp::from_millis(200),
         body: MessageBody::new("from my phone"),
     }));
@@ -328,14 +330,30 @@ async fn contacts_are_requested_and_refresh_conversations() {
     stop(running).await;
 }
 
-fn send_text(running: &Running, to: u128, body: &str) {
+fn send_text(running: &Running, conversation: ConversationId, body: &str) {
     send(
         running,
         Command::SendText {
-            recipient: service_id(to),
+            conversation,
             body: MessageBody::new(body),
         },
     );
+}
+
+/// The 1:1 conversation with `peer`, created if new; skips connection
+/// events on the way.
+async fn open_chat(running: &mut Running, peer: u128) -> ConversationId {
+    send(running, Command::OpenConversation(service_id(peer)));
+    loop {
+        match next_event(&mut running.events).await {
+            Event::ConversationUpdated(summary) => {
+                assert_eq!(summary.peer, Peer::Contact(service_id(peer)));
+                break summary.id;
+            }
+            Event::Disconnected { .. } | Event::Connected => {}
+            other => panic!("expected ConversationUpdated, got {other:?}"),
+        }
+    }
 }
 
 /// The pending message stored for a send.
@@ -381,7 +399,8 @@ async fn load_messages(running: &mut Running, conversation: ConversationId) -> V
 async fn sent_text_goes_from_pending_to_sent() {
     let (_dir, mut running) = ready().await;
 
-    send_text(&running, 2, "hi there");
+    let chat = open_chat(&mut running, 2).await;
+    send_text(&running, chat, "hi there");
 
     let pending = message_added(&mut running.events).await;
     assert_eq!(pending.direction, Direction::Outgoing);
@@ -402,7 +421,7 @@ async fn sent_text_goes_from_pending_to_sent() {
     assert_eq!(
         running.network.sent(),
         [SentText {
-            recipient: service_id(2),
+            destination: Destination::Contact(service_id(2)),
             body: MessageBody::new("hi there"),
             timestamp: pending.sent_at,
         }]
@@ -421,7 +440,8 @@ async fn failed_send_can_be_retried() {
         .network
         .fail_next_send(BackendError::new("rate limited"));
 
-    send_text(&running, 3, "try again");
+    let chat = open_chat(&mut running, 3).await;
+    send_text(&running, chat, "try again");
     let pending = pending_added(&mut running.events).await;
     let (failed, error) = send_failed(&mut running.events).await;
     assert_eq!(failed.id, pending.id);
@@ -443,7 +463,8 @@ async fn failed_send_can_be_retried() {
 #[tokio::test]
 async fn only_failed_messages_are_retried() {
     let (_dir, mut running) = ready().await;
-    send_text(&running, 3, "fine");
+    let chat = open_chat(&mut running, 3).await;
+    send_text(&running, chat, "fine");
     let pending = pending_added(&mut running.events).await;
     message_updated(&mut running.events).await;
 
@@ -463,7 +484,8 @@ async fn slow_send_does_not_delay_incoming_messages() {
     let (_dir, mut running) = ready().await;
     running.network.pause_sends();
 
-    send_text(&running, 2, "slow");
+    let chat = open_chat(&mut running, 2).await;
+    send_text(&running, chat, "slow");
     let pending = pending_added(&mut running.events).await;
     running.network.deliver(incoming(1, 100, "meanwhile"));
 
@@ -488,8 +510,9 @@ async fn sends_go_out_one_at_a_time_in_order() {
     let (_dir, mut running) = ready().await;
     running.network.pause_sends();
 
+    let chat = open_chat(&mut running, 2).await;
     for body in ["first", "second", "third"] {
-        send_text(&running, 2, body);
+        send_text(&running, chat, body);
     }
     let mut pending = Vec::new();
     for _ in 0..3 {
@@ -521,8 +544,9 @@ async fn one_failure_does_not_stop_later_sends() {
         .fail_next_send(BackendError::new("rejected"));
     running.network.pause_sends();
 
-    send_text(&running, 2, "fails");
-    send_text(&running, 2, "works");
+    let chat = open_chat(&mut running, 2).await;
+    send_text(&running, chat, "fails");
+    send_text(&running, chat, "works");
     let failing = pending_added(&mut running.events).await;
     let working = pending_added(&mut running.events).await;
     running.network.resume_sends();
@@ -536,13 +560,15 @@ async fn one_failure_does_not_stop_later_sends() {
 async fn empty_text_is_not_sent() {
     let (_dir, mut running) = ready().await;
 
-    send_text(&running, 2, "  \n ");
+    let chat = open_chat(&mut running, 2).await;
+    send_text(&running, chat, "  \n ");
     send(&running, Command::LoadConversations);
 
     let Event::Conversations(conversations) = next_event(&mut running.events).await else {
         panic!("expected Conversations");
     };
-    assert!(conversations.is_empty());
+    assert_eq!(conversations.len(), 1);
+    assert_eq!(conversations[0].last_message, None);
     assert_eq!(running.network.sends_started(), 0);
     stop(running).await;
 }
@@ -555,7 +581,8 @@ async fn sends_interrupted_by_quitting_fail_on_restart() {
     expect(&mut running.events, Event::Ready).await;
     expect(&mut running.events, Event::Connected).await;
     running.network.pause_sends();
-    send_text(&running, 2, "interrupted");
+    let chat = open_chat(&mut running, 2).await;
+    send_text(&running, chat, "interrupted");
     let pending = pending_added(&mut running.events).await;
     stop(running).await;
 
@@ -593,7 +620,8 @@ async fn messages_wait_for_the_connection() {
     running.network.go_offline();
     expect_disconnected(&mut running.events, RETRY).await;
 
-    send_text(&running, 2, "later");
+    let chat = open_chat(&mut running, 2).await;
+    send_text(&running, chat, "later");
     let Event::MessageAdded(pending) = skip_disconnects(&mut running.events).await else {
         panic!("expected MessageAdded");
     };
@@ -615,7 +643,8 @@ async fn messages_wait_for_the_connection() {
 async fn send_cut_off_by_a_dead_connection_is_resent() {
     let (_dir, mut running) = ready().await;
     running.network.pause_sends();
-    send_text(&running, 2, "stuck");
+    let chat = open_chat(&mut running, 2).await;
+    send_text(&running, chat, "stuck");
     let pending = pending_added(&mut running.events).await;
     sync(&mut running).await;
     assert_eq!(running.network.sends_started(), 1);
@@ -641,7 +670,7 @@ async fn send_cut_off_by_a_dead_connection_is_resent() {
     assert_eq!(
         running.network.sent(),
         [SentText {
-            recipient: service_id(2),
+            destination: Destination::Contact(service_id(2)),
             body: MessageBody::new("stuck"),
             timestamp: pending.sent_at,
         }]
@@ -655,7 +684,8 @@ async fn network_error_while_sending_reconnects_and_resends() {
     let error = BackendError::network("connection reset");
     running.network.fail_next_send(error.clone());
 
-    send_text(&running, 2, "again");
+    let chat = open_chat(&mut running, 2).await;
+    send_text(&running, chat, "again");
     let pending = pending_added(&mut running.events).await;
 
     expect(
@@ -692,7 +722,8 @@ async fn messages_waiting_too_long_fail() {
     expect(&mut running.events, Event::Connected).await;
     running.network.go_offline();
 
-    send_text(&running, 2, "too late");
+    let chat = open_chat(&mut running, 2).await;
+    send_text(&running, chat, "too late");
     let Event::MessageAdded(pending) = skip_disconnects(&mut running.events).await else {
         panic!("expected MessageAdded");
     };
@@ -770,7 +801,8 @@ async fn reports_receive_failure_and_keeps_serving_commands() {
     .await;
     expect(&mut running.events, Event::Connected).await;
 
-    send_text(&running, 4, "still here");
+    let chat = open_chat(&mut running, 4).await;
+    send_text(&running, chat, "still here");
     pending_added(&mut running.events).await;
     assert_eq!(
         message_updated(&mut running.events).await.status,
@@ -1080,7 +1112,7 @@ async fn commands_for_other_states_are_ignored() {
     send(
         &running,
         Command::SendText {
-            recipient: service_id(1),
+            conversation: ConversationId::new(1),
             body: MessageBody::new("too early"),
         },
     );
@@ -1127,5 +1159,197 @@ async fn shutdown_while_linking_stops() {
     );
     expect(&mut running.events, Event::LinkUrl(FAKE_LINK_URL.into())).await;
 
+    stop(running).await;
+}
+
+// Groups
+
+fn group_ref(n: u8, revision: u32) -> GroupRef {
+    GroupRef {
+        key: group_key(n),
+        revision,
+    }
+}
+
+fn group_incoming(group: GroupRef, from: u128, sent_at: u64, body: &str) -> Incoming {
+    Incoming::Message(IncomingMessage {
+        sender: service_id(from),
+        group: Some(group),
+        timestamp: Timestamp::from_millis(sent_at),
+        body: MessageBody::new(body),
+    })
+}
+
+fn member(n: u128, name: Option<&str>) -> Member {
+    Member {
+        id: service_id(n),
+        name: name.map(Into::into),
+    }
+}
+
+fn dev_group(revision: u32) -> GroupInfo {
+    GroupInfo {
+        title: "Dev".into(),
+        revision,
+        members: vec![member(1, Some("Alice")), member(2, None)],
+    }
+}
+
+/// Delivers a group message and returns its stored copy and conversation.
+async fn receive_in_group(
+    running: &mut Running,
+    group: GroupRef,
+    from: u128,
+    sent_at: u64,
+) -> (Message, ConversationSummary) {
+    running
+        .network
+        .deliver(group_incoming(group, from, sent_at, "hi all"));
+    let message = message_added(&mut running.events).await;
+    let summary = conversation_updated(&mut running.events).await;
+    (message, summary)
+}
+
+#[tokio::test]
+async fn group_message_fetches_the_group_and_member_names() {
+    let (_dir, mut running) = ready().await;
+    running.network.set_group(group_key(1), dev_group(3));
+    running.network.set_profile_name(service_id(2), "Bob");
+
+    let (message, summary) = receive_in_group(&mut running, group_ref(1, 3), 2, 100).await;
+
+    assert_eq!(message.direction, Direction::Incoming);
+    assert_eq!(message.sender, Some(service_id(2)));
+    assert_eq!(summary.peer, Peer::Group(group_key(1).id()));
+    assert_eq!(summary.title, None);
+    let known = conversation_updated(&mut running.events).await;
+    assert_eq!(known.id, summary.id);
+    assert_eq!(known.title.as_deref(), Some("Dev"));
+    assert_eq!(known.members, [member(1, Some("Alice")), member(2, None)]);
+    let named = conversation_updated(&mut running.events).await;
+    assert_eq!(
+        named.members,
+        [member(1, Some("Alice")), member(2, Some("Bob"))]
+    );
+    assert_eq!(running.network.profile_fetches(), 1);
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn group_is_fetched_again_only_for_a_newer_revision() {
+    let (_dir, mut running) = ready().await;
+    running.network.set_group(group_key(1), dev_group(3));
+    receive_in_group(&mut running, group_ref(1, 3), 1, 100).await;
+    conversation_updated(&mut running.events).await;
+    // Bob has no profile name, so this ends the refresh.
+    conversation_updated(&mut running.events).await;
+
+    receive_in_group(&mut running, group_ref(1, 3), 1, 101).await;
+    running.network.deliver(Incoming::QueueEmpty);
+    expect(&mut running.events, Event::Synced).await;
+
+    running.network.set_group(
+        group_key(1),
+        GroupInfo {
+            title: "Dev team".into(),
+            ..dev_group(4)
+        },
+    );
+    receive_in_group(&mut running, group_ref(1, 4), 1, 102).await;
+    let renamed = conversation_updated(&mut running.events).await;
+    assert_eq!(renamed.title.as_deref(), Some("Dev team"));
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn same_time_from_two_members_is_two_messages() {
+    let (_dir, mut running) = ready().await;
+
+    let (first, _) = receive_in_group(&mut running, group_ref(1, 0), 1, 100).await;
+    let (second, _) = receive_in_group(&mut running, group_ref(1, 0), 2, 100).await;
+
+    assert_eq!(first.conversation, second.conversation);
+    assert_ne!(first.id, second.id);
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn text_sent_to_a_group_goes_to_the_group() {
+    let (_dir, mut running) = ready().await;
+    running.network.set_group(group_key(1), dev_group(3));
+    let (_, summary) = receive_in_group(&mut running, group_ref(1, 3), 1, 100).await;
+    conversation_updated(&mut running.events).await;
+    conversation_updated(&mut running.events).await;
+
+    send_text(&running, summary.id, "hello group");
+
+    let pending = pending_added(&mut running.events).await;
+    assert_eq!(pending.conversation, summary.id);
+    assert_eq!(pending.sender, None);
+    message_updated(&mut running.events).await;
+    assert_eq!(
+        running.network.sent(),
+        [SentText {
+            destination: Destination::Group(group_ref(1, 3)),
+            body: MessageBody::new("hello group"),
+            timestamp: pending.sent_at,
+        }]
+    );
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn group_message_sent_from_the_phone_is_stored_as_outgoing() {
+    let (_dir, mut running) = ready().await;
+
+    running.network.deliver(Incoming::Sent(SentMessage {
+        destination: Destination::Group(group_ref(1, 0)),
+        timestamp: Timestamp::from_millis(200),
+        body: MessageBody::new("from my phone"),
+    }));
+
+    let message = message_added(&mut running.events).await;
+    assert_eq!(message.direction, Direction::Outgoing);
+    assert_eq!(message.sender, None);
+    let summary = conversation_updated(&mut running.events).await;
+    assert_eq!(summary.peer, Peer::Group(group_key(1).id()));
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn unknown_group_keeps_working_without_a_title() {
+    let (_dir, mut running) = ready().await;
+
+    let (_, summary) = receive_in_group(&mut running, group_ref(1, 0), 1, 100).await;
+    running.network.deliver(Incoming::QueueEmpty);
+
+    expect(&mut running.events, Event::Synced).await;
+    assert_eq!(summary.title, None);
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn synced_contacts_refresh_group_members() {
+    let (_dir, mut running) = ready().await;
+    running.network.set_group(group_key(1), dev_group(3));
+    receive_in_group(&mut running, group_ref(1, 3), 1, 100).await;
+    conversation_updated(&mut running.events).await;
+    conversation_updated(&mut running.events).await;
+    running.network.set_group(
+        group_key(1),
+        GroupInfo {
+            members: vec![member(1, Some("Alice")), member(2, Some("Bob B."))],
+            ..dev_group(3)
+        },
+    );
+
+    running.network.deliver(Incoming::ContactsSynced);
+
+    assert!(matches!(
+        next_event(&mut running.events).await,
+        Event::Conversations(_)
+    ));
+    let refreshed = conversation_updated(&mut running.events).await;
+    assert_eq!(refreshed.members[1], member(2, Some("Bob B.")));
     stop(running).await;
 }

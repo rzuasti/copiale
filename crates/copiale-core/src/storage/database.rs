@@ -221,6 +221,79 @@ mod tests {
         db.close().await;
     }
 
+    /// Runs migrations on a plain database: all, or the first `count`.
+    async fn migrate(pool: &SqlitePool, count: Option<usize>) {
+        let mut migrator = migrator();
+        if let Some(count) = count {
+            migrator.migrations = migrator.migrations[..count].to_vec().into();
+        }
+        migrator.run(pool).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn group_migration_keeps_conversations_and_messages() {
+        initialize_sqlcipher().await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let options = SqliteConnectOptions::new()
+            .filename(dir.path().join("plain.db"))
+            .create_if_missing(true)
+            .foreign_keys(true);
+        let pool = SqlitePool::connect_with(options).await.unwrap();
+        // Up to and including message status, before groups.
+        migrate(&pool, Some(3)).await;
+        let peer = [7u8; 16];
+        sqlx::query("INSERT INTO conversations (id, peer, last_activity) VALUES (1, ?, 5)")
+            .bind(peer.as_slice())
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO messages
+                 (id, conversation_id, outgoing, sent_at, received_at, body, read, status)
+             VALUES (1, 1, 0, 100, 101, 'in', 0, NULL), (2, 1, 1, 100, 102, 'out', 1, 'sent')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        migrate(&pool, None).await;
+
+        let authors: Vec<(i64, Vec<u8>, String)> =
+            sqlx::query_as("SELECT id, author, body FROM messages ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            authors,
+            [
+                (1, peer.to_vec(), "in".to_string()),
+                (2, Vec::new(), "out".to_string())
+            ]
+        );
+        let conversation: (Vec<u8>, Option<i64>) =
+            sqlx::query_as("SELECT peer, last_activity FROM conversations WHERE id = 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(conversation, (peer.to_vec(), Some(5)));
+        let broken: Vec<(String,)> = sqlx::query_as("PRAGMA foreign_key_check")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert!(broken.is_empty());
+        // Deleting a conversation still deletes its messages.
+        sqlx::query("DELETE FROM conversations")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let left: i64 = sqlx::query_scalar("SELECT count(*) FROM messages")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(left, 0);
+        pool.close().await;
+    }
+
     #[tokio::test]
     async fn file_has_no_plaintext_header() {
         let dir = tempfile::tempdir().unwrap();
