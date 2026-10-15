@@ -8,9 +8,13 @@ use copiale_core::{
     MessageBody, MessageId, MessageStatus, Peer, ServiceId, StorageFailure, Timestamp,
 };
 use copiale_ui::onboarding::Screen;
+use copiale_ui::theme::{self, ActivePalette as _, Appearance, Theme};
 use copiale_ui::{APP_ID, CoreSink, Shell, main_window_options};
+use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::test::TestWindowExt as _;
-use gpui_kit::{AnyWindowHandle, AppContext as _, Entity, TestAppContext};
+use gpui_kit::{
+    AnyWindowHandle, App, AppContext as _, Entity, Hsla, Rgba, TestAppContext, WindowAppearance,
+};
 use uuid::Uuid;
 
 const URL: &str = "sgnl://linkdevice?uuid=AbCdEfGhIjKlMnOp&pub_key=BQ%2B1YW3pPq0xg9Hk3sR8r5D7";
@@ -44,6 +48,7 @@ impl Ui {
         let (window, shell) = cx
             .update(|cx| {
                 gpui_kit::open_window(main_window_options(cx), cx, |window, cx| {
+                    theme::init(window, cx);
                     cx.new(|cx| Shell::new(sink, window, cx))
                 })
             })
@@ -408,4 +413,52 @@ fn offline_status_reconnects_on_click(cx: &mut TestAppContext) {
     ui.click("connection", cx);
 
     assert!(matches!(ui.core.take().as_slice(), [Command::Reconnect]));
+}
+
+/// Bytes, as GPUI Kit and the palette parse colors slightly differently.
+fn rgba(color: Hsla) -> [u8; 4] {
+    let Rgba { r, g, b, a } = color.into();
+    [r, g, b, a].map(|v| (v * 255.).round() as u8)
+}
+
+fn assert_theme(expected: &Theme, cx: &App) {
+    let palette = *cx.palette();
+    assert_eq!(palette, expected.colors);
+    let components = cx.theme();
+    assert_eq!(
+        components.is_dark(),
+        expected.appearance == Appearance::Dark
+    );
+    for (role, token) in [
+        (components.background, palette.background),
+        (components.foreground, palette.text),
+        (components.muted_foreground, palette.text_muted),
+        (components.primary, palette.accent),
+        (components.danger, palette.danger),
+        (components.selection, palette.selection),
+    ] {
+        assert_eq!(rgba(role), rgba(token));
+    }
+}
+
+#[gpui_kit::test]
+fn theme_follows_the_system_appearance(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.open_alice(cx);
+    // Test windows start light.
+    cx.update(|cx| assert_theme(&Theme::light(), cx));
+
+    for system in [
+        WindowAppearance::Dark,
+        WindowAppearance::VibrantLight,
+        WindowAppearance::VibrantDark,
+        WindowAppearance::Light,
+    ] {
+        cx.update_window(ui.window, |_, window, cx| {
+            theme::follow_system(system, cx);
+            window.render_frame(cx);
+        })
+        .unwrap();
+        cx.update(|cx| assert_theme(&Theme::for_system(system), cx));
+    }
 }

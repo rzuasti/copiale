@@ -24,6 +24,7 @@ use super::model::{Chat, Connection, Effects, LogChange, Row, title};
 use super::text::message_markdown;
 use super::time::Clock;
 use crate::CoreSink;
+use crate::theme::ActivePalette as _;
 
 /// Load the previous page when the top visible row is this close to the
 /// oldest loaded one.
@@ -219,7 +220,7 @@ impl ChatView {
                 .px_3()
                 .py_2()
                 .text_sm()
-                .text_color(cx.theme().muted_foreground)
+                .text_color(cx.palette().text_muted)
                 .child(text)
         });
 
@@ -227,14 +228,14 @@ impl ChatView {
             .w(px(260.))
             .h_full()
             .flex_shrink_0()
-            .bg(cx.theme().sidebar)
+            .bg(cx.palette().sidebar)
             .border_r_1()
-            .border_color(cx.theme().sidebar_border)
+            .border_color(cx.palette().border)
             .child(
                 div()
                     .p_2()
                     .border_b_1()
-                    .border_color(cx.theme().sidebar_border)
+                    .border_color(cx.palette().border)
                     .child(Input::new(&self.search).small().cleanable(true)),
             )
             .child(
@@ -274,7 +275,7 @@ impl ChatView {
                     .child(
                         div()
                             .w(rems(0.75))
-                            .text_color(cx.theme().primary)
+                            .text_color(cx.palette().accent)
                             .child(if unread { "●" } else { "" }),
                     )
                     .child(
@@ -288,7 +289,7 @@ impl ChatView {
                     .child(
                         div()
                             .text_xs()
-                            .text_color(cx.theme().muted_foreground)
+                            .text_color(cx.palette().text_muted)
                             .child(age),
                     ),
             )
@@ -297,9 +298,9 @@ impl ChatView {
 
     fn render_status(&self, cx: &mut Context<Self>) -> AnyElement {
         let (dot, color) = match self.chat.connection() {
-            Connection::Connecting | Connection::Syncing => ("○", cx.theme().muted_foreground),
-            Connection::Online => ("●", cx.theme().success),
-            Connection::Offline { .. } => ("●", cx.theme().danger),
+            Connection::Connecting | Connection::Syncing => ("○", cx.palette().text_muted),
+            Connection::Online => ("●", cx.palette().success),
+            Connection::Offline { .. } => ("●", cx.palette().danger),
         };
         let text = self.chat.connection_label(self.chat.clock().now());
         let offline = matches!(self.chat.connection(), Connection::Offline { .. });
@@ -309,10 +310,10 @@ impl ChatView {
             .px_3()
             .py_2()
             .border_t_1()
-            .border_color(cx.theme().sidebar_border)
+            .border_color(cx.palette().border)
             .font_family(cx.theme().mono_font_family.clone())
             .text_xs()
-            .text_color(cx.theme().muted_foreground)
+            .text_color(cx.palette().text_muted)
             .child(div().text_color(color).child(dot))
             .child(text)
             .when(offline, |this| {
@@ -335,7 +336,7 @@ impl ChatView {
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_color(cx.theme().muted_foreground)
+                .text_color(cx.palette().text_muted)
                 .child(text)
                 .into_any_element();
         };
@@ -343,9 +344,9 @@ impl ChatView {
             .px_4()
             .py_2()
             .border_b_1()
-            .border_color(cx.theme().border)
+            .border_color(cx.palette().border)
             .font_family(cx.theme().mono_font_family.clone())
-            .child(div().text_color(cx.theme().muted_foreground).child("# "))
+            .child(div().text_color(cx.palette().text_muted).child("# "))
             .child(div().truncate().child(title(summary)));
 
         if self.log.logical_scroll_top().item_ix < LOAD_OLDER_WITHIN {
@@ -376,7 +377,7 @@ impl ChatView {
                     .px_4()
                     .py_2()
                     .border_t_1()
-                    .border_color(cx.theme().border)
+                    .border_color(cx.palette().border)
                     .child(Textarea::new(&self.composer)),
             )
             .into_any_element()
@@ -392,14 +393,14 @@ impl ChatView {
 
 /// Log style: time, right-aligned sender, rule, text, status.
 fn render_log_row(row: Row<'_>, cx: &mut Context<ChatView>) -> AnyElement {
-    let theme = cx.theme();
-    let mono = theme.mono_font_family.clone();
-    let muted = theme.muted_foreground;
+    let palette = *cx.palette();
+    let mono = cx.theme().mono_font_family.clone();
+    let muted = palette.text_muted;
     let message = row.message;
     let id = message.id;
     let outgoing = message.direction == Direction::Outgoing;
     let (time, sender) = row.header.clone().unzip();
-    let sender_color = if outgoing { muted } else { theme.foreground };
+    let sender_color = if outgoing { muted } else { palette.text };
     let failed = message.status == Some(MessageStatus::Failed);
     let status = match message.status {
         Some(MessageStatus::Pending) => Some("…"),
@@ -417,9 +418,9 @@ fn render_log_row(row: Row<'_>, cx: &mut Context<ChatView>) -> AnyElement {
             .font_family(mono.clone())
             .text_xs()
             .text_color(muted)
-            .child(div().flex_1().h(px(1.)).bg(theme.border))
+            .child(div().flex_1().h(px(1.)).bg(palette.border))
             .child(day)
-            .child(div().flex_1().h(px(1.)).bg(theme.border))
+            .child(div().flex_1().h(px(1.)).bg(palette.border))
     });
     let failure = failed.then(|| {
         h_flex()
@@ -427,7 +428,7 @@ fn render_log_row(row: Row<'_>, cx: &mut Context<ChatView>) -> AnyElement {
             .gap_1()
             .font_family(mono.clone())
             .text_xs()
-            .text_color(theme.danger)
+            .text_color(palette.danger)
             .cursor_pointer()
             .child("not sent · retry")
             .when_some(error, |this, error| {
@@ -473,7 +474,7 @@ fn render_log_row(row: Row<'_>, cx: &mut Context<ChatView>) -> AnyElement {
                         .gap_2()
                         .pl_2()
                         .border_l_1()
-                        .border_color(theme.border)
+                        .border_color(palette.border)
                         .child(
                             div().flex_1().min_w_0().child(
                                 TextView::markdown(
@@ -501,8 +502,8 @@ impl Render for ChatView {
         h_flex()
             .size_full()
             .items_stretch()
-            .bg(cx.theme().background)
-            .text_color(cx.theme().foreground)
+            .bg(cx.palette().background)
+            .text_color(cx.palette().text)
             .child(self.render_sidebar(cx))
             .child(
                 div()

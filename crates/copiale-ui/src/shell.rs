@@ -3,7 +3,7 @@ use std::rc::Rc;
 use copiale_core::{Event, Events};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, v_flex};
+use gpui_kit::component::{Disableable as _, v_flex};
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render,
     SharedString, Styled as _, Subscription, Task, Window, div, px,
@@ -13,6 +13,7 @@ use crate::CoreSink;
 use crate::chat::ChatView;
 use crate::onboarding::{Onboarding, Screen, describe};
 use crate::qr::{QrMatrix, qr_code};
+use crate::theme::ActivePalette as _;
 
 /// Root view of the main window: onboarding until the core is ready, then
 /// the chats.
@@ -342,8 +343,8 @@ impl Render for Shell {
             .items_center()
             .justify_center()
             .p_4()
-            .bg(cx.theme().background)
-            .text_color(cx.theme().foreground)
+            .bg(cx.palette().background)
+            .text_color(cx.palette().text)
             .child(self.render_screen(cx))
     }
 }
@@ -358,14 +359,14 @@ fn card(title: &'static str, body: String, cx: &App) -> gpui_kit::Div {
         .child(
             div()
                 .text_sm()
-                .text_color(cx.theme().muted_foreground)
+                .text_color(cx.palette().text_muted)
                 .child(SharedString::from(body)),
         )
 }
 
 fn status(text: &'static str, cx: &App) -> AnyElement {
     div()
-        .text_color(cx.theme().muted_foreground)
+        .text_color(cx.palette().text_muted)
         .child(text)
         .into_any_element()
 }
@@ -373,6 +374,6 @@ fn status(text: &'static str, cx: &App) -> AnyElement {
 fn error_text(error: Option<String>, cx: &App) -> impl IntoElement {
     div()
         .text_sm()
-        .text_color(cx.theme().danger)
+        .text_color(cx.palette().danger)
         .children(error.map(SharedString::from))
 }

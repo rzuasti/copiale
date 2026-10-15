@@ -1351,6 +1351,8 @@ dependencies = [
  "copiale-core",
  "gpui-kit",
  "qrcode",
+ "serde",
+ "toml 1.1.8+spec-1.1.0",
  "tracing",
  "uuid",
 ]

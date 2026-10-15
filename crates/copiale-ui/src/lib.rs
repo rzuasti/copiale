@@ -4,6 +4,7 @@ pub mod chat;
 pub mod onboarding;
 mod qr;
 mod shell;
+pub mod theme;
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -70,6 +71,7 @@ pub fn run(core: CoreHandle, events: Events) {
 
             let sink: Rc<dyn CoreSink> = core;
             gpui_kit::open_window(main_window_options(cx), cx, |window, cx| {
+                theme::init(window, cx);
                 cx.new(|cx| {
                     let mut shell = Shell::new(sink, window, cx);
                     shell.listen(events, window, cx);

@@ -1,0 +1,17 @@
+# Built-in light theme; tokens are described in dark.toml.
+name = "Copiale Light"
+appearance = "light"
+
+[colors]
+background = "#fbfbfa"
+sidebar = "#f2f2f0"
+surface = "#e5e5e1"
+border = "#d9d9d4"
+text = "#1d1f23"
+text_muted = "#646973"
+accent = "#3461c9"
+accent_text = "#ffffff"
+success = "#2f8a46"
+danger = "#c4343f"
+link = "#2a5db0"
+selection = "#3461c94c"
