@@ -1,6 +1,8 @@
 //! Views and theming for Copiale.
 
 pub mod chat;
+mod drawer;
+mod kinetic;
 pub mod onboarding;
 mod qr;
 mod shell;
@@ -53,7 +55,7 @@ pub fn run(core: CoreHandle, events: Events) {
     gpui_kit::application()
         .with_assets(gpui_kit::assets::Assets)
         .run(move |cx| {
-            gpui_kit::init(cx);
+            init(cx);
             cx.on_window_closed(|cx, _| {
                 if cx.windows().is_empty() {
                     cx.quit();
@@ -80,6 +82,12 @@ pub fn run(core: CoreHandle, events: Events) {
             })
             .expect("open main window");
         });
+}
+
+/// Initializes GPUI Kit and registers key bindings.
+pub fn init(cx: &mut App) {
+    gpui_kit::init(cx);
+    chat::init(cx);
 }
 
 /// Options for the main window: centered, titled, tagged with [`APP_ID`].

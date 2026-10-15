@@ -8,6 +8,7 @@ sidebar = "#111317"     # chat list
 surface = "#22252c"     # hovered rows, controls
 border = "#2b2f37"      # dividers, rules, input outlines
 text = "#d8dbe2"
+text_secondary = "#aab0bb" # your own name
 text_muted = "#7d8490"  # timestamps, hints, secondary labels
 accent = "#7aa2f7"      # unread markers, selected chat, primary buttons, focus
 accent_text = "#0f1115" # text on accent, success and danger fills
@@ -15,3 +16,14 @@ success = "#8bc58b"     # online
 danger = "#e5737a"      # errors, failed messages, offline
 link = "#7dcfff"
 selection = "#7aa2f74c" # selected text; translucent, as it is drawn over the text
+# Sender names, picked per contact; quieter than text, louder than text_muted.
+nicks = [
+    "#e0a370",
+    "#cdb86a",
+    "#95c784",
+    "#6cc4b4",
+    "#79b0e6",
+    "#a698ec",
+    "#dc8fbf",
+    "#c9a98c",
+]

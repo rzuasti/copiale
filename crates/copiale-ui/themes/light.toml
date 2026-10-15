@@ -8,6 +8,7 @@ sidebar = "#f2f2f0"
 surface = "#e5e5e1"
 border = "#d9d9d4"
 text = "#1d1f23"
+text_secondary = "#4a4f58"
 text_muted = "#646973"
 accent = "#3461c9"
 accent_text = "#ffffff"
@@ -15,3 +16,13 @@ success = "#2f8a46"
 danger = "#c4343f"
 link = "#2a5db0"
 selection = "#3461c94c"
+nicks = [
+    "#82460c",
+    "#6a5400",
+    "#2f6120",
+    "#176158",
+    "#295698",
+    "#5b3fbb",
+    "#90346a",
+    "#774d33",
+]

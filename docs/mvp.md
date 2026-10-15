@@ -16,8 +16,8 @@ Scope, UI design, architecture and work items for the first usable release.
 - Emoji: render incoming as color glyphs; OS emoji input works; no picker.
 - Non-text content (images, files, stickers, reactions, calls, group
   updates): muted placeholder line, e.g. `[image] open on your phone`.
-- Dark and light themes: follow the system by default, overridable in
-  settings.
+- Dark and light themes: follow the system by default (dark without a
+  system preference), overridable in settings.
 - Notifications showing the sender name only by default; message content is
   opt-in.
 - Runs in the background when the window is closed.
@@ -46,8 +46,9 @@ Scope, UI design, architecture and work items for the first usable release.
 ### Layout
 
 - Full size: two panes.
-  - Left: search, chat list with unread markers and relative times, account
-    and settings button at the bottom.
+  - Left: chat list with unread markers and relative times, account and
+    settings button at the bottom. Search is hidden until the pointer reaches
+    the sidebar's top edge or `Ctrl/⌘+F`.
   - Right: conversation header, message log, composer.
 - Compact (below a width breakpoint): chat list hidden; the header shows the
   current chat; switch chats through the palette.
@@ -55,12 +56,12 @@ Scope, UI design, architecture and work items for the first usable release.
 
 ```
 ┌──────────────┬──────────────────────────────┐
-│ ▸ search     │ # Alice                    ⋯ │
-│──────────────│──────────────────────────────│
-│ ● Alice   2m │ 10:02  alice │ hey           │
-│   Bob    1h  │              │ you around?   │
-│ ● Dev group  │ 10:03    you │ yep           │
-│   Mum    3d  │                              │
+│              │ # Alice                    ⋯ │
+│ ● Alice   2m │──────────────────────────────│
+│   Bob    1h  │ alice @ 10:02 > hey          │
+│ ● Dev group  │                 you around?  │
+│   Mum    3d  │ you @ 10:03 > yep            │
+│              │                              │
 │              │──────────────────────────────│
 │ ⚙  you       │ > message…                   │
 └──────────────┴──────────────────────────────┘
@@ -69,8 +70,9 @@ Scope, UI design, architecture and work items for the first usable release.
 ### Messages
 
 - Styles (setting):
-  - **Log** (default): timestamp, right-aligned name, rule, text; consecutive
-    messages from one sender grouped.
+  - **Log** (default): `name @ time > text`, by prominence: text, then name
+    (per-contact colors), then time. Consecutive messages from one sender
+    are grouped, indented to the first message's text.
   - **Blocks**: Slack-style name header with grouped messages.
   - **Bubbles**: left/right bubbles.
 - Status (sent, delivered, read), edited marker and disappearing timer shown as
@@ -82,17 +84,20 @@ Scope, UI design, architecture and work items for the first usable release.
 - Monospace for chrome: timestamps, names, headers, chat list metadata.
 - Proportional sans for message bodies.
 - Fonts configurable per role (UI, mono, body), plus base size and line
-  height.
+  height. Mono defaults to the system's monospace font (fontconfig on Linux).
 
 ### Interaction
 
 - Keyboard-first; mouse fully supported.
+- Kinetic scrolling in the log: momentum, rubber band and bounce at the ends
+  (native on macOS; off with reduced motion).
 - `Ctrl/⌘+K` command palette: switch chat, new chat, settings, theme, quit.
 - Other default bindings:
 
   | Key | Action |
   |---|---|
   | `Ctrl/⌘+N` | New chat |
+  | `Ctrl/⌘+F` | Search chats |
   | `Alt+↑/↓` | Previous/next chat |
   | `Ctrl/⌘+,` | Settings |
   | `Esc` | Close overlay; in compact mode, hide window |

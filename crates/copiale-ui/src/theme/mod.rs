@@ -5,12 +5,17 @@
 
 use std::rc::Rc;
 
+use copiale_core::ServiceId;
 use gpui_kit::component::{self, ThemeConfig, ThemeConfigColors};
-use gpui_kit::{App, Global, Hsla, Rgba, SharedString, Window, WindowAppearance};
+use gpui_kit::{App, Global, Hsla, Rgba, SharedString};
 use serde::{Deserialize, Deserializer};
 
-const DARK: &str = include_str!("../themes/dark.toml");
-const LIGHT: &str = include_str!("../themes/light.toml");
+mod system;
+
+pub use system::{Scheme, follow, init, init_from_window};
+
+const DARK: &str = include_str!("../../themes/dark.toml");
+const LIGHT: &str = include_str!("../../themes/light.toml");
 
 /// A theme file.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -29,7 +34,7 @@ pub enum Appearance {
 }
 
 /// Color tokens; see `themes/dark.toml` for what each one colors.
-#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Palette {
     #[serde(deserialize_with = "color")]
@@ -42,6 +47,8 @@ pub struct Palette {
     pub border: Hsla,
     #[serde(deserialize_with = "color")]
     pub text: Hsla,
+    #[serde(deserialize_with = "color")]
+    pub text_secondary: Hsla,
     #[serde(deserialize_with = "color")]
     pub text_muted: Hsla,
     #[serde(deserialize_with = "color")]
@@ -56,6 +63,23 @@ pub struct Palette {
     pub link: Hsla,
     #[serde(deserialize_with = "color")]
     pub selection: Hsla,
+    #[serde(deserialize_with = "colors")]
+    pub nicks: Vec<Hsla>,
+}
+
+impl Palette {
+    /// A contact's name color, stable across runs.
+    pub fn nick(&self, peer: ServiceId) -> Hsla {
+        // FNV-1a.
+        let hash = peer
+            .uuid()
+            .as_bytes()
+            .iter()
+            .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+                (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3)
+            });
+        self.nicks[(hash % self.nicks.len() as u64) as usize]
+    }
 }
 
 impl Global for Palette {}
@@ -83,39 +107,17 @@ impl Theme {
     pub fn light() -> Self {
         Self::parse(LIGHT).expect("built-in light theme is valid")
     }
-
-    /// The built-in theme for a system appearance.
-    pub fn for_system(appearance: WindowAppearance) -> Self {
-        match appearance {
-            WindowAppearance::Dark | WindowAppearance::VibrantDark => Self::dark(),
-            WindowAppearance::Light | WindowAppearance::VibrantLight => Self::light(),
-        }
-    }
-}
-
-/// Applies the theme matching `window`'s appearance, and again whenever the
-/// system appearance changes.
-pub fn init(window: &mut Window, cx: &mut App) {
-    follow_system(window.appearance(), cx);
-    window
-        .observe_window_appearance(|window, cx| follow_system(window.appearance(), cx))
-        .detach();
-}
-
-/// Applies the built-in theme for `appearance`.
-pub fn follow_system(appearance: WindowAppearance, cx: &mut App) {
-    apply(&Theme::for_system(appearance), cx);
 }
 
 /// Makes `theme` active and redraws all windows.
 pub fn apply(theme: &Theme, cx: &mut App) {
-    cx.set_global(theme.colors);
-    let config = Rc::new(component_config(theme));
+    cx.set_global(theme.colors.clone());
+    let config = Rc::new(component_config(theme, system::mono_font(cx)));
     component::Theme::update(cx, |kit| kit.apply_config(&config));
 }
 
 /// Maps the palette onto GPUI Kit roles; the rest derive from these.
-fn component_config(theme: &Theme) -> ThemeConfig {
+fn component_config(theme: &Theme, mono_font: Option<SharedString>) -> ThemeConfig {
     let c = &theme.colors;
     let mut k = ThemeConfigColors::default();
     for (role, color) in [
@@ -170,6 +172,7 @@ fn component_config(theme: &Theme) -> ThemeConfig {
             Appearance::Light => component::ThemeMode::Light,
             Appearance::Dark => component::ThemeMode::Dark,
         },
+        mono_font_family: mono_font,
         colors: k,
         ..Default::default()
     }
@@ -190,23 +193,39 @@ fn hex(color: Hsla) -> SharedString {
 }
 
 fn color<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Hsla, D::Error> {
-    let text = String::deserialize(deserializer)?;
-    Rgba::try_from(text.as_str())
-        .map(Hsla::from)
+    parse(&String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+}
+
+fn colors<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<Hsla>, D::Error> {
+    let texts = Vec::<String>::deserialize(deserializer)?;
+    if texts.is_empty() {
+        return Err(serde::de::Error::custom("needs at least one color"));
+    }
+    texts
+        .iter()
+        .map(|text| parse(text))
+        .collect::<Result<_, _>>()
         .map_err(serde::de::Error::custom)
+}
+
+fn parse(text: &str) -> Result<Hsla, String> {
+    Rgba::try_from(text)
+        .map(Hsla::from)
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn tokens(palette: &Palette) -> [(&'static str, Hsla); 12] {
+    fn tokens(palette: &Palette) -> [(&'static str, Hsla); 13] {
         [
             ("background", palette.background),
             ("sidebar", palette.sidebar),
             ("surface", palette.surface),
             ("border", palette.border),
             ("text", palette.text),
+            ("text_secondary", palette.text_secondary),
             ("text_muted", palette.text_muted),
             ("accent", palette.accent),
             ("accent_text", palette.accent_text),
@@ -241,21 +260,9 @@ mod tests {
     }
 
     #[test]
-    fn system_appearance_picks_the_matching_theme() {
-        for (system, expected) in [
-            (WindowAppearance::Dark, Appearance::Dark),
-            (WindowAppearance::VibrantDark, Appearance::Dark),
-            (WindowAppearance::Light, Appearance::Light),
-            (WindowAppearance::VibrantLight, Appearance::Light),
-        ] {
-            assert_eq!(Theme::for_system(system).appearance, expected);
-        }
-    }
-
-    #[test]
     fn text_is_readable() {
         for theme in [Theme::dark(), Theme::light()] {
-            let c = theme.colors;
+            let c = &theme.colors;
             for (fg, bg, min) in [
                 (c.text, c.background, 7.),
                 (c.text, c.sidebar, 7.),
@@ -287,14 +294,51 @@ mod tests {
             };
             let file: toml::Table = toml::from_str(source).unwrap();
             let colors = file["colors"].as_table().unwrap();
-            assert_eq!(colors.len(), 12, "every token is set");
-            for (name, color) in tokens(&theme.colors) {
-                let written = colors[name].as_str().unwrap();
-                let opaque = format!("{written}ff");
-                let expected = if written.len() == 7 { &opaque } else { written };
-                assert_eq!(hex(color), expected, "{name}");
+            let opaque = |color: &toml::Value| {
+                let written = color.as_str().unwrap();
+                if written.len() == 7 {
+                    format!("{written}ff")
+                } else {
+                    written.to_string()
+                }
+            };
+            let tokens = tokens(&theme.colors);
+            assert_eq!(colors.len(), tokens.len() + 1, "every token is set");
+            for (name, color) in tokens {
+                assert_eq!(hex(color), opaque(&colors[name]), "{name}");
+            }
+            let nicks = colors["nicks"].as_array().unwrap();
+            let parsed: Vec<_> = theme.colors.nicks.iter().map(|nick| hex(*nick)).collect();
+            assert_eq!(parsed, nicks.iter().map(opaque).collect::<Vec<_>>());
+        }
+    }
+
+    #[test]
+    fn names_are_quieter_than_text_and_louder_than_timestamps() {
+        for theme in [Theme::dark(), Theme::light()] {
+            let c = &theme.colors;
+            let text = contrast(c.text, c.background);
+            let muted = contrast(c.text_muted, c.background);
+            for name in c.nicks.iter().chain([&c.text_secondary]) {
+                let ratio = contrast(*name, c.background);
+                assert!(
+                    muted < ratio && ratio < text,
+                    "{}: {name:?} is {ratio:.2}, between {muted:.2} and {text:.2}",
+                    theme.name
+                );
             }
         }
+    }
+
+    #[test]
+    fn nick_colors_are_stable_and_spread() {
+        let palette = Theme::dark().colors;
+        let peer = |n: u128| ServiceId::new(uuid::Uuid::from_u128(n));
+        assert_eq!(palette.nick(peer(7)), palette.nick(peer(7)));
+        let mut used: Vec<_> = (0..200).map(|n| hex(palette.nick(peer(n)))).collect();
+        used.sort();
+        used.dedup();
+        assert_eq!(used.len(), palette.nicks.len());
     }
 
     #[test]
@@ -315,6 +359,7 @@ mod tests {
             LIGHT.replace("link =", "lnk ="),
             LIGHT.replace("link = \"#2a5db0\"", ""),
             LIGHT.replace("\"light\"", "\"dim\""),
+            LIGHT[..LIGHT.find("nicks").unwrap()].to_string() + "nicks = []\n",
         ] {
             assert!(Theme::parse(&source).is_err(), "{source}");
         }

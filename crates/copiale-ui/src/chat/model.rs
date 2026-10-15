@@ -60,12 +60,22 @@ impl Effects {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Row<'a> {
     pub message: &'a Message,
-    /// Time and sender, on the first message of a group.
-    pub header: Option<(String, String)>,
+    /// Sender and time of the message's group; follow-ups indent by its width.
+    pub prefix: Prefix,
+    /// Whether the message starts its group, so shows the prefix.
+    pub leads: bool,
     /// Day label, on the first message of a day.
     pub day: Option<String>,
     /// Why sending failed, if it failed this session.
     pub error: Option<&'a BackendError>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Prefix {
+    pub sender: String,
+    /// The sender, unless it's us.
+    pub peer: Option<ServiceId>,
+    pub time: String,
 }
 
 #[derive(Debug)]
@@ -85,12 +95,40 @@ struct Log {
     peer: ServiceId,
     /// Oldest first, by sent time.
     messages: Vec<Message>,
+    /// Index of each message's group's first message.
+    starts: Vec<usize>,
     /// The newest page has arrived.
     loaded: bool,
     /// Older messages may be in storage.
     has_older: bool,
     loading_older: bool,
     errors: HashMap<MessageId, BackendError>,
+}
+
+impl Log {
+    fn regroup(&mut self, clock: &Clock) {
+        self.starts.clear();
+        for (ix, message) in self.messages.iter().enumerate() {
+            let start = match ix.checked_sub(1) {
+                Some(previous) if continues(clock, &self.messages[previous], message) => {
+                    self.starts[previous]
+                }
+                _ => ix,
+            };
+            self.starts.push(start);
+        }
+    }
+}
+
+/// Whether `next` joins `previous`'s group: same side, same day, close in time.
+fn continues(clock: &Clock, previous: &Message, next: &Message) -> bool {
+    previous.direction == next.direction
+        && clock.day(previous.sent_at) == clock.day(next.sent_at)
+        && next
+            .sent_at
+            .as_millis()
+            .saturating_sub(previous.sent_at.as_millis())
+            <= GROUP_GAP_MILLIS
 }
 
 impl Chat {
@@ -180,27 +218,24 @@ impl Chat {
         let previous = ix.checked_sub(1).map(|ix| &log.messages[ix]);
         let day = self.clock.day(message.sent_at);
         let new_day = previous.is_none_or(|previous| self.clock.day(previous.sent_at) != day);
-        let grouped = !new_day
-            && previous.is_some_and(|previous| {
-                previous.direction == message.direction
-                    && message
-                        .sent_at
-                        .as_millis()
-                        .saturating_sub(previous.sent_at.as_millis())
-                        <= GROUP_GAP_MILLIS
-            });
-        let header = (!grouped).then(|| {
-            let sender = match message.direction {
-                Direction::Outgoing => "you".into(),
-                Direction::Incoming => self
-                    .open_conversation()
+        let start = log.starts[ix];
+        let first = &log.messages[start];
+        let (sender, peer) = match first.direction {
+            Direction::Outgoing => ("you".into(), None),
+            Direction::Incoming => (
+                self.open_conversation()
                     .map_or_else(|| unknown(log.peer), title),
-            };
-            (self.clock.time(message.sent_at), sender)
-        });
+                Some(log.peer),
+            ),
+        };
         Some(Row {
             message,
-            header,
+            prefix: Prefix {
+                sender,
+                peer,
+                time: self.clock.time(first.sent_at),
+            },
+            leads: start == ix,
             day: new_day.then(|| self.clock.day_label(day)),
             error: log.errors.get(&message.id),
         })
@@ -264,6 +299,7 @@ impl Chat {
             id,
             peer,
             messages: Vec::new(),
+            starts: Vec::new(),
             loaded: false,
             has_older: false,
             loading_older: false,
@@ -346,6 +382,7 @@ impl Chat {
         match before {
             None if !log.loaded => {
                 log.messages = messages.to_vec();
+                log.regroup(&self.clock);
                 log.loaded = true;
                 log.has_older = full;
                 Effects::log(LogChange::Reset(log.messages.len()))
@@ -362,6 +399,7 @@ impl Chat {
                     .collect();
                 let count = older.len();
                 log.messages.splice(0..0, older);
+                log.regroup(&self.clock);
                 if count == 0 {
                     return Effects::default();
                 }
@@ -390,6 +428,7 @@ impl Chat {
             return Effects::default();
         }
         log.messages.insert(at, message.clone());
+        log.regroup(&self.clock);
         let mut effects = Effects::log(LogChange::Inserted { at, count: 1 });
         if active && message.direction == Direction::Incoming {
             effects.commands.push(Command::MarkRead(log.id));
@@ -745,16 +784,23 @@ mod tests {
             message(5, Direction::Outgoing, today + 21 * MINUTE),
         ]);
         let row = |ix| chat.row(ix).unwrap();
-        let header = |time: &str, sender: &str| Some((time.to_string(), sender.to_string()));
+        let prefix = |ix| {
+            let row = row(ix);
+            (row.leads, row.prefix.sender, row.prefix.time)
+        };
+        let lead = |sender: &str, time: &str| (true, sender.to_string(), time.to_string());
+        let follow = |sender: &str, time: &str| (false, sender.to_string(), time.to_string());
 
         assert_eq!(row(0).day.as_deref(), Some("Yesterday"));
-        assert_eq!(row(0).header, header("23:59", "Alice"));
+        assert_eq!(prefix(0), lead("Alice", "23:59"));
         assert_eq!(row(1).day.as_deref(), Some("Today"));
-        assert_eq!(row(1).header, header("14:00", "Alice"));
+        assert_eq!(prefix(1), lead("Alice", "14:00"));
         assert_eq!(row(2).day, None);
-        assert_eq!(row(2).header, None);
-        assert_eq!(row(3).header, header("14:20", "Alice"));
-        assert_eq!(row(4).header, header("14:21", "you"));
+        assert_eq!(prefix(2), follow("Alice", "14:00"));
+        assert_eq!(prefix(3), lead("Alice", "14:20"));
+        assert_eq!(prefix(4), lead("you", "14:21"));
+        assert_eq!(row(3).prefix.peer, Some(peer(1)));
+        assert_eq!(row(4).prefix.peer, None);
         assert!(chat.row(5).is_none());
     }
 

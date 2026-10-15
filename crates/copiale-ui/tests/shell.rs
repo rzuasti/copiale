@@ -2,18 +2,20 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::time::Duration;
 
 use copiale_core::{
     BackendError, Command, ConversationId, ConversationSummary, Direction, Event, Message,
     MessageBody, MessageId, MessageStatus, Peer, ServiceId, StorageFailure, Timestamp,
 };
 use copiale_ui::onboarding::Screen;
-use copiale_ui::theme::{self, ActivePalette as _, Appearance, Theme};
+use copiale_ui::theme::{self, ActivePalette as _, Appearance, Scheme, Theme};
 use copiale_ui::{APP_ID, CoreSink, Shell, main_window_options};
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
-    AnyWindowHandle, App, AppContext as _, Entity, Hsla, Rgba, TestAppContext, WindowAppearance,
+    AnyWindowHandle, App, AppContext as _, Entity, Focusable as _, Hsla, InputEvent as _,
+    MouseMoveEvent, Pixels, Point, Rgba, ScrollDelta, TestAppContext, point, px,
 };
 use uuid::Uuid;
 
@@ -42,13 +44,13 @@ struct Ui {
 
 impl Ui {
     fn open(cx: &mut TestAppContext) -> Self {
-        cx.update(gpui_kit::init);
+        cx.update(copiale_ui::init);
         let core = Rc::new(Recorder::default());
         let sink: Rc<dyn CoreSink> = core.clone();
         let (window, shell) = cx
             .update(|cx| {
                 gpui_kit::open_window(main_window_options(cx), cx, |window, cx| {
-                    theme::init(window, cx);
+                    theme::init_from_window(window, cx);
                     cx.new(|cx| Shell::new(sink, window, cx))
                 })
             })
@@ -92,6 +94,42 @@ impl Ui {
         cx.update_window(self.window, |_, window, cx| window.press(key, cx))
             .unwrap();
         self.frame(cx);
+    }
+
+    /// Moves the pointer to `offset` from the top-left of element `id`.
+    fn point_at(&self, id: &'static str, offset: Point<Pixels>, cx: &mut TestAppContext) {
+        cx.update_window(self.window, |_, window, cx| {
+            let position = window.find(id).bounds().origin + offset;
+            window.dispatch_event(
+                MouseMoveEvent {
+                    position,
+                    pressed_button: None,
+                    modifiers: Default::default(),
+                }
+                .to_platform_input(),
+                cx,
+            );
+            window.render_frame(cx);
+        })
+        .unwrap();
+    }
+
+    /// Lets animations finish.
+    fn settle(&self, cx: &mut TestAppContext) {
+        for _ in 0..30 {
+            cx.executor().advance_clock(Duration::from_millis(16));
+            self.frame(cx);
+        }
+    }
+
+    fn top(&self, id: &'static str, cx: &mut TestAppContext) -> Pixels {
+        cx.update_window(self.window, |_, window, _| window.find(id).bounds().top())
+            .unwrap()
+    }
+
+    fn shows(&self, id: &'static str, cx: &mut TestAppContext) -> bool {
+        cx.update_window(self.window, |_, window, _| window.try_find(id).is_some())
+            .unwrap()
     }
 
     fn screen(&self, cx: &mut TestAppContext) -> Screen {
@@ -422,8 +460,8 @@ fn rgba(color: Hsla) -> [u8; 4] {
 }
 
 fn assert_theme(expected: &Theme, cx: &App) {
-    let palette = *cx.palette();
-    assert_eq!(palette, expected.colors);
+    let palette = cx.palette();
+    assert_eq!(palette, &expected.colors);
     let components = cx.theme();
     assert_eq!(
         components.is_dark(),
@@ -448,17 +486,134 @@ fn theme_follows_the_system_appearance(cx: &mut TestAppContext) {
     // Test windows start light.
     cx.update(|cx| assert_theme(&Theme::light(), cx));
 
-    for system in [
-        WindowAppearance::Dark,
-        WindowAppearance::VibrantLight,
-        WindowAppearance::VibrantDark,
-        WindowAppearance::Light,
+    for scheme in [
+        Scheme::Dark,
+        Scheme::Light,
+        Scheme::NoPreference,
+        Scheme::Light,
     ] {
         cx.update_window(ui.window, |_, window, cx| {
-            theme::follow_system(system, cx);
+            theme::follow(scheme, cx);
             window.render_frame(cx);
         })
         .unwrap();
-        cx.update(|cx| assert_theme(&Theme::for_system(system), cx));
+        cx.update(|cx| assert_theme(&Theme::for_scheme(scheme), cx));
     }
+}
+
+#[gpui_kit::test]
+fn search_shows_from_the_sidebar_top_until_the_pointer_leaves(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    assert!(!ui.shows("search", cx));
+
+    ui.point_at("sidebar", point(px(40.), px(30.)), cx);
+    assert!(!ui.shows("search", cx));
+    ui.point_at("sidebar", point(px(40.), px(4.)), cx);
+    assert!(ui.shows("search", cx));
+    ui.settle(cx);
+    // Stays while moving down the list.
+    ui.point_at("sidebar", point(px(40.), px(120.)), cx);
+    assert!(ui.shows("search", cx));
+
+    let width = cx
+        .update_window(ui.window, |_, window, _| {
+            window.find("sidebar").bounds().size.width
+        })
+        .unwrap();
+    ui.point_at("sidebar", point(width + px(40.), px(120.)), cx);
+    ui.settle(cx);
+    assert!(!ui.shows("search", cx));
+}
+
+#[gpui_kit::test]
+fn search_slides_in(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.press("ctrl-f", cx);
+    // The box moves down from above the sidebar.
+    let mut tops = Vec::new();
+    for _ in 0..20 {
+        cx.executor().advance_clock(Duration::from_millis(16));
+        ui.frame(cx);
+        tops.push(ui.top("search", cx) - ui.top("sidebar", cx));
+    }
+    assert!(tops[0] < px(0.), "{tops:?}");
+    assert!(*tops.last().unwrap() > px(0.), "{tops:?}");
+    assert!(tops.windows(2).all(|pair| pair[0] <= pair[1]), "{tops:?}");
+}
+
+#[gpui_kit::test]
+fn ctrl_f_searches_and_escape_dismisses(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.open_alice(cx);
+
+    ui.press("ctrl-f", cx);
+    assert!(ui.shows("search", cx));
+    ui.type_text("bo", cx);
+    ui.frame(cx);
+    let count = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            let chat = ui.shell.read(cx).chat().unwrap().read(cx);
+            chat.chat().conversations().count()
+        })
+    };
+    assert_eq!(count(cx), 1);
+
+    ui.press("escape", cx);
+    ui.settle(cx);
+    assert!(!ui.shows("search", cx));
+    assert_eq!(count(cx), 2);
+    let composer_focused = cx
+        .update_window(ui.window, |_, window, cx| {
+            let chat = ui.shell.read(cx).chat().unwrap().read(cx);
+            chat.composer().focus_handle(cx).is_focused(window)
+        })
+        .unwrap();
+    assert!(composer_focused);
+}
+
+#[gpui_kit::test]
+fn wheel_scrolls_the_log_smoothly(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.click(("conversation", 1u64), cx);
+    ui.event(
+        Event::Messages {
+            conversation: ConversationId::new(1),
+            before: None,
+            messages: (1..=80)
+                .map(|id| message(id, Direction::Incoming, None))
+                .collect(),
+        },
+        cx,
+    );
+    for _ in 0..5 {
+        ui.frame(cx);
+    }
+    // Where the newest message sits; scrolling up moves it down.
+    let position = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            let chat = ui.shell.read(cx).chat().unwrap().read(cx);
+            chat.log().bounds_for_item(79).unwrap().top()
+        })
+    };
+    let start = position(cx);
+
+    // One notch up.
+    cx.update_window(ui.window, |_, window, cx| {
+        window.scroll("log", ScrollDelta::Lines(point(0., 3.)), cx);
+    })
+    .unwrap();
+    let mut path = Vec::new();
+    for _ in 0..40 {
+        cx.executor().advance_clock(Duration::from_millis(16));
+        ui.frame(cx);
+        path.push(position(cx) - start);
+    }
+
+    let travelled = *path.last().unwrap();
+    assert!(
+        (travelled - px(60.)).abs() < px(6.),
+        "one notch scrolls about 60 px, not {travelled:?}"
+    );
+    assert!(path[0] < px(30.), "eases in instead of jumping: {path:?}");
+    assert!(path.windows(2).all(|pair| pair[0] <= pair[1]), "{path:?}");
 }

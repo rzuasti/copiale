@@ -1,40 +1,69 @@
 //! Main window once linked: chat list on the left, the open conversation on
 //! the right.
 
+use std::borrow::Cow;
+use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Duration;
 
-use copiale_core::{
-    Command, ConversationId, ConversationSummary, Direction, Event, MessageId, MessageStatus,
-};
-use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
+use copiale_core::{Command, ConversationId, ConversationSummary, Event, MessageId, MessageStatus};
+use gpui_kit::base::{Easing, Presence, PresencePhase, Transition};
+use gpui_kit::component::input::{Escape, Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::list::ListItem;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, AppContext as _, Context, Entity, FollowMode, InteractiveElement as _, IntoElement,
-    ListAlignment, ListState, ParentElement as _, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Task, TestSupportExt as _, Window,
-    div, list, px, rems,
+    AnyElement, App, AppContext as _, Context, Entity, FocusHandle, Focusable as _, FollowMode,
+    HighlightStyle, InteractiveElement as _, IntoElement, KeyBinding, ListAlignment, ListState,
+    MouseMoveEvent, ParentElement as _, Pixels, Rems, Render, SharedString,
+    StatefulInteractiveElement as _, Styled as _, StyledText, Subscription, Task,
+    TestSupportExt as _, TextRun, Window, actions, canvas, div, font, list, px, rems,
 };
 
 use super::model::{Chat, Connection, Effects, LogChange, Row, title};
 use super::text::message_markdown;
 use super::time::Clock;
 use crate::CoreSink;
+use crate::drawer::drawer;
+use crate::kinetic::{Kinetic, kinetic};
 use crate::theme::ActivePalette as _;
 
 /// Load the previous page when the top visible row is this close to the
 /// oldest loaded one.
 const LOAD_OLDER_WITHIN: usize = 20;
 
+const PREFIX_SIZE: Rems = rems(0.875);
+/// Above the first and below the last message.
+const LOG_PADDING: Pixels = px(8.);
+
+/// Height of the strip at the sidebar's top whose hover reveals search.
+const SEARCH_STRIP: Pixels = px(12.);
+/// How long search takes to slide in or out.
+const SEARCH_SLIDE: Duration = Duration::from_millis(260);
+
+const CONTEXT: &str = "ChatView";
+
+actions!(chat, [FocusSearch]);
+
+/// Registers the chat key bindings.
+pub fn init(cx: &mut App) {
+    cx.bind_keys([KeyBinding::new("secondary-f", FocusSearch, Some(CONTEXT))]);
+}
+const MAX_SENDER_CHARS: usize = 24;
+
 pub struct ChatView {
     core: Rc<dyn CoreSink>,
     chat: Chat,
     log: ListState,
+    kinetic: Kinetic,
+    /// Holds focus while no input does, so shortcuts work.
+    focus: FocusHandle,
     search: Entity<InputState>,
+    /// The pointer reached the sidebar's top and hasn't left the sidebar.
+    search_hovered: bool,
+    sidebar_top: Rc<Cell<Pixels>>,
     composer: Entity<TextareaState>,
     /// Redraws the reconnect countdown.
     countdown: Option<Task<()>>,
@@ -63,11 +92,17 @@ impl ChatView {
             }),
         ];
         core.send(Command::LoadConversations);
+        let focus = cx.focus_handle();
+        window.focus(&focus, cx);
         Self {
             core,
             chat: Chat::new(Clock::system()),
             log: ListState::new(0, ListAlignment::Top, px(1000.)),
+            kinetic: Kinetic::default(),
+            focus,
             search,
+            search_hovered: false,
+            sidebar_top: Rc::default(),
             composer,
             countdown: None,
             _subscriptions: subscriptions,
@@ -84,6 +119,10 @@ impl ChatView {
 
     pub fn composer(&self) -> &Entity<TextareaState> {
         &self.composer
+    }
+
+    pub fn log(&self) -> &ListState {
+        &self.log
     }
 
     pub fn on_event(&mut self, event: &Event, window: &mut Window, cx: &mut Context<Self>) {
@@ -137,6 +176,7 @@ impl ChatView {
         for change in effects.log {
             match change {
                 LogChange::Reset(count) => {
+                    self.kinetic.stop();
                     self.log.reset(count);
                     self.log.set_follow_mode(FollowMode::Tail);
                 }
@@ -178,7 +218,7 @@ impl ChatView {
                     self.open(id, window, cx);
                 }
             }
-            _ => {}
+            InputEvent::Focus | InputEvent::Blur => cx.notify(),
         }
     }
 
@@ -195,6 +235,7 @@ impl ChatView {
             };
             self.core.send(command);
             composer.update(cx, |composer, cx| composer.set_value("", window, cx));
+            self.kinetic.stop();
             self.log.set_follow_mode(FollowMode::Tail);
         }
     }
@@ -203,7 +244,54 @@ impl ChatView {
         self.send(self.chat.retry(id));
     }
 
-    fn render_sidebar(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn focus_search(&mut self, _: &FocusSearch, window: &mut Window, cx: &mut Context<Self>) {
+        self.search
+            .update(cx, |search, cx| search.focus(window, cx));
+    }
+
+    /// Clears the search and returns to the composer.
+    fn dismiss_search(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
+        self.search
+            .update(cx, |search, cx| search.set_value("", window, cx));
+        self.chat.set_search("");
+        if self.chat.open_id().is_some() {
+            self.composer
+                .update(cx, |composer, cx| composer.focus(window, cx));
+        } else {
+            window.focus(&self.focus, cx);
+        }
+        cx.notify();
+    }
+
+    /// Reveals search at the sidebar's top; it hides when the pointer leaves
+    /// the sidebar, so rows don't move under the pointer.
+    fn on_sidebar_mouse_move(
+        &mut self,
+        event: &MouseMoveEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.position.y - self.sidebar_top.get() < SEARCH_STRIP {
+            self.set_search_hovered(true, cx);
+        }
+    }
+
+    fn set_search_hovered(&mut self, hovered: bool, cx: &mut Context<Self>) {
+        if self.search_hovered != hovered {
+            self.search_hovered = hovered;
+            cx.notify();
+        }
+    }
+
+    /// Search shows while hovered, focused or in use.
+    pub fn search_visible(&self, window: &Window, cx: &App) -> bool {
+        let search = self.search.read(cx);
+        self.search_hovered
+            || !search.value().is_empty()
+            || search.focus_handle(cx).is_focused(window)
+    }
+
+    fn render_sidebar(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let open = self.chat.open_id();
         let rows: Vec<_> = self
             .chat
@@ -224,20 +312,54 @@ impl ChatView {
                 .child(text)
         });
 
+        let presence = Presence::new("search-drawer", self.search_visible(window, cx))
+            .transition(Transition::new(SEARCH_SLIDE).easing(drawer_easing()))
+            .sample(window, cx);
+        // A never-shown drawer starts out exiting at 0.
+        let rendered = match presence.phase {
+            PresencePhase::Absent => false,
+            PresencePhase::Exiting => presence.progress > 0.,
+            PresencePhase::Entering | PresencePhase::Present => true,
+        };
+        let search = rendered.then(|| {
+            drawer(
+                "search-drawer",
+                presence.progress,
+                div()
+                    .id("search")
+                    .px_2()
+                    .pb_2()
+                    .border_b_1()
+                    .border_color(cx.palette().border)
+                    .on_action(cx.listener(Self::dismiss_search))
+                    .child(Input::new(&self.search).small().cleanable(true))
+                    .test_support(),
+            )
+        });
+        let top = self.sidebar_top.clone();
+
         v_flex()
+            .id("sidebar")
+            .relative()
             .w(px(260.))
             .h_full()
             .flex_shrink_0()
             .bg(cx.palette().sidebar)
             .border_r_1()
             .border_color(cx.palette().border)
+            .on_mouse_move(cx.listener(Self::on_sidebar_mouse_move))
+            .on_hover(cx.listener(|view, hovered: &bool, _, cx| {
+                if !hovered {
+                    view.set_search_hovered(false, cx);
+                }
+            }))
             .child(
-                div()
-                    .p_2()
-                    .border_b_1()
-                    .border_color(cx.palette().border)
-                    .child(Input::new(&self.search).small().cleanable(true)),
+                canvas(move |bounds, _, _| top.set(bounds.top()), |_, _, _, _| {})
+                    .absolute()
+                    .size_full(),
             )
+            .child(div().flex_none().h(SEARCH_STRIP))
+            .children(search)
             .child(
                 v_flex()
                     .id("conversations")
@@ -249,6 +371,7 @@ impl ChatView {
                     .children(empty),
             )
             .child(self.render_status(cx))
+            .test_support()
             .into_any_element()
     }
 
@@ -354,11 +477,11 @@ impl ChatView {
             self.send(command);
         }
         let view = cx.entity();
-        let messages = list(self.log.clone(), move |ix, _, cx| {
-            view.update(cx, |view, cx| view.render_row(ix, cx))
+        let messages = list(self.log.clone(), move |ix, window, cx| {
+            view.update(cx, |view, cx| view.render_row(ix, window, cx))
         })
         .size_full()
-        .py_2();
+        .py(LOG_PADDING);
 
         v_flex()
             .size_full()
@@ -366,11 +489,19 @@ impl ChatView {
             .child(header)
             .child(
                 div()
+                    .id("log")
                     .relative()
                     .flex_1()
                     .min_h_0()
-                    .child(messages)
-                    .vertical_scrollbar(&self.log),
+                    .child(kinetic(
+                        "kinetic",
+                        &self.kinetic,
+                        &self.log,
+                        LOG_PADDING * 2.,
+                        messages,
+                    ))
+                    .vertical_scrollbar(&self.log)
+                    .test_support(),
             )
             .child(
                 div()
@@ -383,24 +514,22 @@ impl ChatView {
             .into_any_element()
     }
 
-    fn render_row(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+    fn render_row(&self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(row) = self.chat.row(ix) else {
             return div().into_any_element();
         };
-        render_log_row(row, cx)
+        render_log_row(row, window, cx)
     }
 }
 
-/// Log style: time, right-aligned sender, rule, text, status.
-fn render_log_row(row: Row<'_>, cx: &mut Context<ChatView>) -> AnyElement {
-    let palette = *cx.palette();
+/// Log style: `sender @ time > text`; follow-ups in a group indent to the
+/// first message's text.
+fn render_log_row(row: Row<'_>, window: &mut Window, cx: &mut Context<ChatView>) -> AnyElement {
+    let palette = cx.palette();
     let mono = cx.theme().mono_font_family.clone();
     let muted = palette.text_muted;
     let message = row.message;
     let id = message.id;
-    let outgoing = message.direction == Direction::Outgoing;
-    let (time, sender) = row.header.clone().unzip();
-    let sender_color = if outgoing { muted } else { palette.text };
     let failed = message.status == Some(MessageStatus::Failed);
     let status = match message.status {
         Some(MessageStatus::Pending) => Some("…"),
@@ -408,6 +537,44 @@ fn render_log_row(row: Row<'_>, cx: &mut Context<ChatView>) -> AnyElement {
         Some(MessageStatus::Failed) | None => None,
     };
     let error: Option<SharedString> = row.error.map(|error| error.to_string().into());
+
+    let sender = truncate(&row.prefix.sender, MAX_SENDER_CHARS);
+    let prefix: SharedString = format!("{sender} @ {} >", row.prefix.time).into();
+    let font_size = PREFIX_SIZE.to_pixels(window.rem_size());
+    let run = TextRun {
+        len: prefix.len(),
+        font: font(mono.clone()),
+        color: muted,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    let width = window
+        .text_system()
+        .shape_line(prefix.clone(), font_size, &[run], None)
+        .width;
+    let sender_color = row
+        .prefix
+        .peer
+        .map_or(palette.text_secondary, |peer| palette.nick(peer));
+    let prefix = row.leads.then(|| {
+        let sender_end = sender.len();
+        div()
+            .flex_none()
+            .w(width)
+            .font_family(mono.clone())
+            .text_size(PREFIX_SIZE)
+            .line_height(window.line_height())
+            .text_color(muted)
+            .child(StyledText::new(prefix).with_highlights([(
+                0..sender_end,
+                HighlightStyle {
+                    color: Some(sender_color),
+                    ..Default::default()
+                },
+            )]))
+    });
+    let indent = (!row.leads).then(|| div().flex_none().w(width));
 
     let day = row.day.clone().map(|day| {
         h_flex()
@@ -448,63 +615,58 @@ fn render_log_row(row: Row<'_>, cx: &mut Context<ChatView>) -> AnyElement {
                 .w_full()
                 .px_4()
                 .items_start()
-                .when(row.header.is_some(), |this| this.pt_1())
+                .gap_2()
+                .when(row.leads, |this| this.pt_1())
+                .children(prefix)
+                .children(indent)
                 .child(
-                    h_flex()
-                        .flex_shrink_0()
-                        .gap_2()
-                        .pr_2()
-                        .font_family(mono.clone())
-                        .text_sm()
-                        .child(div().w(rems(2.75)).text_color(muted).children(time))
-                        .child(
-                            div()
-                                .w(rems(7.))
-                                .truncate()
-                                .text_right()
-                                .text_color(sender_color)
-                                .children(sender),
-                        ),
-                )
-                .child(
-                    h_flex()
-                        .flex_1()
-                        .min_w_0()
-                        .items_start()
-                        .gap_2()
-                        .pl_2()
-                        .border_l_1()
-                        .border_color(palette.border)
-                        .child(
-                            div().flex_1().min_w_0().child(
-                                TextView::markdown(
-                                    ("body", id.get() as u64),
-                                    message_markdown(message.body.as_str()),
-                                )
-                                .selectable(true),
-                            ),
+                    div().flex_1().min_w_0().text_color(palette.text).child(
+                        TextView::markdown(
+                            ("body", id.get() as u64),
+                            message_markdown(message.body.as_str()),
                         )
-                        .children(status.map(|status| {
-                            div()
-                                .font_family(mono.clone())
-                                .text_xs()
-                                .text_color(muted)
-                                .child(status)
-                        }))
-                        .children(failure),
-                ),
+                        .selectable(true),
+                    ),
+                )
+                .children(status.map(|status| {
+                    div()
+                        .font_family(mono.clone())
+                        .text_xs()
+                        .text_color(muted)
+                        .child(status)
+                }))
+                .children(failure),
         )
         .into_any_element()
 }
 
+/// Fast start, long gentle settle, like iOS sheets.
+fn drawer_easing() -> Easing {
+    Easing::cubic_bezier(0.32, 0.72, 0., 1.).expect("valid curve")
+}
+
+/// `text`, cut to `max` characters with an ellipsis.
+fn truncate(text: &str, max: usize) -> Cow<'_, str> {
+    match text.char_indices().nth(max) {
+        Some(_) => {
+            let end = text.char_indices().nth(max - 1).map_or(0, |(ix, _)| ix);
+            format!("{}…", &text[..end]).into()
+        }
+        None => text.into(),
+    }
+}
+
 impl Render for ChatView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         h_flex()
+            .key_context(CONTEXT)
+            .track_focus(&self.focus)
+            .on_action(cx.listener(Self::focus_search))
             .size_full()
             .items_stretch()
             .bg(cx.palette().background)
             .text_color(cx.palette().text)
-            .child(self.render_sidebar(cx))
+            .child(self.render_sidebar(window, cx))
             .child(
                 div()
                     .flex_1()
@@ -512,5 +674,17 @@ impl Render for ChatView {
                     .h_full()
                     .child(self.render_conversation_pane(cx)),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn long_names_are_truncated() {
+        assert_eq!(truncate("Alice", 5), "Alice");
+        assert_eq!(truncate("Alexandra", 5), "Alex…");
+        assert_eq!(truncate("Ångström", 4), "Ång…");
     }
 }

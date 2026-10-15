@@ -1347,8 +1347,11 @@ dependencies = [
 name = "copiale-ui"
 version = "0.1.0"
 dependencies = [
+ "ashpd",
  "chrono",
  "copiale-core",
+ "fontconfig",
+ "futures",
  "gpui-kit",
  "qrcode",
  "serde",
@@ -2278,6 +2281,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c92d9081c7ab3bd83ef1eecdfad090f3d966e3ce74106779664114cfe1a6274"
 dependencies = [
  "bytemuck",
+]
+
+[[package]]
+name = "fontconfig"
+version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "854f6a6479193c392bd820abcd2123b116f01eba7775b6bcfc26494be3285229"
+dependencies = [
+ "yeslogic-fontconfig-sys",
 ]
 
 [[package]]
