@@ -625,6 +625,41 @@ fn render_log_row(row: Row<'_>, window: &mut Window, cx: &mut Context<ChatView>)
             .test_support()
     });
 
+    let line_height = window.line_height();
+    if !row.system.is_empty() {
+        let time = &row.prefix.time;
+        return v_flex()
+            .w_full()
+            .children(day)
+            .child(
+                v_flex()
+                    .px_4()
+                    .pt_1()
+                    .font_family(mono)
+                    .text_size(PREFIX_SIZE)
+                    .line_height(line_height)
+                    .text_color(muted)
+                    .children(
+                        row.system
+                            .iter()
+                            .map(|line| div().child(format!("-- {line} · {time}"))),
+                    ),
+            )
+            .into_any_element();
+    }
+    let placeholders: Vec<_> = row
+        .placeholders
+        .iter()
+        .map(|line| {
+            div()
+                .font_family(mono.clone())
+                .text_size(PREFIX_SIZE)
+                .line_height(line_height)
+                .text_color(muted)
+                .child(line.clone())
+        })
+        .collect();
+
     v_flex()
         .w_full()
         .children(day)
@@ -638,13 +673,18 @@ fn render_log_row(row: Row<'_>, window: &mut Window, cx: &mut Context<ChatView>)
                 .children(prefix)
                 .children(indent)
                 .child(
-                    div().flex_1().min_w_0().text_color(palette.text).child(
-                        TextView::markdown(
-                            ("body", id.get() as u64),
-                            message_markdown(message.body.as_str()),
-                        )
-                        .selectable(true),
-                    ),
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .text_color(palette.text)
+                        .children(placeholders)
+                        .children(message.content.body().map(|body| {
+                            TextView::markdown(
+                                ("body", id.get() as u64),
+                                message_markdown(body.as_str()),
+                            )
+                            .selectable(true)
+                        })),
                 )
                 .children(status.map(|status| {
                     div()

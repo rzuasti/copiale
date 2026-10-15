@@ -14,8 +14,9 @@ Scope, UI design, architecture and work items for the first usable release.
 - Edits, remote deletes and quoted replies: render incoming, send own.
 - Disappearing messages: honor timers on incoming and outgoing messages.
 - Emoji: render incoming as color glyphs; OS emoji input works; no picker.
-- Non-text content (images, files, stickers, reactions, calls, group
-  updates): muted placeholder line, e.g. `[image] open on your phone`.
+- Non-text content (images, files, stickers, reactions, calls): muted
+  placeholder line, e.g. `[image] open on your phone`, above any caption.
+- Group and timer changes: system lines, e.g. `-- alice added bob · 10:04`.
 - Dark and light themes: follow the system by default (dark without a
   system preference), overridable in settings.
 - Notifications showing the sender name only by default; message content is

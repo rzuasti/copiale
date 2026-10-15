@@ -1,6 +1,6 @@
 //! Keeps stored group state current, in the background.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
@@ -8,7 +8,8 @@ use crate::backend::SignalBackend;
 use crate::model::{GroupInfo, GroupMasterKey};
 
 pub(super) struct Groups {
-    refreshing: HashSet<GroupMasterKey>,
+    /// Groups being refreshed, and whether to refresh again afterwards.
+    refreshing: HashMap<GroupMasterKey, bool>,
     updates_tx: UnboundedSender<Update>,
     updates: UnboundedReceiver<Update>,
 }
@@ -24,19 +25,21 @@ impl Groups {
     pub(super) fn new() -> Self {
         let (updates_tx, updates) = unbounded_channel();
         Self {
-            refreshing: HashSet::new(),
+            refreshing: HashMap::new(),
             updates_tx,
             updates,
         }
     }
 
     /// Reads the group's state, then again after fetching the profiles of
-    /// members without a name. Does nothing if a refresh is running. Must
-    /// run inside a `LocalSet`.
+    /// members without a name. If a refresh is running, another follows it.
+    /// Must run inside a `LocalSet`.
     pub(super) fn refresh<B: SignalBackend>(&mut self, key: GroupMasterKey, backend: &mut B) {
-        if !self.refreshing.insert(key) {
+        if let Some(again) = self.refreshing.get_mut(&key) {
+            *again = true;
             return;
         }
+        self.refreshing.insert(key, false);
         let first = backend.group(key);
         let fetch = backend.fetch_member_profiles(key);
         let again = backend.group(key);
@@ -71,7 +74,9 @@ impl Groups {
         self.updates.recv().await.expect("the sender lives in self")
     }
 
-    pub(super) fn finished(&mut self, key: GroupMasterKey) {
-        self.refreshing.remove(&key);
+    pub(super) fn finished<B: SignalBackend>(&mut self, key: GroupMasterKey, backend: &mut B) {
+        if self.refreshing.remove(&key) == Some(true) {
+            self.refresh(key, backend);
+        }
     }
 }

@@ -17,13 +17,15 @@ notify.workspace = true
 presage.workspace = true
 presage-store-sqlite.workspace = true
 rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }
 toml_edit.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-uuid.workspace = true
+uuid = { workspace = true, features = ["serde"] }
 zeroize.workspace = true
 
 [dev-dependencies]

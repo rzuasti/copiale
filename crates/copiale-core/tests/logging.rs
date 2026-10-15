@@ -6,9 +6,9 @@ use std::sync::{Arc, Mutex};
 use copiale_core::logging::{DEFAULT_FILTER, Options, subscriber};
 use copiale_core::storage::{DatabaseKey, Passphrase};
 use copiale_core::{
-    Command, ConversationId, ConversationSummary, Direction, Event, GroupId, GroupMasterKey,
-    GroupRef, IncomingMessage, Member, Message, MessageBody, MessageId, Peer, PhoneNumber,
-    ServiceId, Timestamp,
+    Command, Content, ConversationId, ConversationSummary, Direction, Event, GroupId,
+    GroupMasterKey, GroupRef, IncomingMessage, Member, Message, MessageBody, MessageId, Peer,
+    PhoneNumber, ServiceId, Timestamp,
 };
 use tracing_subscriber::fmt::MakeWriter;
 use uuid::Uuid;
@@ -145,7 +145,7 @@ fn identifiers_and_secrets_are_redacted_in_logs() {
             revision: 1,
         }),
         timestamp: Timestamp::from_millis(1),
-        body: body.clone(),
+        content: Content::text(body.as_str()),
     };
     let event = Event::MessageAdded(Message {
         id: MessageId::new(1),
@@ -154,7 +154,7 @@ fn identifiers_and_secrets_are_redacted_in_logs() {
         sender: Some(service_id),
         sent_at: Timestamp::from_millis(1),
         received_at: Timestamp::from_millis(2),
-        body: body.clone(),
+        content: Content::text(body.as_str()),
         read: false,
         status: None,
     });

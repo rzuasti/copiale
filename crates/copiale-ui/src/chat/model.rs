@@ -10,6 +10,7 @@ use copiale_core::{
     MessageBody, MessageId, MessageStatus, Peer, ServiceId, Timestamp,
 };
 
+use super::content::{placeholders, system_lines};
 use super::time::Clock;
 
 /// Messages loaded per page.
@@ -64,6 +65,10 @@ pub struct Row<'a> {
     pub prefix: Prefix,
     /// Whether the message starts its group, so shows the prefix.
     pub leads: bool,
+    /// Muted lines for content the log can't show, above any text.
+    pub placeholders: Vec<String>,
+    /// System lines (group and timer changes); the row shows only these.
+    pub system: Vec<String>,
     /// Day label, on the first message of a day.
     pub day: Option<String>,
     /// Why sending failed, if it failed this session.
@@ -122,7 +127,9 @@ impl Log {
 /// Whether `next` joins `previous`'s group: same author, same day, close in
 /// time.
 fn continues(clock: &Clock, previous: &Message, next: &Message) -> bool {
-    previous.direction == next.direction
+    !previous.content.is_system()
+        && !next.content.is_system()
+        && previous.direction == next.direction
         && previous.sender == next.sender
         && clock.day(previous.sent_at) == clock.day(next.sent_at)
         && next
@@ -225,6 +232,11 @@ impl Chat {
             (Direction::Incoming, Some(author)) => (self.author_name(author), Some(author)),
             _ => ("you".into(), None),
         };
+        let actor = match (message.direction, message.sender) {
+            (Direction::Incoming, Some(author)) => self.author_name(author),
+            _ => "you".into(),
+        };
+        let system = system_lines(&message.content, &actor, |id| self.member_name(id));
         Some(Row {
             message,
             prefix: Prefix {
@@ -233,6 +245,8 @@ impl Chat {
                 time: self.clock.time(first.sent_at),
             },
             leads: start == ix,
+            placeholders: placeholders(&message.content),
+            system,
             day: new_day.then(|| self.clock.day_label(day)),
             error: log.errors.get(&message.id),
         })
@@ -240,18 +254,23 @@ impl Chat {
 
     /// An incoming message's author as the open conversation knows them.
     fn author_name(&self, author: ServiceId) -> String {
-        let Some(summary) = self.open_conversation() else {
-            return unknown(author);
-        };
-        match summary.peer {
-            Peer::Contact(_) => title(summary),
-            Peer::Group(_) => summary
-                .members
-                .iter()
-                .find(|member| member.id == author)
-                .and_then(|member| member.name.clone())
-                .unwrap_or_else(|| unknown(author)),
+        match self.open_conversation() {
+            Some(
+                summary @ ConversationSummary {
+                    peer: Peer::Contact(_),
+                    ..
+                },
+            ) => title(summary),
+            _ => self.member_name(author),
         }
+    }
+
+    /// A group member's name, or a stand-in.
+    fn member_name(&self, id: ServiceId) -> String {
+        self.open_conversation()
+            .and_then(|summary| summary.members.iter().find(|member| member.id == id))
+            .and_then(|member| member.name.clone())
+            .unwrap_or_else(|| unknown(id))
     }
 
     /// Whether older messages are being loaded.
@@ -506,7 +525,7 @@ fn unknown(peer: ServiceId) -> String {
 #[cfg(test)]
 mod tests {
     use chrono::FixedOffset;
-    use copiale_core::{GroupMasterKey, Member};
+    use copiale_core::{Attachment, Content, GroupMasterKey, GroupUpdate, Member};
     use uuid::Uuid;
 
     use super::*;
@@ -551,7 +570,7 @@ mod tests {
             sender: (!outgoing).then(|| peer(1)),
             sent_at: Timestamp::from_millis(sent_at),
             received_at: Timestamp::from_millis(sent_at),
-            body: MessageBody::new(format!("message {id}")),
+            content: Content::text(format!("message {id}")),
             read: outgoing,
             status: outgoing.then_some(MessageStatus::Sent),
         }
@@ -1013,5 +1032,53 @@ mod tests {
         assert!(row(2).leads, "another author starts a group");
         assert_eq!(row(2).prefix.sender, "Unknown (0002)");
         assert_eq!(row(3).prefix.sender, "Unknown (0003)", "no longer a member");
+    }
+
+    #[test]
+    fn system_rows_stand_alone_and_name_the_actor() {
+        let mut chat = chat();
+        chat.apply(
+            &Event::Conversations(vec![group_summary(
+                vec![member(1, Some("Alice")), member(2, Some("Bob"))],
+                Some("Dev"),
+            )]),
+            true,
+        );
+        chat.open(ConversationId::new(1));
+        let today = NOW - 5 * MINUTE;
+        let update = Message {
+            content: Content::GroupChanged(vec![GroupUpdate::Added(peer(2))]),
+            ..from(2, 1, today + MINUTE)
+        };
+        let mine = Message {
+            direction: Direction::Outgoing,
+            sender: None,
+            status: None,
+            content: Content::TimerChanged(None),
+            ..from(4, 1, today + 3 * MINUTE)
+        };
+        let image = Message {
+            content: Content::Text {
+                body: MessageBody::new("look"),
+                attachments: vec![Attachment::Image],
+            },
+            ..from(3, 1, today + 2 * MINUTE)
+        };
+        chat.apply(
+            &Event::Messages {
+                conversation: ConversationId::new(1),
+                before: None,
+                messages: vec![from(1, 1, today), update, image, mine],
+            },
+            true,
+        );
+        let row = |ix| chat.row(ix).unwrap();
+
+        assert_eq!(row(1).system, ["Alice added Bob"]);
+        assert!(row(1).leads);
+        assert!(row(2).leads, "a system line breaks the group");
+        assert_eq!(row(2).placeholders, ["[image] open on your phone"]);
+        assert!(row(2).system.is_empty());
+        assert_eq!(row(3).system, ["you turned off disappearing messages"]);
     }
 }

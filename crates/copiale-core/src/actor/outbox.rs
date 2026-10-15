@@ -64,7 +64,11 @@ impl Outbox {
         self.queue.push_back(Outgoing {
             id: message.id,
             destination,
-            body: message.body.clone(),
+            body: message
+                .content
+                .body()
+                .cloned()
+                .unwrap_or_else(|| MessageBody::new("")),
             sent_at: message.sent_at,
             deadline: Instant::now() + self.timeout,
         });

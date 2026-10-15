@@ -1,5 +1,6 @@
 //! The main window once linked: chat list, conversation log, composer.
 
+mod content;
 mod model;
 mod text;
 mod time;

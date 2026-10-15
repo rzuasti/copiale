@@ -11,8 +11,15 @@ use futures::{FutureExt as _, StreamExt as _};
 use presage::Manager;
 use presage::libsignal_service::configuration::SignalServers;
 use presage::libsignal_service::content::{Content, ContentBody};
+use presage::libsignal_service::groups_v2::{GroupChange, GroupOperations, Role};
+use presage::libsignal_service::prelude::{GroupSecretParams, ProtobufMessage as _};
+use presage::libsignal_service::proto;
+use presage::libsignal_service::proto::call_message::offer;
 use presage::libsignal_service::proto::sync_message::{Content as SyncContent, Sent};
-use presage::libsignal_service::proto::{DataMessage, GroupContextV2, SyncMessage};
+use presage::libsignal_service::proto::{
+    AttachmentPointer, CallMessage, DataMessage, GroupContextV2, SyncMessage, attachment_pointer,
+    data_message,
+};
 use presage::libsignal_service::protocol::{Aci, ServiceId as SignalServiceId};
 use presage::libsignal_service::push_service::ServiceError;
 use presage::libsignal_service::sender::MessageSenderError;
@@ -24,8 +31,8 @@ use tokio::task::JoinHandle;
 
 use crate::backend::{BackendError, Incoming, Linker, SignalBackend};
 use crate::model::{
-    Destination, GroupInfo, GroupMasterKey, GroupRef, IncomingMessage, Member, MessageBody,
-    SentMessage, ServiceId, Timestamp,
+    self, Attachment, Destination, GroupInfo, GroupMasterKey, GroupRef, GroupUpdate,
+    IncomingMessage, Member, MessageBody, SentMessage, ServiceId, Timestamp, Unsupported,
 };
 use crate::storage::Database;
 use store::AppStore;
@@ -335,9 +342,9 @@ fn is_network(error: &ServiceError) -> bool {
 fn incoming(received: Received) -> Option<Incoming> {
     match received {
         Received::QueueEmpty => Some(Incoming::QueueEmpty),
-        Received::Content(content) => text_message(&content)
+        Received::Content(content) => received_message(&content)
             .map(Incoming::Message)
-            .or_else(|| sent_text(&content).map(Incoming::Sent)),
+            .or_else(|| sent_message(&content).map(Incoming::Sent)),
         Received::Contacts => Some(Incoming::ContactsSynced),
         Received::DecryptionError(_) => {
             tracing::warn!("a message could not be decrypted");
@@ -346,34 +353,36 @@ fn incoming(received: Received) -> Option<Incoming> {
     }
 }
 
-/// A 1:1 or group text message from another account.
-fn text_message(content: &Content) -> Option<IncomingMessage> {
-    let ContentBody::DataMessage(
-        message @ DataMessage {
-            body: Some(body),
-            timestamp,
-            ..
-        },
-    ) = &content.body
-    else {
-        return None;
+/// A message from another account, 1:1 or in a group, or a call to it.
+fn received_message(content: &Content) -> Option<IncomingMessage> {
+    let client_timestamp = || content.metadata.client_timestamp.timestamp_millis().max(0) as u64;
+    let (group, timestamp, message) = match &content.body {
+        ContentBody::DataMessage(message) => {
+            let group = match &message.group_v2 {
+                Some(context) => Some(group_ref(context)?),
+                None => None,
+            };
+            let timestamp = message.timestamp.unwrap_or_else(client_timestamp);
+            (group, timestamp, data_content(message, group)?)
+        }
+        ContentBody::CallMessage(CallMessage {
+            offer: Some(offer), ..
+        }) => {
+            let video = offer.r#type == Some(offer::Type::OfferVideoCall as i32);
+            (None, client_timestamp(), model::Content::Call { video })
+        }
+        _ => return None,
     };
-    let group = match &message.group_v2 {
-        Some(context) => Some(group_ref(context)?),
-        None => None,
-    };
-    let timestamp = timestamp
-        .unwrap_or_else(|| content.metadata.client_timestamp.timestamp_millis().max(0) as u64);
     Some(IncomingMessage {
         sender: ServiceId::new(content.metadata.sender.raw_uuid()),
         group,
         timestamp: Timestamp::from_millis(timestamp),
-        body: MessageBody::new(body.clone()),
+        content: message,
     })
 }
 
-/// A 1:1 or group text message this account sent from another device.
-fn sent_text(content: &Content) -> Option<SentMessage> {
+/// A message this account sent from another device, 1:1 or in a group.
+fn sent_message(content: &Content) -> Option<SentMessage> {
     let ContentBody::SynchronizeMessage(SyncMessage {
         content: Some(SyncContent::Sent(sent)),
         ..
@@ -382,12 +391,7 @@ fn sent_text(content: &Content) -> Option<SentMessage> {
         return None;
     };
     let Sent {
-        message:
-            Some(
-                message @ DataMessage {
-                    body: Some(body), ..
-                },
-            ),
+        message: Some(message),
         timestamp: Some(timestamp),
         ..
     } = sent
@@ -409,10 +413,155 @@ fn sent_text(content: &Content) -> Option<SentMessage> {
             Destination::Contact(ServiceId::new(recipient.raw_uuid()))
         }
     };
+    let group = match destination {
+        Destination::Group(group) => Some(group),
+        Destination::Contact(_) => None,
+    };
     Some(SentMessage {
         destination,
         timestamp: Timestamp::from_millis(*timestamp),
-        body: MessageBody::new(body.clone()),
+        content: data_content(message, group)?,
+    })
+}
+
+/// What a data message shows; `None` for ones that show nothing, such as
+/// receipts of edits, deletes and votes, which later issues handle.
+fn data_content(message: &DataMessage, group: Option<GroupRef>) -> Option<model::Content> {
+    if let (Some(group), Some(change)) = (
+        group,
+        message
+            .group_v2
+            .as_ref()
+            .and_then(|context| context.group_change.as_deref()),
+    ) {
+        let updates = group_updates(group.key, change)?;
+        return (!updates.is_empty()).then_some(model::Content::GroupChanged(updates));
+    }
+    let flags = message.flags.unwrap_or(0);
+    if flags & data_message::Flags::ExpirationTimerUpdate as u32 != 0 {
+        let seconds = message.expire_timer.filter(|seconds| *seconds > 0);
+        return Some(model::Content::TimerChanged(seconds));
+    }
+    if let Some(reaction) = &message.reaction {
+        return match (&reaction.emoji, reaction.remove) {
+            (Some(emoji), Some(false) | None) => Some(model::Content::Reaction {
+                emoji: emoji.clone(),
+            }),
+            _ => None,
+        };
+    }
+    if let Some(sticker) = &message.sticker {
+        return Some(model::Content::Sticker {
+            emoji: sticker.emoji.clone(),
+        });
+    }
+    if message.is_view_once == Some(true) {
+        return Some(model::Content::Unsupported(Unsupported::ViewOnce));
+    }
+    let body = message.body.clone().unwrap_or_default();
+    let attachments: Vec<_> = message.attachments.iter().map(attachment).collect();
+    if !body.is_empty() || !attachments.is_empty() {
+        return Some(model::Content::Text {
+            body: MessageBody::new(body),
+            attachments,
+        });
+    }
+    let unsupported = if !message.contact.is_empty() {
+        Unsupported::Contact
+    } else if message.payment.is_some() {
+        Unsupported::Payment
+    } else if message.poll_create.is_some() {
+        Unsupported::Poll
+    } else if message.gift_badge.is_some() {
+        Unsupported::GiftBadge
+    } else {
+        return None;
+    };
+    Some(model::Content::Unsupported(unsupported))
+}
+
+fn attachment(pointer: &AttachmentPointer) -> Attachment {
+    let flags = pointer.flags.unwrap_or(0);
+    let has = |flag: attachment_pointer::Flags| flags & flag as u32 != 0;
+    let kind = pointer.content_type.as_deref().unwrap_or("");
+    if has(attachment_pointer::Flags::Gif) || kind == "image/gif" {
+        Attachment::Gif
+    } else if kind.starts_with("image/") {
+        Attachment::Image
+    } else if kind.starts_with("video/") {
+        Attachment::Video
+    } else if kind.starts_with("audio/") && has(attachment_pointer::Flags::VoiceMessage) {
+        Attachment::Voice
+    } else if kind.starts_with("audio/") {
+        Attachment::Audio
+    } else {
+        Attachment::File {
+            name: pointer.file_name.clone(),
+        }
+    }
+}
+
+/// The changes in an encrypted group change; `None` if it can't be read.
+fn group_updates(key: GroupMasterKey, change: &[u8]) -> Option<Vec<GroupUpdate>> {
+    let change = proto::GroupChange::decode(change).ok()?;
+    let params = GroupSecretParams::derive_from_master_key(
+        presage::libsignal_service::prelude::GroupMasterKey::new(*key.as_bytes()),
+    );
+    let changes = match GroupOperations::new(params).decrypt_group_change(change) {
+        Ok(changes) => changes,
+        Err(error) => {
+            tracing::warn!(?error, "a group change could not be decrypted");
+            return None;
+        }
+    };
+    let editor = changes.editor;
+    let mut updates: Vec<_> = changes
+        .changes
+        .into_iter()
+        .filter_map(|change| group_update(change, editor))
+        .collect();
+    updates.dedup();
+    Some(updates)
+}
+
+/// How a change reads in the log; `None` for ones not worth a line.
+fn group_update(change: GroupChange, editor: Aci) -> Option<GroupUpdate> {
+    let id = |aci: Aci| ServiceId::new(aci.into());
+    let editor_id = SignalServiceId::from(editor);
+    Some(match change {
+        GroupChange::NewMember(member) if member.aci == editor => GroupUpdate::Joined,
+        GroupChange::NewMember(member) => GroupUpdate::Added(id(member.aci)),
+        GroupChange::DeleteMember(aci) if aci == editor => GroupUpdate::Left,
+        GroupChange::DeleteMember(aci) => GroupUpdate::Removed(id(aci)),
+        GroupChange::ModifyMemberRole { aci, role } => GroupUpdate::Admin {
+            member: id(aci),
+            admin: role == Role::Administrator,
+        },
+        GroupChange::NewPendingMember(pending) => {
+            GroupUpdate::Invited(ServiceId::new(pending.address.raw_uuid()))
+        }
+        GroupChange::PromotePendingMember { address, .. } if address == editor_id => {
+            GroupUpdate::Joined
+        }
+        GroupChange::PromotePendingMember { address, .. } => {
+            GroupUpdate::Added(ServiceId::new(address.raw_uuid()))
+        }
+        GroupChange::NewRequestingMember(_) => GroupUpdate::Requested,
+        GroupChange::PromoteRequestingMember { aci, .. } => GroupUpdate::Added(id(aci)),
+        GroupChange::Title(title) => GroupUpdate::Title(title),
+        GroupChange::Description(_) => GroupUpdate::Description,
+        GroupChange::Avatar(_) => GroupUpdate::Avatar,
+        GroupChange::Timer(timer) => GroupUpdate::Timer(
+            timer
+                .map(|timer| timer.duration)
+                .filter(|seconds| *seconds > 0),
+        ),
+        GroupChange::AttributeAccess(_)
+        | GroupChange::MemberAccess(_)
+        | GroupChange::InviteLinkAccess(_)
+        | GroupChange::InviteLinkPassword(_)
+        | GroupChange::AnnouncementOnly(_) => GroupUpdate::Settings,
+        _ => return None,
     })
 }
 
@@ -428,13 +577,16 @@ fn group_ref(context: &GroupContextV2) -> Option<GroupRef> {
 #[cfg(test)]
 mod tests {
     use chrono::{TimeZone as _, Utc};
-    use presage::libsignal_service::proto::{GroupContextV2, TypingMessage};
+    use presage::libsignal_service::groups_v2::Timer;
+    use presage::libsignal_service::proto::{TypingMessage, call_message, group_change};
     use presage::libsignal_service::protocol::DeviceId;
     use uuid::Uuid;
 
     use super::*;
 
     const SENDER: Uuid = Uuid::from_u128(0x1234);
+    const OTHER: Uuid = Uuid::from_u128(0x4321);
+    const KEY: [u8; 32] = [9; 32];
 
     fn content(body: ContentBody) -> Content {
         let at = Utc.timestamp_millis_opt(1_700_000_000_123).unwrap();
@@ -455,12 +607,25 @@ mod tests {
         }
     }
 
+    fn data(message: DataMessage) -> Option<model::Content> {
+        received_message(&content(ContentBody::DataMessage(message))).map(|m| m.content)
+    }
+
     fn text(body: &str, timestamp: Option<u64>) -> ContentBody {
         ContentBody::DataMessage(DataMessage {
             body: Some(body.into()),
             timestamp,
             ..Default::default()
         })
+    }
+
+    fn pointer(content_type: &str, flags: u32, name: Option<&str>) -> AttachmentPointer {
+        AttachmentPointer {
+            content_type: Some(content_type.into()),
+            flags: Some(flags),
+            file_name: name.map(Into::into),
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -473,15 +638,183 @@ mod tests {
                 sender: ServiceId::new(SENDER),
                 group: None,
                 timestamp: Timestamp::from_millis(42),
-                body: MessageBody::new("hi"),
+                content: model::Content::text("hi"),
             }))
         );
     }
 
     #[test]
     fn falls_back_to_client_timestamp() {
-        let message = text_message(&content(text("hi", None))).unwrap();
+        let message = received_message(&content(text("hi", None))).unwrap();
         assert_eq!(message.timestamp, Timestamp::from_millis(1_700_000_000_123));
+    }
+
+    #[test]
+    fn attachments_keep_their_caption() {
+        let message = DataMessage {
+            body: Some("the graph".into()),
+            attachments: vec![
+                pointer("image/png", 0, None),
+                pointer("image/gif", 0, None),
+                pointer("video/mp4", 8, None),
+                pointer("video/mp4", 0, None),
+                pointer("audio/aac", 1, None),
+                pointer("audio/mpeg", 0, None),
+                pointer("application/pdf", 0, Some("report.pdf")),
+            ],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            data(message),
+            Some(model::Content::Text {
+                body: MessageBody::new("the graph"),
+                attachments: vec![
+                    Attachment::Image,
+                    Attachment::Gif,
+                    Attachment::Gif,
+                    Attachment::Video,
+                    Attachment::Voice,
+                    Attachment::Audio,
+                    Attachment::File {
+                        name: Some("report.pdf".into())
+                    },
+                ],
+            })
+        );
+    }
+
+    #[test]
+    fn attachment_without_text() {
+        let message = DataMessage {
+            attachments: vec![pointer("image/jpeg", 0, None)],
+            ..Default::default()
+        };
+        assert_eq!(
+            data(message),
+            Some(model::Content::Text {
+                body: MessageBody::new(""),
+                attachments: vec![Attachment::Image],
+            })
+        );
+    }
+
+    #[test]
+    fn stickers_reactions_and_unsupported_content() {
+        let sticker = DataMessage {
+            sticker: Some(data_message::Sticker {
+                emoji: Some("🐱".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            data(sticker),
+            Some(model::Content::Sticker {
+                emoji: Some("🐱".into())
+            })
+        );
+
+        let reaction = |remove| DataMessage {
+            reaction: Some(data_message::Reaction {
+                emoji: Some("👍".into()),
+                remove: Some(remove),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            data(reaction(false)),
+            Some(model::Content::Reaction {
+                emoji: "👍".into()
+            })
+        );
+        assert_eq!(data(reaction(true)), None);
+
+        let view_once = DataMessage {
+            is_view_once: Some(true),
+            attachments: vec![pointer("image/jpeg", 0, None)],
+            ..Default::default()
+        };
+        let contact = DataMessage {
+            contact: vec![data_message::Contact::default()],
+            ..Default::default()
+        };
+        let payment = DataMessage {
+            payment: Some(data_message::Payment::default()),
+            ..Default::default()
+        };
+        let poll = DataMessage {
+            poll_create: Some(data_message::PollCreate::default()),
+            ..Default::default()
+        };
+        let gift = DataMessage {
+            gift_badge: Some(data_message::GiftBadge::default()),
+            ..Default::default()
+        };
+        for (message, kind) in [
+            (view_once, Unsupported::ViewOnce),
+            (contact, Unsupported::Contact),
+            (payment, Unsupported::Payment),
+            (poll, Unsupported::Poll),
+            (gift, Unsupported::GiftBadge),
+        ] {
+            assert_eq!(data(message), Some(model::Content::Unsupported(kind)));
+        }
+    }
+
+    #[test]
+    fn timer_updates() {
+        let update = |seconds| DataMessage {
+            flags: Some(data_message::Flags::ExpirationTimerUpdate as u32),
+            expire_timer: Some(seconds),
+            ..Default::default()
+        };
+        assert_eq!(
+            data(update(604_800)),
+            Some(model::Content::TimerChanged(Some(604_800)))
+        );
+        assert_eq!(data(update(0)), Some(model::Content::TimerChanged(None)));
+    }
+
+    #[test]
+    fn call_offers() {
+        let call = |kind: offer::Type| {
+            let body = ContentBody::CallMessage(CallMessage {
+                offer: Some(call_message::Offer {
+                    r#type: Some(kind as i32),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+            received_message(&content(body)).map(|message| message.content)
+        };
+        assert_eq!(
+            call(offer::Type::OfferAudioCall),
+            Some(model::Content::Call { video: false })
+        );
+        assert_eq!(
+            call(offer::Type::OfferVideoCall),
+            Some(model::Content::Call { video: true })
+        );
+        let hangup = ContentBody::CallMessage(CallMessage {
+            hangup: Some(call_message::Hangup::default()),
+            ..Default::default()
+        });
+        assert_eq!(received_message(&content(hangup)), None);
+    }
+
+    #[test]
+    fn skips_messages_that_show_nothing() {
+        let empty = ContentBody::DataMessage(DataMessage::default());
+        assert_eq!(received_message(&content(empty)), None);
+        let delete = DataMessage {
+            delete: Some(data_message::Delete::default()),
+            ..Default::default()
+        };
+        assert_eq!(data(delete), None);
+        let typing = ContentBody::TypingMessage(TypingMessage::default());
+        assert_eq!(received_message(&content(typing)), None);
     }
 
     fn group_context(key: Option<Vec<u8>>) -> Option<GroupContextV2> {
@@ -496,17 +829,17 @@ mod tests {
     fn maps_group_text() {
         let body = ContentBody::DataMessage(DataMessage {
             body: Some("hi all".into()),
-            group_v2: group_context(Some(vec![9; 32])),
+            group_v2: group_context(Some(KEY.to_vec())),
             ..Default::default()
         });
 
-        let message = text_message(&content(body)).unwrap();
+        let message = received_message(&content(body)).unwrap();
 
         assert_eq!(message.sender, ServiceId::new(SENDER));
         assert_eq!(
             message.group,
             Some(GroupRef {
-                key: GroupMasterKey::new([9; 32]),
+                key: GroupMasterKey::new(KEY),
                 revision: 3,
             })
         );
@@ -520,16 +853,128 @@ mod tests {
                 group_v2: group_context(key),
                 ..Default::default()
             });
-            assert_eq!(text_message(&content(body)), None);
+            assert_eq!(received_message(&content(body)), None);
         }
     }
 
+    /// An encrypted group change by `editor` renaming the group and
+    /// removing [`OTHER`].
+    fn encrypted_change(editor: Uuid, title: &str) -> Vec<u8> {
+        let params = GroupSecretParams::derive_from_master_key(
+            presage::libsignal_service::prelude::GroupMasterKey::new(KEY),
+        );
+        let encrypt = |uuid: Uuid| {
+            let id = SignalServiceId::from(Aci::from(uuid));
+            presage::libsignal_service::zkgroup::serialize(&params.encrypt_service_id(id))
+        };
+        let actions = group_change::Actions {
+            group_id: params.get_group_identifier().to_vec(),
+            source_user_id: encrypt(editor),
+            version: 4,
+            modify_title: Some(group_change::actions::ModifyTitleAction {
+                title: GroupOperations::new(params).encrypt_title(title, &mut rand::rng()),
+            }),
+            delete_members: vec![group_change::actions::DeleteMemberAction {
+                deleted_user_id: encrypt(OTHER),
+            }],
+            ..Default::default()
+        };
+        proto::GroupChange {
+            actions: actions.encode_to_vec(),
+            ..Default::default()
+        }
+        .encode_to_vec()
+    }
+
     #[test]
-    fn skips_messages_without_text() {
-        let body = ContentBody::DataMessage(DataMessage::default());
-        assert_eq!(text_message(&content(body)), None);
-        let typing = ContentBody::TypingMessage(TypingMessage::default());
-        assert_eq!(text_message(&content(typing)), None);
+    fn group_changes_become_updates() {
+        let message = DataMessage {
+            group_v2: Some(GroupContextV2 {
+                master_key: Some(KEY.to_vec()),
+                revision: Some(4),
+                group_change: Some(encrypted_change(SENDER, "Dev team")),
+            }),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            data(message),
+            Some(model::Content::GroupChanged(vec![
+                GroupUpdate::Removed(ServiceId::new(OTHER)),
+                GroupUpdate::Title("Dev team".into()),
+            ]))
+        );
+    }
+
+    #[test]
+    fn unreadable_group_changes_are_skipped() {
+        let message = DataMessage {
+            group_v2: Some(GroupContextV2 {
+                master_key: Some(KEY.to_vec()),
+                revision: Some(4),
+                group_change: Some(vec![1, 2, 3]),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(data(message), None);
+    }
+
+    #[test]
+    fn group_update_mapping() {
+        let editor = Aci::from(SENDER);
+        let other = Aci::from(OTHER);
+        let member = |aci| presage::libsignal_service::groups_v2::Member {
+            aci,
+            role: Role::Default,
+            profile_key: presage::libsignal_service::prelude::ProfileKey::create([0; 32]),
+            joined_at_version: 0,
+            label: None,
+            label_emoji: None,
+        };
+        let cases = [
+            (
+                GroupChange::NewMember(member(editor)),
+                Some(GroupUpdate::Joined),
+            ),
+            (
+                GroupChange::NewMember(member(other)),
+                Some(GroupUpdate::Added(ServiceId::new(OTHER))),
+            ),
+            (GroupChange::DeleteMember(editor), Some(GroupUpdate::Left)),
+            (
+                GroupChange::ModifyMemberRole {
+                    aci: other,
+                    role: Role::Administrator,
+                },
+                Some(GroupUpdate::Admin {
+                    member: ServiceId::new(OTHER),
+                    admin: true,
+                }),
+            ),
+            (
+                GroupChange::Timer(Some(Timer { duration: 3600 })),
+                Some(GroupUpdate::Timer(Some(3600))),
+            ),
+            (GroupChange::Timer(None), Some(GroupUpdate::Timer(None))),
+            (
+                GroupChange::Description(None),
+                Some(GroupUpdate::Description),
+            ),
+            (
+                GroupChange::AnnouncementOnly(true),
+                Some(GroupUpdate::Settings),
+            ),
+            (
+                GroupChange::ModifyMemberProfileKey {
+                    aci: other,
+                    profile_key: presage::libsignal_service::prelude::ProfileKey::create([0; 32]),
+                },
+                None,
+            ),
+        ];
+        for (change, expected) in cases {
+            assert_eq!(group_update(change, editor), expected);
+        }
     }
 
     #[test]
@@ -555,7 +1000,7 @@ mod tests {
         Some(DataMessage {
             body: Some(body.into()),
             group_v2: if group {
-                group_context(Some(vec![9; 32]))
+                group_context(Some(KEY.to_vec()))
             } else {
                 None
             },
@@ -578,7 +1023,7 @@ mod tests {
             Some(Incoming::Sent(SentMessage {
                 destination: Destination::Contact(ServiceId::new(RECIPIENT)),
                 timestamp: Timestamp::from_millis(77),
-                body: MessageBody::new("from phone"),
+                content: model::Content::text("from phone"),
             }))
         );
     }
@@ -592,7 +1037,7 @@ mod tests {
             ..Default::default()
         });
 
-        let sent = sent_text(&content(body)).unwrap();
+        let sent = sent_message(&content(body)).unwrap();
         assert_eq!(
             sent.destination,
             Destination::Contact(ServiceId::new(RECIPIENT))
@@ -607,12 +1052,12 @@ mod tests {
             ..Default::default()
         });
 
-        let sent = sent_text(&content(body)).unwrap();
+        let sent = sent_message(&content(body)).unwrap();
 
         assert_eq!(
             sent.destination,
             Destination::Group(GroupRef {
-                key: GroupMasterKey::new([9; 32]),
+                key: GroupMasterKey::new(KEY),
                 revision: 3,
             })
         );
@@ -626,7 +1071,7 @@ mod tests {
             ..Default::default()
         });
 
-        assert_eq!(sent_text(&content(no_recipient)), None);
+        assert_eq!(sent_message(&content(no_recipient)), None);
     }
 
     #[tokio::test]

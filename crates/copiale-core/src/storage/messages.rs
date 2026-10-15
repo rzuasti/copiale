@@ -7,7 +7,7 @@ use uuid::Uuid;
 use super::StorageError;
 use super::database::{Database, database_error};
 use crate::model::{
-    ConversationId, ConversationSummary, Destination, Direction, GroupId, GroupInfo,
+    Content, ConversationId, ConversationSummary, Destination, Direction, GroupId, GroupInfo,
     GroupMasterKey, GroupRef, Member, Message, MessageBody, MessageId, MessagePreview,
     MessageStatus, Peer, ServiceId, Timestamp,
 };
@@ -19,7 +19,7 @@ macro_rules! summary_query {
     () => {
         "SELECT c.id, c.peer, c.group_id, c.group_title, c.last_activity,
                 (SELECT count(*) FROM messages u WHERE u.conversation_id = c.id AND u.read = 0),
-                m.outgoing, m.body
+                m.outgoing, m.body, m.content
          FROM conversations c
          LEFT JOIN messages m ON m.id = (
              SELECT id FROM messages WHERE conversation_id = c.id
@@ -31,7 +31,7 @@ macro_rules! summary_query {
 /// Message columns, in [`MessageRow`] order.
 macro_rules! message_columns {
     () => {
-        "id, conversation_id, outgoing, author, sent_at, received_at, body, read, status"
+        "id, conversation_id, outgoing, author, sent_at, received_at, body, content, read, status"
     };
 }
 
@@ -44,6 +44,7 @@ type SummaryRow = (
     i64,
     Option<bool>,
     Option<String>,
+    Option<String>,
 );
 type MessageRow = (
     i64,
@@ -53,6 +54,7 @@ type MessageRow = (
     i64,
     i64,
     String,
+    Option<String>,
     bool,
     Option<String>,
 );
@@ -67,12 +69,13 @@ impl Database {
         destination: &Destination,
         author: Option<ServiceId>,
         sent_at: Timestamp,
-        body: &MessageBody,
+        content: &Content,
     ) -> Result<Option<Message>, StorageError> {
         let mut tx = self.app.begin().await.map_err(database_error)?;
         let conversation = conversation_id(&mut tx, destination).await?;
-        let status = author.is_none().then_some(MessageStatus::Sent);
-        let message = insert_message(&mut tx, conversation, author, status, sent_at, body).await?;
+        let status = (author.is_none() && !content.is_system()).then_some(MessageStatus::Sent);
+        let message =
+            insert_message(&mut tx, conversation, author, status, sent_at, content).await?;
         tx.commit().await.map_err(database_error)?;
         Ok(message)
     }
@@ -95,7 +98,12 @@ impl Database {
             return Ok(None);
         };
         let status = Some(MessageStatus::Pending);
-        let message = insert_message(&mut tx, conversation, None, status, sent_at, body).await?;
+        let content = Content::Text {
+            body: body.clone(),
+            attachments: Vec::new(),
+        };
+        let message =
+            insert_message(&mut tx, conversation, None, status, sent_at, &content).await?;
         tx.commit().await.map_err(database_error)?;
         Ok(message)
     }
@@ -341,11 +349,14 @@ impl Database {
     }
 
     async fn summary(&self, row: SummaryRow) -> Result<ConversationSummary, StorageError> {
-        let (id, peer, group_id, group_title, last_activity, unread, outgoing, body) = row;
-        let last_message = outgoing.zip(body).map(|(outgoing, body)| MessagePreview {
-            direction: direction(outgoing),
-            body: MessageBody::new(body),
-        });
+        let (id, peer, group_id, group_title, last_activity, unread, outgoing, body, content) = row;
+        let last_message = match outgoing.zip(body) {
+            Some((outgoing, body)) => Some(MessagePreview {
+                direction: direction(outgoing),
+                content: content_from(body, content)?,
+            }),
+            None => None,
+        };
         let (peer, title, members) = match (peer, group_id) {
             (Some(peer), _) => {
                 let peer = service_id(&peer)?;
@@ -451,15 +462,17 @@ async fn insert_message(
     author: Option<ServiceId>,
     status: Option<MessageStatus>,
     sent_at: Timestamp,
-    body: &MessageBody,
+    content: &Content,
 ) -> Result<Option<Message>, StorageError> {
     let received_at = Timestamp::now();
     let outgoing = author.is_none();
+    let read = outgoing || content.is_quiet();
     let author_bytes = author.map(|author| author.uuid().as_bytes().to_vec());
+    let (body, json) = content_columns(content)?;
     let id: Option<i64> = sqlx::query_scalar(
         "INSERT INTO messages
-             (conversation_id, outgoing, author, sent_at, received_at, body, read, status)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             (conversation_id, outgoing, author, sent_at, received_at, body, content, read, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT DO NOTHING
          RETURNING id",
     )
@@ -468,8 +481,9 @@ async fn insert_message(
     .bind(author_bytes.unwrap_or_default())
     .bind(millis(sent_at))
     .bind(millis(received_at))
-    .bind(body.as_str())
-    .bind(outgoing)
+    .bind(body)
+    .bind(json)
+    .bind(read)
     .bind(status.map(status_name))
     .fetch_optional(&mut *tx)
     .await
@@ -495,10 +509,31 @@ async fn insert_message(
         sender: author,
         sent_at,
         received_at,
-        body: body.clone(),
-        read: outgoing,
+        content: content.clone(),
+        read,
         status,
     }))
+}
+
+/// The `body` and `content` columns for `content`.
+fn content_columns(content: &Content) -> Result<(&str, Option<String>), StorageError> {
+    match content {
+        Content::Text { body, attachments } if attachments.is_empty() => Ok((body.as_str(), None)),
+        other => {
+            let body = other.body().map_or("", MessageBody::as_str);
+            let json = serde_json::to_string(other)
+                .map_err(|error| StorageError::Database(error.to_string()))?;
+            Ok((body, Some(json)))
+        }
+    }
+}
+
+fn content_from(body: String, json: Option<String>) -> Result<Content, StorageError> {
+    match json {
+        None => Ok(Content::text(body)),
+        Some(json) => serde_json::from_str(&json)
+            .map_err(|_| StorageError::Database("invalid message content".into())),
+    }
 }
 
 fn destination(row: DestinationRow) -> Result<Destination, StorageError> {
@@ -519,7 +554,8 @@ fn master_key(bytes: &[u8]) -> Result<GroupMasterKey, StorageError> {
 }
 
 fn message(row: MessageRow) -> Result<Message, StorageError> {
-    let (id, conversation, outgoing, author, sent_at, received_at, body, read, status) = row;
+    let (id, conversation, outgoing, author, sent_at, received_at, body, content, read, status) =
+        row;
     let status = status.as_deref().map(parse_status).transpose()?;
     let sender = if author.is_empty() {
         None
@@ -533,7 +569,7 @@ fn message(row: MessageRow) -> Result<Message, StorageError> {
         sender,
         sent_at: timestamp(sent_at),
         received_at: timestamp(received_at),
-        body: MessageBody::new(body),
+        content: content_from(body, content)?,
         read,
         status,
     })
@@ -585,6 +621,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::model::{Attachment, GroupUpdate, Unsupported};
     use crate::storage::DatabaseKey;
 
     async fn db() -> (TempDir, Database) {
@@ -611,7 +648,7 @@ mod tests {
             &Destination::Contact(peer(from)),
             author,
             Timestamp::from_millis(sent_at),
-            &MessageBody::new(body),
+            &Content::text(body),
         )
         .await
         .unwrap()
@@ -634,7 +671,7 @@ mod tests {
             &Destination::Group(group),
             from.map(peer),
             Timestamp::from_millis(sent_at),
-            &MessageBody::new("hi all"),
+            &Content::text("hi all"),
         )
         .await
         .unwrap()
@@ -666,7 +703,7 @@ mod tests {
             summary.last_message,
             Some(MessagePreview {
                 direction: Direction::Incoming,
-                body: MessageBody::new("hello"),
+                content: Content::text("hello"),
             })
         );
         db.close().await;
@@ -1045,6 +1082,95 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(missing, None);
+        db.close().await;
+    }
+
+    async fn add_content(db: &Database, sent_at: u64, content: Content) -> Message {
+        db.add_message(
+            &Destination::Group(group(1)),
+            Some(peer(1)),
+            Timestamp::from_millis(sent_at),
+            &content,
+        )
+        .await
+        .unwrap()
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn non_text_content_round_trips() {
+        let (_dir, db) = db().await;
+        let contents = [
+            Content::Text {
+                body: MessageBody::new("the graph"),
+                attachments: vec![
+                    Attachment::Image,
+                    Attachment::File {
+                        name: Some("a.pdf".into()),
+                    },
+                ],
+            },
+            Content::Sticker { emoji: None },
+            Content::Call { video: true },
+            Content::Unsupported(Unsupported::Poll),
+            Content::GroupChanged(vec![
+                GroupUpdate::Title("Dev".into()),
+                GroupUpdate::Added(peer(2)),
+            ]),
+            Content::TimerChanged(Some(60)),
+        ];
+        let mut stored = Vec::new();
+        for (sent_at, content) in (1..).zip(contents.clone()) {
+            stored.push(add_content(&db, sent_at, content).await);
+        }
+
+        let loaded = db.messages(stored[0].conversation, None, 10).await.unwrap();
+
+        assert_eq!(loaded, stored);
+        let contents_loaded: Vec<_> = loaded.into_iter().map(|m| m.content).collect();
+        assert_eq!(contents_loaded, contents);
+        let summary = db
+            .conversation(stored[0].conversation)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            summary.last_message.map(|preview| preview.content),
+            Some(Content::TimerChanged(Some(60)))
+        );
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn reactions_and_system_lines_arrive_read() {
+        let (_dir, db) = db().await;
+
+        let reaction = add_content(
+            &db,
+            1,
+            Content::Reaction {
+                emoji: "👍".into()
+            },
+        )
+        .await;
+        let update = add_content(&db, 2, Content::GroupChanged(vec![GroupUpdate::Avatar])).await;
+        let call = add_content(&db, 3, Content::Call { video: false }).await;
+
+        assert!(reaction.read && update.read);
+        assert!(!call.read);
+        let summary = db.conversation(call.conversation).await.unwrap().unwrap();
+        assert_eq!(summary.unread, 1);
+        let mine = db
+            .add_message(
+                &Destination::Group(group(1)),
+                None,
+                Timestamp::from_millis(4),
+                &Content::TimerChanged(None),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(mine.status, None, "system lines have no send status");
         db.close().await;
     }
 

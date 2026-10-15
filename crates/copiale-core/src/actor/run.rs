@@ -16,8 +16,8 @@ use super::probe::{Check, Probe};
 use super::{Command, CoreOptions, Event, StorageFailure};
 use crate::backend::{BackendError, Incoming, Linker, SignalBackend};
 use crate::model::{
-    ConversationId, Destination, GroupRef, MessageBody, MessageId, MessageStatus, ServiceId,
-    Timestamp,
+    Content, ConversationId, Destination, GroupRef, MessageBody, MessageId, MessageStatus,
+    ServiceId, Timestamp,
 };
 use crate::storage::{Database, KeyLookup, SecretStore, Storage, StorageError};
 
@@ -319,13 +319,13 @@ impl Core {
                         let destination = message
                             .group
                             .map_or(Destination::Contact(message.sender), Destination::Group);
-                        self.store(db, &destination, Some(message.sender), message.timestamp, &message.body).await;
+                        self.store(db, &destination, Some(message.sender), message.timestamp, &message.content).await;
                         if let Some(group) = message.group {
                             self.check_group(db, &mut groups, &mut backend, group).await;
                         }
                     }
                     Some(Incoming::Sent(message)) => {
-                        self.store(db, &message.destination, None, message.timestamp, &message.body).await;
+                        self.store(db, &message.destination, None, message.timestamp, &message.content).await;
                         if let Destination::Group(group) = message.destination {
                             self.check_group(db, &mut groups, &mut backend, group).await;
                         }
@@ -353,7 +353,7 @@ impl Core {
                         Ok(None) => {}
                         Err(error) => self.database_error(error),
                     },
-                    Update::Done(key) => groups.finished(key),
+                    Update::Done(key) => groups.finished(key, &mut backend),
                 },
                 check = probe.next() => match check {
                     Check::Due => probe.run(&mut backend),
@@ -480,9 +480,9 @@ impl Core {
         destination: &Destination,
         author: Option<ServiceId>,
         sent_at: Timestamp,
-        body: &MessageBody,
+        content: &Content,
     ) {
-        match db.add_message(destination, author, sent_at, body).await {
+        match db.add_message(destination, author, sent_at, content).await {
             Ok(Some(message)) => {
                 let conversation = message.conversation;
                 tracing::debug!(conversation = conversation.get(), "message stored");

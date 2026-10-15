@@ -7,10 +7,10 @@ use std::time::Duration;
 
 use copiale_core::storage::{KdfParams, Passphrase, Storage, StoragePaths};
 use copiale_core::{
-    BackendError, Command, ConversationId, ConversationSummary, CoreHandle, CoreOptions,
-    Destination, Direction, Event, Events, GroupInfo, GroupRef, Incoming, IncomingMessage, Member,
-    Message, MessageBody, MessagePreview, MessageStatus, Peer, SentMessage, StorageFailure,
-    Timestamp,
+    BackendError, Command, Content, ConversationId, ConversationSummary, CoreHandle, CoreOptions,
+    Destination, Direction, Event, Events, GroupInfo, GroupRef, GroupUpdate, Incoming,
+    IncomingMessage, Member, Message, MessageBody, MessagePreview, MessageStatus, Peer,
+    SentMessage, StorageFailure, Timestamp,
 };
 use copiale_testkit::{
     FAKE_LINK_URL, FakeNetwork, FakePhone, MemorySecretStore, SentText, fake_backend, fake_linker,
@@ -92,7 +92,7 @@ fn incoming(from: u128, sent_at: u64, body: &str) -> Incoming {
         sender: service_id(from),
         group: None,
         timestamp: Timestamp::from_millis(sent_at),
-        body: MessageBody::new(body),
+        content: Content::text(body),
     })
 }
 
@@ -170,7 +170,7 @@ async fn incoming_message_is_stored_and_reported() {
     let message = message_added(&mut running.events).await;
     assert_eq!(message.direction, Direction::Incoming);
     assert_eq!(message.sent_at, Timestamp::from_millis(1_700_000_000_000));
-    assert_eq!(message.body, MessageBody::new("hello"));
+    assert_eq!(message.content, Content::text("hello"));
     assert!(!message.read);
     let summary = conversation_updated(&mut running.events).await;
     assert_eq!(summary.id, message.conversation);
@@ -180,7 +180,7 @@ async fn incoming_message_is_stored_and_reported() {
         summary.last_message,
         Some(MessagePreview {
             direction: Direction::Incoming,
-            body: MessageBody::new("hello"),
+            content: Content::text("hello"),
         })
     );
     expect(&mut running.events, Event::Synced).await;
@@ -208,7 +208,7 @@ async fn message_sent_from_the_phone_is_stored_as_outgoing() {
     running.network.deliver(Incoming::Sent(SentMessage {
         destination: Destination::Contact(service_id(2)),
         timestamp: Timestamp::from_millis(200),
-        body: MessageBody::new("from my phone"),
+        content: Content::text("from my phone"),
     }));
 
     let message = message_added(&mut running.events).await;
@@ -259,7 +259,7 @@ async fn conversations_and_messages_can_be_loaded() {
     assert_eq!(conversation, first);
     let bodies: Vec<_> = messages
         .iter()
-        .map(|m| m.body.as_str().to_string())
+        .map(|m| m.content.body().unwrap().as_str().to_string())
         .collect();
     assert_eq!(bodies, ["a", "c"]);
     stop(running).await;
@@ -405,7 +405,7 @@ async fn sent_text_goes_from_pending_to_sent() {
     let pending = message_added(&mut running.events).await;
     assert_eq!(pending.direction, Direction::Outgoing);
     assert_eq!(pending.status, Some(MessageStatus::Pending));
-    assert_eq!(pending.body, MessageBody::new("hi there"));
+    assert_eq!(pending.content, Content::text("hi there"));
     assert!(pending.read);
     let summary = conversation_updated(&mut running.events).await;
     assert_eq!(summary.peer, Peer::Contact(service_id(2)));
@@ -490,7 +490,7 @@ async fn slow_send_does_not_delay_incoming_messages() {
     running.network.deliver(incoming(1, 100, "meanwhile"));
 
     let received = message_added(&mut running.events).await;
-    assert_eq!(received.body, MessageBody::new("meanwhile"));
+    assert_eq!(received.content, Content::text("meanwhile"));
     conversation_updated(&mut running.events).await;
     send(&running, Command::LoadConversations);
     assert!(matches!(
@@ -1176,7 +1176,7 @@ fn group_incoming(group: GroupRef, from: u128, sent_at: u64, body: &str) -> Inco
         sender: service_id(from),
         group: Some(group),
         timestamp: Timestamp::from_millis(sent_at),
-        body: MessageBody::new(body),
+        content: Content::text(body),
     })
 }
 
@@ -1305,7 +1305,7 @@ async fn group_message_sent_from_the_phone_is_stored_as_outgoing() {
     running.network.deliver(Incoming::Sent(SentMessage {
         destination: Destination::Group(group_ref(1, 0)),
         timestamp: Timestamp::from_millis(200),
-        body: MessageBody::new("from my phone"),
+        content: Content::text("from my phone"),
     }));
 
     let message = message_added(&mut running.events).await;
@@ -1351,5 +1351,42 @@ async fn synced_contacts_refresh_group_members() {
     ));
     let refreshed = conversation_updated(&mut running.events).await;
     assert_eq!(refreshed.members[1], member(2, Some("Bob B.")));
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn system_lines_and_reactions_arrive_read_but_calls_do_not() {
+    let (_dir, mut running) = ready().await;
+    let deliver = |content: Content, sent_at: u64| {
+        Incoming::Message(IncomingMessage {
+            sender: service_id(1),
+            group: Some(group_ref(1, 0)),
+            timestamp: Timestamp::from_millis(sent_at),
+            content,
+        })
+    };
+
+    running.network.deliver(deliver(
+        Content::GroupChanged(vec![GroupUpdate::Title("Dev".into())]),
+        100,
+    ));
+    let update = message_added(&mut running.events).await;
+    assert!(update.read);
+    assert_eq!(conversation_updated(&mut running.events).await.unread, 0);
+
+    running.network.deliver(deliver(
+        Content::Reaction {
+            emoji: "👍".into()
+        },
+        101,
+    ));
+    assert!(message_added(&mut running.events).await.read);
+    assert_eq!(conversation_updated(&mut running.events).await.unread, 0);
+
+    running
+        .network
+        .deliver(deliver(Content::Call { video: false }, 102));
+    assert!(!message_added(&mut running.events).await.read);
+    assert_eq!(conversation_updated(&mut running.events).await.unread, 1);
     stop(running).await;
 }

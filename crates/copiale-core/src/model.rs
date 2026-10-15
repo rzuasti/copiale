@@ -4,10 +4,12 @@ use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use presage::libsignal_service::zkgroup::groups;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// Signal account identifier. `Debug` shows only the last 4 hex digits.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct ServiceId(Uuid);
 
 impl ServiceId {
@@ -115,7 +117,8 @@ pub enum Destination {
 }
 
 /// Message text. `Debug` shows only its length.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct MessageBody(String);
 
 impl MessageBody {
@@ -131,6 +134,166 @@ impl MessageBody {
 impl fmt::Debug for MessageBody {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "MessageBody({} bytes)", self.0.len())
+    }
+}
+
+/// What a message carries. `Debug` shows only the kind.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Content {
+    /// Text, possibly empty, with attachments this client can't show yet.
+    Text {
+        body: MessageBody,
+        attachments: Vec<Attachment>,
+    },
+    Sticker {
+        emoji: Option<String>,
+    },
+    Reaction {
+        emoji: String,
+    },
+    /// An incoming call, to answer on the phone.
+    Call {
+        video: bool,
+    },
+    /// Other content to open on the phone.
+    Unsupported(Unsupported),
+    /// Changes to a group, made by the message's author.
+    GroupChanged(Vec<GroupUpdate>),
+    /// Disappearing messages set to this many seconds; `None` turns them off.
+    TimerChanged(Option<u32>),
+}
+
+impl Content {
+    pub fn text(body: impl Into<String>) -> Self {
+        Self::Text {
+            body: MessageBody::new(body),
+            attachments: Vec::new(),
+        }
+    }
+
+    /// The text, if any.
+    pub fn body(&self) -> Option<&MessageBody> {
+        match self {
+            Self::Text { body, .. } if !body.as_str().is_empty() => Some(body),
+            _ => None,
+        }
+    }
+
+    /// Shown as a system line rather than a message from someone.
+    pub fn is_system(&self) -> bool {
+        matches!(self, Self::GroupChanged(_) | Self::TimerChanged(_))
+    }
+
+    /// Arrives read: system lines and reactions don't need attention.
+    pub fn is_quiet(&self) -> bool {
+        self.is_system() || matches!(self, Self::Reaction { .. })
+    }
+}
+
+impl fmt::Debug for Content {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Text { body, attachments } => f
+                .debug_struct("Text")
+                .field("body", body)
+                .field("attachments", &attachments.len())
+                .finish(),
+            Self::Sticker { .. } => f.write_str("Sticker"),
+            Self::Reaction { .. } => f.write_str("Reaction"),
+            Self::Call { video } => f.debug_struct("Call").field("video", video).finish(),
+            Self::Unsupported(kind) => f.debug_tuple("Unsupported").field(kind).finish(),
+            Self::GroupChanged(updates) => {
+                f.debug_tuple("GroupChanged").field(&updates.len()).finish()
+            }
+            Self::TimerChanged(seconds) => f.debug_tuple("TimerChanged").field(seconds).finish(),
+        }
+    }
+}
+
+/// An attachment, by what the placeholder calls it. `Debug` hides file
+/// names.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Attachment {
+    Image,
+    Video,
+    Gif,
+    Voice,
+    Audio,
+    File { name: Option<String> },
+}
+
+impl fmt::Debug for Attachment {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Image => "Image",
+            Self::Video => "Video",
+            Self::Gif => "Gif",
+            Self::Voice => "Voice",
+            Self::Audio => "Audio",
+            Self::File { .. } => "File",
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Unsupported {
+    Contact,
+    Payment,
+    Poll,
+    ViewOnce,
+    GiftBadge,
+}
+
+/// One change to a group. The author of the message is who made it.
+/// `Debug` hides titles.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GroupUpdate {
+    Title(String),
+    Description,
+    Avatar,
+    /// Disappearing messages, in seconds; `None` turns them off.
+    Timer(Option<u32>),
+    Added(ServiceId),
+    Removed(ServiceId),
+    /// The author joined, e.g. by link or accepting an invite.
+    Joined,
+    /// The author left.
+    Left,
+    Invited(ServiceId),
+    /// The author asked to join.
+    Requested,
+    Admin {
+        member: ServiceId,
+        admin: bool,
+    },
+    /// Permissions, invite link or other settings.
+    Settings,
+}
+
+impl fmt::Debug for GroupUpdate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Title(_) => f.write_str("Title"),
+            Self::Description => f.write_str("Description"),
+            Self::Avatar => f.write_str("Avatar"),
+            Self::Timer(seconds) => f.debug_tuple("Timer").field(seconds).finish(),
+            Self::Added(id) => f.debug_tuple("Added").field(id).finish(),
+            Self::Removed(id) => f.debug_tuple("Removed").field(id).finish(),
+            Self::Joined => f.write_str("Joined"),
+            Self::Left => f.write_str("Left"),
+            Self::Invited(id) => f.debug_tuple("Invited").field(id).finish(),
+            Self::Requested => f.write_str("Requested"),
+            Self::Admin { member, admin } => f
+                .debug_struct("Admin")
+                .field("member", member)
+                .field("admin", admin)
+                .finish(),
+            Self::Settings => f.write_str("Settings"),
+        }
     }
 }
 
@@ -155,22 +318,22 @@ impl Timestamp {
     }
 }
 
-/// A text message received from another account.
+/// A message received from another account.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IncomingMessage {
     pub sender: ServiceId,
     /// The group it was sent in; `None` for 1:1.
     pub group: Option<GroupRef>,
     pub timestamp: Timestamp,
-    pub body: MessageBody,
+    pub content: Content,
 }
 
-/// A text message this account sent from another device (the phone).
+/// A message this account sent from another device (the phone).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SentMessage {
     pub destination: Destination,
     pub timestamp: Timestamp,
-    pub body: MessageBody,
+    pub content: Content,
 }
 
 /// A group's state as last fetched.
@@ -264,7 +427,7 @@ pub struct Message {
     pub sent_at: Timestamp,
     /// When this device stored it, by the local clock.
     pub received_at: Timestamp,
-    pub body: MessageBody,
+    pub content: Content,
     pub read: bool,
     /// Outgoing messages only.
     pub status: Option<MessageStatus>,
@@ -302,7 +465,7 @@ impl fmt::Debug for ConversationSummary {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MessagePreview {
     pub direction: Direction,
-    pub body: MessageBody,
+    pub content: Content,
 }
 
 #[cfg(test)]

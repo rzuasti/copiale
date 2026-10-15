@@ -5,9 +5,9 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use copiale_core::{
-    BackendError, Command, ConversationId, ConversationSummary, Direction, Event, GroupMasterKey,
-    Member, Message, MessageBody, MessageId, MessageStatus, Peer, ServiceId, StorageFailure,
-    Timestamp,
+    Attachment, BackendError, Command, Content, ConversationId, ConversationSummary, Direction,
+    Event, GroupMasterKey, GroupUpdate, Member, Message, MessageBody, MessageId, MessageStatus,
+    Peer, ServiceId, StorageFailure, Timestamp, Unsupported,
 };
 use copiale_ui::onboarding::Screen;
 use copiale_ui::theme::{self, ActivePalette as _, Appearance, Scheme, Theme};
@@ -190,7 +190,7 @@ fn message(id: i64, direction: Direction, status: Option<MessageStatus>) -> Mess
         sender: (direction == Direction::Incoming).then(|| peer(1)),
         sent_at: Timestamp::from_millis(id as u64 * 1000),
         received_at: Timestamp::from_millis(id as u64 * 1000),
-        body: MessageBody::new(format!("*message* {id}")),
+        content: Content::text(format!("*message* {id}")),
         read: true,
         status,
     }
@@ -661,4 +661,67 @@ fn group_header_lists_members(cx: &mut TestAppContext) {
         chat.row(0).unwrap().prefix.sender.clone()
     });
     assert_eq!(row, "Unknown (0004)");
+}
+
+#[gpui_kit::test]
+fn renders_every_kind_of_content(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.click(("conversation", 1u64), cx);
+    let contents = [
+        Content::Text {
+            body: MessageBody::new("caption"),
+            attachments: vec![Attachment::Image, Attachment::File { name: None }],
+        },
+        Content::Text {
+            body: MessageBody::new(""),
+            attachments: vec![Attachment::Voice],
+        },
+        Content::Sticker { emoji: None },
+        Content::Reaction {
+            emoji: "👍".into()
+        },
+        Content::Call { video: true },
+        Content::Unsupported(Unsupported::Payment),
+        Content::GroupChanged(vec![GroupUpdate::Title("Dev".into()), GroupUpdate::Left]),
+        Content::TimerChanged(Some(60)),
+    ];
+    let messages = (1..)
+        .zip(contents)
+        .map(|(id, content)| Message {
+            content,
+            ..message(id, Direction::Incoming, None)
+        })
+        .collect();
+
+    ui.event(
+        Event::Messages {
+            conversation: ConversationId::new(1),
+            before: None,
+            messages,
+        },
+        cx,
+    );
+
+    let rows = cx.update(|cx| {
+        let chat = ui.shell.read(cx).chat().unwrap().read(cx).chat();
+        (0..chat.row_count())
+            .map(|ix| {
+                let row = chat.row(ix).unwrap();
+                (row.placeholders.len(), row.system.len())
+            })
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(
+        rows,
+        [
+            (2, 0),
+            (1, 0),
+            (1, 0),
+            (1, 0),
+            (1, 0),
+            (1, 0),
+            (0, 2),
+            (0, 1)
+        ]
+    );
 }
