@@ -680,6 +680,14 @@ async fn skip_disconnects(events: &mut Events) -> Event {
 }
 
 /// Waits for queued commands to be handled.
+/// Waits until `done` holds for the network, for what the core does after
+/// the events a test awaits.
+async fn until(running: &Running, done: impl Fn(&FakeNetwork) -> bool) {
+    tokio::time::timeout(Duration::from_secs(5), running.network.wait_until(done))
+        .await
+        .expect("network state within 5 s");
+}
+
 async fn sync(running: &mut Running) {
     send(running, Command::LoadConversations);
     loop {
@@ -1933,8 +1941,9 @@ async fn own_messages_can_be_edited_and_deleted_for_everyone() {
     let deleted = message_updated(&mut running.events).await;
     assert_eq!(deleted.content, Content::Deleted);
     conversation_updated(&mut running.events).await;
-    sync(&mut running).await;
 
+    // Sent changes raise no event.
+    until(&running, |network| network.sent().len() == 3).await;
     let sent: Vec<_> = running
         .network
         .sent()
@@ -1986,7 +1995,8 @@ async fn only_recent_own_sent_messages_change_for_everyone() {
     }
     sync(&mut running).await;
 
-    assert!(running.network.sent().is_empty());
+    // Started at once if queued, so slow sends can't hide one.
+    assert_eq!(running.network.sends_started(), 0);
     stop(running).await;
 }
 
@@ -2013,6 +2023,8 @@ async fn deleting_for_me_removes_and_syncs() {
         }
     );
     conversation_updated(&mut running.events).await;
+    // Synced after the local delete reports.
+    until(&running, |network| !network.deleted_for_me().is_empty()).await;
     assert_eq!(
         running.network.deleted_for_me(),
         [(

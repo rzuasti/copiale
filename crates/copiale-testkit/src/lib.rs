@@ -33,11 +33,17 @@ pub fn fake_backend() -> (FakeBackend, FakeNetwork) {
     let state = Arc::new(Mutex::new(State::default()));
     let (link, _) = watch::channel(Link::default());
     let link = Arc::new(link);
+    let changes = Arc::new(watch::Sender::new(0));
     let backend = FakeBackend {
         state: state.clone(),
         link: link.clone(),
+        changes: changes.clone(),
     };
-    let network = FakeNetwork { state, link };
+    let network = FakeNetwork {
+        state,
+        link,
+        changes,
+    };
     (backend, network)
 }
 
@@ -105,6 +111,25 @@ type DeletedForMe = (Destination, Vec<(Option<ServiceId>, Timestamp)>);
 pub struct FakeBackend {
     state: Arc<Mutex<State>>,
     link: Arc<watch::Sender<Link>>,
+    /// Counts what the backend recorded; see [`FakeNetwork::wait_until`].
+    changes: Arc<watch::Sender<u64>>,
+}
+
+impl FakeBackend {
+    /// Changes the state, waking [`FakeNetwork::wait_until`].
+    fn record<R>(&self, change: impl FnOnce(&mut State) -> R) -> R {
+        record(&self.state, &self.changes, change)
+    }
+}
+
+fn record<R>(
+    state: &Mutex<State>,
+    changes: &watch::Sender<u64>,
+    change: impl FnOnce(&mut State) -> R,
+) -> R {
+    let result = change(&mut state.lock().unwrap());
+    changes.send_modify(|count| *count += 1);
+    result
 }
 
 impl SignalBackend for FakeBackend {
@@ -143,12 +168,12 @@ impl SignalBackend for FakeBackend {
         outgoing: Outgoing,
         timestamp: Timestamp,
     ) -> LocalBoxFuture<'static, Result<(), BackendError>> {
-        let failure = {
-            let mut state = self.state.lock().unwrap();
+        let failure = self.record(|state| {
             state.sends_started += 1;
             state.send_failures.pop_front()
-        };
+        });
         let state = self.state.clone();
+        let changes = self.changes.clone();
         let mut link = self.link.subscribe();
         async move {
             // Fails only once the network is gone; then nothing pauses.
@@ -158,10 +183,12 @@ impl SignalBackend for FakeBackend {
             if let Some(error) = failure {
                 return Err(error);
             }
-            state.lock().unwrap().sent.push(SentText {
-                destination,
-                outgoing,
-                timestamp,
+            record(&state, &changes, |state| {
+                state.sent.push(SentText {
+                    destination,
+                    outgoing,
+                    timestamp,
+                })
             });
             Ok(())
         }
@@ -195,7 +222,7 @@ impl SignalBackend for FakeBackend {
     }
 
     async fn request_contact_sync(&mut self) -> Result<(), BackendError> {
-        self.state.lock().unwrap().contact_sync_requests += 1;
+        self.record(|state| state.contact_sync_requests += 1);
         Ok(())
     }
 
@@ -204,7 +231,7 @@ impl SignalBackend for FakeBackend {
     }
 
     async fn request_settings_sync(&mut self) -> Result<(), BackendError> {
-        self.state.lock().unwrap().settings_sync_requests += 1;
+        self.record(|state| state.settings_sync_requests += 1);
         Ok(())
     }
 
@@ -213,11 +240,7 @@ impl SignalBackend for FakeBackend {
         recipient: ServiceId,
         timestamps: Vec<Timestamp>,
     ) -> LocalBoxFuture<'static, Result<(), BackendError>> {
-        self.state
-            .lock()
-            .unwrap()
-            .read_receipts
-            .push((recipient, timestamps));
+        self.record(|state| state.read_receipts.push((recipient, timestamps)));
         async { Ok(()) }.boxed_local()
     }
 
@@ -225,7 +248,7 @@ impl SignalBackend for FakeBackend {
         &mut self,
         read: Vec<(ServiceId, Timestamp)>,
     ) -> LocalBoxFuture<'static, Result<(), BackendError>> {
-        self.state.lock().unwrap().read_syncs.push(read);
+        self.record(|state| state.read_syncs.push(read));
         async { Ok(()) }.boxed_local()
     }
 
@@ -234,11 +257,7 @@ impl SignalBackend for FakeBackend {
         destination: Destination,
         messages: Vec<(Option<ServiceId>, Timestamp)>,
     ) -> LocalBoxFuture<'static, Result<(), BackendError>> {
-        self.state
-            .lock()
-            .unwrap()
-            .deleted_for_me
-            .push((destination, messages));
+        self.record(|state| state.deleted_for_me.push((destination, messages)));
         async { Ok(()) }.boxed_local()
     }
 
@@ -247,11 +266,7 @@ impl SignalBackend for FakeBackend {
         destination: Destination,
         typing: bool,
     ) -> LocalBoxFuture<'static, Result<(), BackendError>> {
-        self.state
-            .lock()
-            .unwrap()
-            .typing
-            .push((destination, typing));
+        self.record(|state| state.typing.push((destination, typing)));
         async { Ok(()) }.boxed_local()
     }
 
@@ -281,13 +296,14 @@ impl SignalBackend for FakeBackend {
         &mut self,
         key: GroupMasterKey,
     ) -> LocalBoxFuture<'static, Result<(), BackendError>> {
-        let state = self.state.clone();
+        let (state, changes) = (self.state.clone(), self.changes.clone());
         let offline = self.link.borrow().offline;
         async move {
             if offline {
                 return Err(BackendError::network("offline"));
             }
             let mut state = state.lock().unwrap();
+            changes.send_modify(|count| *count += 1);
             let unnamed: Vec<_> = state
                 .groups
                 .get(&key)
@@ -311,6 +327,7 @@ impl SignalBackend for FakeBackend {
 pub struct FakeNetwork {
     state: Arc<Mutex<State>>,
     link: Arc<watch::Sender<Link>>,
+    changes: Arc<watch::Sender<u64>>,
 }
 
 impl FakeNetwork {
@@ -372,6 +389,19 @@ impl FakeNetwork {
     /// Texts sent successfully so far, oldest first.
     pub fn sent(&self) -> Vec<SentText> {
         self.state.lock().unwrap().sent.clone()
+    }
+
+    /// Waits until `done` holds, checking whenever the backend records
+    /// something. For what the core does after the events a test can await,
+    /// such as sending an edit or syncing a delete.
+    pub async fn wait_until(&self, done: impl Fn(&Self) -> bool) {
+        let mut changes = self.changes.subscribe();
+        while !done(self) {
+            changes
+                .changed()
+                .await
+                .expect("the network outlives its waits");
+        }
     }
 
     /// Sends started so far, including failed and paused ones.
