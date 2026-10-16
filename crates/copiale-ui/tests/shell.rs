@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use copiale_core::{
     Attachment, BackendError, Command, Content, ConversationId, ConversationSummary, Direction,
-    Event, GroupMasterKey, GroupUpdate, Member, Message, MessageBody, MessageId, MessageStatus,
-    Peer, Quote, ServiceId, StorageFailure, Timestamp, Unsupported,
+    Event, Expiry, GroupMasterKey, GroupUpdate, Member, Message, MessageBody, MessageId,
+    MessageStatus, Peer, Quote, ServiceId, StorageFailure, Timestamp, Unsupported,
 };
 use copiale_ui::chat::Compose;
 use copiale_ui::onboarding::Screen;
@@ -208,6 +208,7 @@ fn message(id: i64, direction: Direction, status: Option<MessageStatus>) -> Mess
         edited: false,
         read: true,
         status,
+        expiry: None,
     }
 }
 
@@ -725,6 +726,10 @@ fn renders_every_kind_of_content(cx: &mut TestAppContext) {
         .map(|(id, content)| Message {
             content,
             edited: id % 2 == 0,
+            expiry: (id % 3 == 0).then_some(Expiry {
+                timer: 3600,
+                at: None,
+            }),
             ..message(id, Direction::Incoming, None)
         })
         .collect();
@@ -743,13 +748,15 @@ fn renders_every_kind_of_content(cx: &mut TestAppContext) {
         (0..chat.row_count())
             .map(|ix| {
                 let row = chat.row(ix).unwrap();
-                (row.placeholders.len(), row.system.len(), row.quote.clone())
+                let shape = (row.placeholders.len(), row.system.len(), row.quote.clone());
+                (shape, row.timer)
             })
             .collect::<Vec<_>>()
     });
+    let (shapes, timers): (Vec<_>, Vec<_>) = rows.into_iter().unzip();
     let quote = Some("↳ you: ship it?".to_string());
     assert_eq!(
-        rows,
+        shapes,
         [
             (2, 0, None),
             (1, 0, None),
@@ -761,6 +768,22 @@ fn renders_every_kind_of_content(cx: &mut TestAppContext) {
             (0, 1, None),
             (1, 0, None),
             (0, 0, quote),
+        ]
+    );
+    let hour = Some("◷ 1h".to_string());
+    assert_eq!(
+        timers,
+        [
+            None,
+            None,
+            hour.clone(),
+            None,
+            None,
+            hour.clone(),
+            None,
+            None,
+            hour,
+            None
         ]
     );
 }

@@ -16,6 +16,7 @@ use super::outbox::{Outbox, Outcome};
 use super::probe::{Check, Probe};
 use super::{Command, CoreOptions, DELETE_WINDOW, EDIT_WINDOW, Event, StorageFailure};
 use crate::backend::{BackendError, Incoming, Linker, SignalBackend};
+use crate::clock::Clock;
 use crate::model::{
     AccountSettings, Change, ChatRef, Content, ConversationId, Destination, GroupRef, Message,
     MessageBody, MessageChange, MessageId, MessageRef, MessageStatus, Outgoing, Quote, ReceiptKind,
@@ -219,6 +220,8 @@ impl Core {
 
     /// Keeps a connection open, stores messages and answers queries.
     async fn serve<B: SignalBackend>(&mut self, db: &Database, mut backend: B, linked_now: bool) {
+        // Overdue while not running.
+        let mut next_expiry = self.expire(db).await;
         match db.fail_pending().await {
             Ok(0) => {}
             Ok(count) => tracing::info!(count, "unsent messages marked failed"),
@@ -326,10 +329,15 @@ impl Core {
                             Err(error) => self.database_error(error),
                         }
                     }
-                    Some(Command::MarkRead(conversation)) => match db.mark_read(conversation).await {
+                    Some(Command::MarkRead(conversation)) => match db.mark_read(conversation, self.options.clock.now()).await {
                         Ok(read) if read.is_empty() => {}
                         Ok(read) => {
-                            send_receipts(&mut backend, settings, read);
+                            let receipts = read
+                                .iter()
+                                .filter_map(|message| Some((message.sender?, message.sent_at)))
+                                .collect();
+                            self.countdowns_started(&read, &mut next_expiry);
+                            send_receipts(&mut backend, settings, receipts);
                             self.send_conversation(db, conversation).await;
                         }
                         Err(error) => self.database_error(error),
@@ -366,14 +374,26 @@ impl Core {
                             .group
                             .map_or(Destination::Contact(message.sender), Destination::Group);
                         own_quotes(&mut message.content, backend.own_id());
-                        self.store(db, &destination, Some(message.sender), message.timestamp, &message.content).await;
+                        let stored = Stored {
+                            author: Some(message.sender),
+                            sent_at: message.timestamp,
+                            content: &message.content,
+                            expire_timer: message.expire_timer,
+                        };
+                        self.store(db, &destination, stored, &mut next_expiry).await;
                         if let Some(group) = message.group {
                             self.check_group(db, &mut groups, &mut backend, group).await;
                         }
                     }
                     Some(Incoming::Sent(mut message)) => {
                         own_quotes(&mut message.content, backend.own_id());
-                        self.store(db, &message.destination, None, message.timestamp, &message.content).await;
+                        let stored = Stored {
+                            author: None,
+                            sent_at: message.timestamp,
+                            content: &message.content,
+                            expire_timer: message.expire_timer,
+                        };
+                        self.store(db, &message.destination, stored, &mut next_expiry).await;
                         if let Destination::Group(group) = message.destination {
                             self.check_group(db, &mut groups, &mut backend, group).await;
                         }
@@ -417,14 +437,25 @@ impl Core {
                             Err(error) => self.database_error(error),
                         }
                     }
-                    Some(Incoming::ReadElsewhere(read)) => match db.mark_read_elsewhere(&read).await {
-                        Ok(conversations) => {
-                            for conversation in conversations {
-                                self.send_conversation(db, conversation).await;
+                    Some(Incoming::ReadElsewhere { read, at }) => {
+                        // Not later than here, so the countdown isn't longer.
+                        let at = at.min(self.options.clock.now());
+                        match db.mark_read_elsewhere(&read, at).await {
+                            Ok(read) => {
+                                self.countdowns_started(&read, &mut next_expiry);
+                                let mut conversations = Vec::new();
+                                for message in &read {
+                                    if !conversations.contains(&message.conversation) {
+                                        conversations.push(message.conversation);
+                                    }
+                                }
+                                for conversation in conversations {
+                                    self.send_conversation(db, conversation).await;
+                                }
                             }
+                            Err(error) => self.database_error(error),
                         }
-                        Err(error) => self.database_error(error),
-                    },
+                    }
                     Some(Incoming::Typing { sender, group, typing }) if settings.typing_indicators => {
                         match db.typing_conversation(sender, group).await {
                             Ok(Some(conversation)) => self.emit(Event::Typing {
@@ -484,7 +515,7 @@ impl Core {
                 },
                 outcome = outbox.finished() => match outcome {
                     Outcome::Sent { id, change: false } => {
-                        self.send_finished(db, id, Ok(())).await;
+                        self.send_finished(db, id, Ok(()), &mut next_expiry).await;
                         outbox.start_next(&mut backend);
                     }
                     Outcome::Sent { id, change: true } => {
@@ -492,7 +523,7 @@ impl Core {
                         outbox.start_next(&mut backend);
                     }
                     Outcome::Failed { id, change: false, error } => {
-                        self.send_finished(db, id, Err(error)).await;
+                        self.send_finished(db, id, Err(error), &mut next_expiry).await;
                         outbox.start_next(&mut backend);
                     }
                     Outcome::Failed { id, change: true, error } => {
@@ -508,6 +539,9 @@ impl Core {
                     }
                 },
                 () = tokio::time::sleep_until(wait), if retry_at.is_some() => {}
+                () = due(&*self.options.clock, next_expiry) => {
+                    next_expiry = self.expire(db).await;
+                }
             }
             if let Some(error) = lost {
                 incoming = None;
@@ -526,18 +560,7 @@ impl Core {
         conversations: &[ChatRef],
     ) {
         match db.delete_messages(messages).await {
-            Ok(deleted) => {
-                let mut changed = Vec::new();
-                for (conversation, id) in deleted {
-                    self.emit(Event::MessageRemoved { conversation, id });
-                    if !changed.contains(&conversation) {
-                        changed.push(conversation);
-                    }
-                }
-                for conversation in changed {
-                    self.send_conversation(db, conversation).await;
-                }
-            }
+            Ok(deleted) => self.removed(db, deleted).await,
             Err(error) => self.database_error(error),
         }
         for chat in conversations {
@@ -545,6 +568,51 @@ impl Core {
                 Ok(Some(conversation)) => self.emit(Event::ConversationRemoved(conversation)),
                 Ok(None) => {}
                 Err(error) => self.database_error(error),
+            }
+        }
+    }
+
+    /// Reports deleted messages, then their conversations.
+    async fn removed(&self, db: &Database, deleted: Vec<(ConversationId, MessageId)>) {
+        let mut changed = Vec::new();
+        for (conversation, id) in deleted {
+            self.emit(Event::MessageRemoved { conversation, id });
+            if !changed.contains(&conversation) {
+                changed.push(conversation);
+            }
+        }
+        for conversation in changed {
+            self.send_conversation(db, conversation).await;
+        }
+    }
+
+    /// Deletes disappearing messages that are due; returns when the next
+    /// one is.
+    async fn expire(&self, db: &Database) -> Option<Timestamp> {
+        let now = self.options.clock.now();
+        match db.expire(now).await {
+            Ok(expired) if expired.is_empty() => {}
+            Ok(expired) => {
+                tracing::debug!(count = expired.len(), "disappearing messages deleted");
+                self.removed(db, expired).await;
+            }
+            Err(error) => self.database_error(error),
+        }
+        match db.next_expiry().await {
+            Ok(next) => next,
+            Err(error) => {
+                self.database_error(error);
+                Some(Timestamp::from_millis(now.as_millis() + EXPIRY_RETRY_MS))
+            }
+        }
+    }
+
+    /// Reports messages whose countdown just started, and schedules them.
+    fn countdowns_started(&self, messages: &[Message], next_expiry: &mut Option<Timestamp>) {
+        for message in messages {
+            if message.expiry.is_some_and(|expiry| expiry.at.is_some()) {
+                self.emit(Event::MessageUpdated(message.clone()));
+                schedule(next_expiry, message);
             }
         }
     }
@@ -635,11 +703,22 @@ impl Core {
             }
             Err(error) => return self.database_error(error),
         };
+        // presage applies the same timer when sending.
+        let expire_timer = match backend.expire_timer(destination).await {
+            Ok(timer) => timer,
+            Err(error) => {
+                tracing::warn!(%error, "reading the disappearing messages timer failed");
+                None
+            }
+        };
         // Signal identifies a message by author and sent time, so each needs
         // its own.
         let mut sent_at = Timestamp::now();
         let message = loop {
-            match db.add_pending(conversation, sent_at, &content).await {
+            match db
+                .add_pending(conversation, sent_at, &content, expire_timer)
+                .await
+            {
                 Ok(Some(message)) => break message,
                 Ok(None) => sent_at = Timestamp::from_millis(sent_at.as_millis() + 1),
                 Err(error) => return self.database_error(error),
@@ -810,12 +889,19 @@ impl Core {
         }
     }
 
-    async fn send_finished(&self, db: &Database, id: MessageId, result: Result<(), BackendError>) {
+    async fn send_finished(
+        &self,
+        db: &Database,
+        id: MessageId,
+        result: Result<(), BackendError>,
+        next_expiry: &mut Option<Timestamp>,
+    ) {
         let status = match result {
             Ok(()) => MessageStatus::Sent,
             Err(_) => MessageStatus::Failed,
         };
-        let message = match db.set_status(id, status).await {
+        let now = self.options.clock.now();
+        let message = match db.set_status(id, status, now).await {
             Ok(Some(message)) => message,
             Ok(None) => return,
             Err(error) => return self.database_error(error),
@@ -823,6 +909,7 @@ impl Core {
         match result {
             Ok(()) => {
                 tracing::debug!(message = id.get(), "message sent");
+                schedule(next_expiry, &message);
                 self.emit(Event::MessageUpdated(message));
             }
             Err(error) => {
@@ -840,19 +927,38 @@ impl Core {
         Instant::now() + retry_in
     }
 
-    /// Stores a received message; `author` is `None` for this account's.
+    /// Stores a received message, unless it's ours and already gone on the
+    /// device that sent it.
     async fn store(
         &self,
         db: &Database,
         destination: &Destination,
-        author: Option<ServiceId>,
-        sent_at: Timestamp,
-        content: &Content,
+        message: Stored<'_>,
+        next_expiry: &mut Option<Timestamp>,
     ) {
-        match db.add_message(destination, author, sent_at, content).await {
+        let now = self.options.clock.now();
+        if message.author.is_none()
+            && let Some(timer) = message.expire_timer
+            && message.sent_at.as_millis() + u64::from(timer) * 1000 <= now.as_millis()
+        {
+            tracing::debug!("expired message not stored");
+            return;
+        }
+        let added = db
+            .add_message(
+                destination,
+                message.author,
+                message.sent_at,
+                message.content,
+                message.expire_timer,
+                now,
+            )
+            .await;
+        match added {
             Ok(Some(message)) => {
                 let conversation = message.conversation;
                 tracing::debug!(conversation = conversation.get(), "message stored");
+                schedule(next_expiry, &message);
                 self.emit(Event::MessageAdded(message));
                 self.send_conversation(db, conversation).await;
             }
@@ -879,6 +985,32 @@ impl Core {
     fn database_error(&self, error: StorageError) {
         tracing::error!(%error, "database error");
         self.emit(Event::DatabaseError(error.to_string()));
+    }
+}
+
+/// A received message to store; `author` is `None` for this account's.
+struct Stored<'a> {
+    author: Option<ServiceId>,
+    sent_at: Timestamp,
+    content: &'a Content,
+    expire_timer: Option<u32>,
+}
+
+/// When expiring fails, how long until trying again.
+const EXPIRY_RETRY_MS: u64 = 60_000;
+
+/// Brings the next expiry forward if `message`'s countdown ends sooner.
+fn schedule(next_expiry: &mut Option<Timestamp>, message: &Message) {
+    if let Some(at) = message.expiry.and_then(|expiry| expiry.at) {
+        *next_expiry = Some(next_expiry.map_or(at, |next| next.min(at)));
+    }
+}
+
+/// Resolves when the next expiry may be due; never without one.
+fn due(clock: &dyn Clock, at: Option<Timestamp>) -> LocalBoxFuture<'static, ()> {
+    match at {
+        Some(at) => clock.sleep_until(at),
+        None => std::future::pending().boxed_local(),
     }
 }
 

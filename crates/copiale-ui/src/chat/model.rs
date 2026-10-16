@@ -12,7 +12,7 @@ use copiale_core::{
 };
 
 use super::content::{placeholders, quote_line, system_lines};
-use super::time::Clock;
+use super::time::{Clock, countdown, countdown_changes_in};
 
 /// Messages loaded per page.
 pub const PAGE: u32 = 100;
@@ -74,6 +74,9 @@ pub struct Row<'a> {
     pub placeholders: Vec<String>,
     /// System lines (group and timer changes); the row shows only these.
     pub system: Vec<String>,
+    /// For disappearing messages, time left: `◷ 4m`, or the whole timer
+    /// until the countdown starts.
+    pub timer: Option<String>,
     /// Day label, on the first message of a day.
     pub day: Option<String>,
     /// Why sending failed, if it failed this session.
@@ -300,6 +303,13 @@ impl Chat {
             }),
             placeholders: placeholders(&message.content),
             system,
+            timer: message.expiry.map(|expiry| {
+                let left = match expiry.at {
+                    Some(at) => at.as_millis().saturating_sub(self.clock.now().as_millis()),
+                    None => u64::from(expiry.timer) * 1000,
+                };
+                format!("◷ {}", countdown(left))
+            }),
             day: new_day.then(|| self.clock.day_label(day)),
             error: log.errors.get(&message.id),
             actions: self.actions(message),
@@ -522,6 +532,19 @@ impl Chat {
             .iter()
             .filter(|t| t.until > now)
             .map(|t| Duration::from_millis(t.until.as_millis() - now.as_millis()))
+            .min()
+    }
+
+    /// Time until a countdown in the open conversation next changes.
+    pub fn timers_change_in(&self) -> Option<Duration> {
+        let now = self.clock.now().as_millis();
+        self.open
+            .as_ref()?
+            .messages
+            .iter()
+            .filter_map(|message| message.expiry?.at)
+            .filter(|at| at.as_millis() > now)
+            .map(|at| countdown_changes_in(at.as_millis() - now))
             .min()
     }
 
@@ -900,7 +923,7 @@ fn unknown(peer: ServiceId) -> String {
 #[cfg(test)]
 mod tests {
     use chrono::FixedOffset;
-    use copiale_core::{Attachment, Content, GroupMasterKey, GroupUpdate, Member};
+    use copiale_core::{Attachment, Content, Expiry, GroupMasterKey, GroupUpdate, Member};
     use uuid::Uuid;
 
     use super::*;
@@ -949,6 +972,7 @@ mod tests {
             edited: false,
             read: outgoing,
             status: outgoing.then_some(MessageStatus::Sent),
+            expiry: None,
         }
     }
 
@@ -1713,6 +1737,44 @@ mod tests {
         );
         assert_eq!(effects.log, [LogChange::Changed(0)]);
         assert!(chat.row(0).unwrap().change_failed);
+    }
+
+    #[test]
+    fn disappearing_messages_show_their_time_left() {
+        let now = chat().clock().now().as_millis();
+        let timed = |id, at: Option<u64>| Message {
+            expiry: Some(Expiry {
+                timer: 604_800,
+                at: at.map(Timestamp::from_millis),
+            }),
+            ..incoming(id, 100 + id as u64)
+        };
+        let mut chat = opened(vec![
+            incoming(1, 100),
+            timed(2, None),
+            timed(3, Some(now + 4 * 60_000 + 500)),
+            timed(4, Some(now + 90_000)),
+        ]);
+        let timers: Vec<_> = (0..4).map(|ix| chat.row(ix).unwrap().timer).collect();
+        assert_eq!(
+            timers,
+            [
+                None,
+                Some("◷ 1w".into()),
+                Some("◷ 4m".into()),
+                Some("◷ 1m".into())
+            ]
+        );
+        assert_eq!(chat.timers_change_in(), Some(Duration::from_millis(501)));
+
+        chat.apply(
+            &Event::MessageRemoved {
+                conversation: ConversationId::new(1),
+                id: MessageId::new(3),
+            },
+            true,
+        );
+        assert_eq!(chat.timers_change_in(), Some(Duration::from_millis(30_001)));
     }
 
     #[test]

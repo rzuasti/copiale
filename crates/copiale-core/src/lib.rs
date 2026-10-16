@@ -4,6 +4,7 @@
 
 mod actor;
 mod backend;
+mod clock;
 pub mod config;
 mod dirs;
 pub mod logging;
@@ -20,9 +21,10 @@ pub use actor::{
     StorageFailure, TYPING_TIMEOUT, spawn, spawn_with_options,
 };
 pub use backend::{BackendError, Incoming, Linker, SignalBackend};
+pub use clock::{Clock, SystemClock};
 pub use model::{
     AccountSettings, Attachment, Change, ChatRef, Content, ConversationId, ConversationSummary,
-    Destination, Direction, GroupId, GroupInfo, GroupMasterKey, GroupRef, GroupUpdate,
+    Destination, Direction, Expiry, GroupId, GroupInfo, GroupMasterKey, GroupRef, GroupUpdate,
     IncomingMessage, Member, Message, MessageBody, MessageChange, MessageId, MessagePreview,
     MessageRef, MessageStatus, Outgoing, Peer, PhoneNumber, Quote, ReceiptKind, SentMessage,
     ServiceId, Timestamp, Unsupported,

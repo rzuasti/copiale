@@ -14,6 +14,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::task::LocalSet;
 
 use crate::backend::{BackendError, Linker};
+use crate::clock::{Clock, SystemClock};
 use crate::model::{
     ConversationId, ConversationSummary, Message, MessageBody, MessageId, ServiceId,
 };
@@ -74,8 +75,9 @@ pub enum Command {
         before: Option<MessageId>,
         limit: u32,
     },
-    /// Marks incoming messages read; [`Event::ConversationUpdated`] follows.
-    /// Sends read receipts if the account allows them.
+    /// Marks incoming messages read; [`Event::ConversationUpdated`] follows,
+    /// after [`Event::MessageUpdated`] for disappearing ones, whose countdown
+    /// starts. Sends read receipts if the account allows them.
     MarkRead(ConversationId),
     /// The user started or stopped typing in a conversation; tells the
     /// other side if the account allows typing indicators. Repeat `true`
@@ -130,8 +132,8 @@ pub enum Event {
     DatabaseError(String),
     /// A stored message changed, e.g. its status.
     MessageUpdated(Message),
-    /// A message was deleted for this account only; gone from storage.
-    /// [`Event::ConversationUpdated`] follows.
+    /// A message was deleted for this account only, or disappeared; gone
+    /// from storage. [`Event::ConversationUpdated`] follows.
     MessageRemoved {
         conversation: ConversationId,
         id: MessageId,
@@ -238,6 +240,8 @@ pub struct CoreOptions {
     /// How long an outgoing message may wait for a connection before it
     /// fails.
     pub send_timeout: Duration,
+    /// Times disappearing messages.
+    pub clock: Arc<dyn Clock>,
 }
 
 impl Default for CoreOptions {
@@ -249,6 +253,7 @@ impl Default for CoreOptions {
             probe_interval: Duration::from_secs(20),
             probe_timeout: Duration::from_secs(10),
             send_timeout: Duration::from_secs(600),
+            clock: Arc::new(SystemClock),
         }
     }
 }

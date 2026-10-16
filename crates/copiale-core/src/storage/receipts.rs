@@ -2,7 +2,7 @@
 
 use super::StorageError;
 use super::database::{Database, database_error};
-use super::messages::millis;
+use super::messages::{MessageRow, message, message_columns, millis};
 use crate::model::{
     AccountSettings, ConversationId, GroupId, Message, MessageId, ReceiptKind, ServiceId, Timestamp,
 };
@@ -100,13 +100,14 @@ impl Database {
         Ok(changed)
     }
 
-    /// Marks messages read on another device read here, with everything
-    /// before them in their conversation; returns the conversations that
-    /// changed.
+    /// Marks messages read on another device at `at` read here, with
+    /// everything before them in their conversation, starting the countdown
+    /// of disappearing ones; returns the newly read ones.
     pub(crate) async fn mark_read_elsewhere(
         &self,
         read: &[(ServiceId, Timestamp)],
-    ) -> Result<Vec<ConversationId>, StorageError> {
+        at: Timestamp,
+    ) -> Result<Vec<Message>, StorageError> {
         let mut changed = Vec::new();
         for (author, sent_at) in read {
             let found: Option<(i64, i64)> = sqlx::query_as(
@@ -120,18 +121,20 @@ impl Database {
             let Some((conversation, sent_at)) = found else {
                 continue;
             };
-            let result = sqlx::query(
-                "UPDATE messages SET read = 1
-                 WHERE conversation_id = ? AND read = 0 AND sent_at <= ?",
-            )
+            let rows: Vec<MessageRow> = sqlx::query_as(concat!(
+                "UPDATE messages SET read = 1, expires_at = ?3 + expires_in * 1000
+                 WHERE conversation_id = ?1 AND read = 0 AND sent_at <= ?2
+                 RETURNING ",
+                message_columns!()
+            ))
             .bind(conversation)
             .bind(sent_at)
-            .execute(&self.app)
+            .bind(millis(at))
+            .fetch_all(&self.app)
             .await
             .map_err(database_error)?;
-            let conversation = ConversationId::new(conversation);
-            if result.rows_affected() > 0 && !changed.contains(&conversation) {
-                changed.push(conversation);
+            for row in rows {
+                changed.push(message(row)?);
             }
         }
         Ok(changed)
@@ -244,10 +247,17 @@ mod tests {
 
     /// A sent message of ours, at `sent_at`.
     async fn sent(db: &Database, destination: Destination, sent_at: u64) -> Message {
-        db.add_message(&destination, None, at(sent_at), &Content::text("out"))
-            .await
-            .unwrap()
-            .unwrap()
+        db.add_message(
+            &destination,
+            None,
+            at(sent_at),
+            &Content::text("out"),
+            None,
+            Timestamp::from_millis(0),
+        )
+        .await
+        .unwrap()
+        .unwrap()
     }
 
     fn statuses(messages: &[Message]) -> Vec<Option<MessageStatus>> {
@@ -338,7 +348,7 @@ mod tests {
             .open_conversation(&Destination::Contact(peer(1)))
             .await
             .unwrap();
-        db.add_pending(conversation, at(100), &Content::text("x"))
+        db.add_pending(conversation, at(100), &Content::text("x"), None)
             .await
             .unwrap();
 
@@ -357,6 +367,8 @@ mod tests {
             Some(peer(from)),
             at(sent_at),
             &Content::text("in"),
+            None,
+            Timestamp::from_millis(0),
         )
         .await
         .unwrap()
@@ -369,10 +381,19 @@ mod tests {
         let first = incoming(&db, 1, 100).await;
         incoming(&db, 1, 101).await;
 
-        let read = db.mark_read(first.conversation).await.unwrap();
+        let read = db
+            .mark_read(first.conversation, Timestamp::from_millis(0))
+            .await
+            .unwrap();
 
-        assert_eq!(read, [(peer(1), at(100)), (peer(1), at(101))]);
-        assert!(db.mark_read(first.conversation).await.unwrap().is_empty());
+        let read: Vec<_> = read.iter().map(|m| (m.sender, m.sent_at)).collect();
+        assert_eq!(read, [(Some(peer(1)), at(100)), (Some(peer(1)), at(101))]);
+        assert!(
+            db.mark_read(first.conversation, Timestamp::from_millis(0))
+                .await
+                .unwrap()
+                .is_empty()
+        );
         db.close().await;
     }
 
@@ -384,13 +405,47 @@ mod tests {
         incoming(&db, 1, 102).await;
 
         let changed = db
-            .mark_read_elsewhere(&[(peer(1), at(101)), (peer(9), at(5))])
+            .mark_read_elsewhere(
+                &[(peer(1), at(101)), (peer(9), at(5))],
+                Timestamp::from_millis(0),
+            )
             .await
             .unwrap();
 
-        assert_eq!(changed, [first.conversation]);
+        let changed: Vec<_> = changed.iter().map(|m| m.sent_at).collect();
+        assert_eq!(changed, [at(100), at(101)]);
         let summary = db.conversation(first.conversation).await.unwrap().unwrap();
         assert_eq!(summary.unread, 1);
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn reads_elsewhere_start_countdowns_when_read_there() {
+        let (_dir, db) = db().await;
+        let message = db
+            .add_message(
+                &Destination::Contact(peer(1)),
+                Some(peer(1)),
+                at(100),
+                &Content::text("in"),
+                Some(60),
+                at(0),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+        let read = db
+            .mark_read_elsewhere(&[(peer(1), at(100))], at(5_000))
+            .await
+            .unwrap();
+
+        assert_eq!(read.len(), 1);
+        assert_eq!(read[0].id, message.id);
+        assert_eq!(
+            read[0].expiry.and_then(|expiry| expiry.at),
+            Some(at(65_000))
+        );
         db.close().await;
     }
 

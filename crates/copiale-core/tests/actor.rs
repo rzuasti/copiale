@@ -8,14 +8,14 @@ use std::time::Duration;
 use copiale_core::storage::{KdfParams, Passphrase, Storage, StoragePaths};
 use copiale_core::{
     BackendError, Change, ChatRef, Command, Content, ConversationId, ConversationSummary,
-    CoreHandle, CoreOptions, Destination, Direction, Event, Events, GroupInfo, GroupRef,
+    CoreHandle, CoreOptions, Destination, Direction, Event, Events, Expiry, GroupInfo, GroupRef,
     GroupUpdate, Incoming, IncomingMessage, Member, Message, MessageBody, MessageChange,
     MessagePreview, MessageRef, MessageStatus, Outgoing, Peer, Quote, ReceiptKind, SentMessage,
     StorageFailure, Timestamp,
 };
 use copiale_testkit::{
-    FAKE_LINK_URL, FakeNetwork, FakePhone, MemorySecretStore, OWN_ID, SentText, fake_backend,
-    fake_linker, group_key, service_id, text,
+    FAKE_LINK_URL, FakeNetwork, FakePhone, ManualClock, MemorySecretStore, OWN_ID, SentText,
+    fake_backend, fake_linker, group_key, service_id, text,
 };
 use tempfile::TempDir;
 
@@ -94,6 +94,7 @@ fn incoming(from: u128, sent_at: u64, body: &str) -> Incoming {
         group: None,
         timestamp: Timestamp::from_millis(sent_at),
         content: Content::text(body),
+        expire_timer: None,
     })
 }
 
@@ -210,6 +211,7 @@ async fn message_sent_from_the_phone_is_stored_as_outgoing() {
         destination: Destination::Contact(service_id(2)),
         timestamp: Timestamp::from_millis(200),
         content: Content::text("from my phone"),
+        expire_timer: None,
     }));
 
     let message = message_added(&mut running.events).await;
@@ -1183,6 +1185,7 @@ fn group_incoming(group: GroupRef, from: u128, sent_at: u64, body: &str) -> Inco
         group: Some(group),
         timestamp: Timestamp::from_millis(sent_at),
         content: Content::text(body),
+        expire_timer: None,
     })
 }
 
@@ -1312,6 +1315,7 @@ async fn group_message_sent_from_the_phone_is_stored_as_outgoing() {
         destination: Destination::Group(group_ref(1, 0)),
         timestamp: Timestamp::from_millis(200),
         content: Content::text("from my phone"),
+        expire_timer: None,
     }));
 
     let message = message_added(&mut running.events).await;
@@ -1369,6 +1373,7 @@ async fn system_lines_and_reactions_arrive_read_but_calls_do_not() {
             group: Some(group_ref(1, 0)),
             timestamp: Timestamp::from_millis(sent_at),
             content,
+            expire_timer: None,
         })
     };
 
@@ -1590,10 +1595,10 @@ async fn reads_on_the_phone_clear_unread_here() {
         conversation_updated(&mut running.events).await;
     }
 
-    running.network.deliver(Incoming::ReadElsewhere(vec![(
-        service_id(1),
-        Timestamp::from_millis(101),
-    )]));
+    running.network.deliver(Incoming::ReadElsewhere {
+        read: vec![(service_id(1), Timestamp::from_millis(101))],
+        at: Timestamp::now(),
+    });
 
     let summary = conversation_updated(&mut running.events).await;
     assert_eq!(summary.unread, 0);
@@ -1697,6 +1702,7 @@ async fn quotes_of_our_messages_name_no_author() {
             group: None,
             timestamp: Timestamp::from_millis(sent_at),
             content: reply(author),
+            expire_timer: None,
         }));
     }
 
@@ -1730,6 +1736,7 @@ async fn deletes_for_me_remove_messages_and_conversations() {
         destination: Destination::Contact(service_id(1)),
         timestamp: Timestamp::from_millis(101),
         content: Content::text("mine"),
+        expire_timer: None,
     }));
     let mine = message_added(&mut running.events).await;
     conversation_updated(&mut running.events).await;
@@ -1890,6 +1897,7 @@ async fn only_recent_own_sent_messages_change_for_everyone() {
         destination: Destination::Contact(service_id(1)),
         timestamp: Timestamp::from_millis(1_000),
         content: Content::text("ancient"),
+        expire_timer: None,
     }));
     let old = message_added(&mut running.events).await;
     conversation_updated(&mut running.events).await;
@@ -1968,5 +1976,225 @@ async fn failed_changes_are_reported() {
             error,
         }
     );
+    stop(running).await;
+}
+
+// Disappearing messages
+
+const NOW: u64 = 1_800_000_000_000;
+
+fn timed(options: CoreOptions, clock: &ManualClock) -> CoreOptions {
+    CoreOptions {
+        clock: Arc::new(clock.clone()),
+        ..options
+    }
+}
+
+/// Connected, on a clock at [`NOW`].
+async fn ready_at(clock: &ManualClock) -> (TempDir, Running) {
+    let dir = tempfile::tempdir().unwrap();
+    let options = timed(fast(), clock);
+    let secrets = MemorySecretStore::default();
+    let mut running = start_with(dir.path(), &secrets, true, options, |_| {});
+    expect(&mut running.events, Event::Ready).await;
+    expect(&mut running.events, Event::Connected).await;
+    (dir, running)
+}
+
+fn timed_incoming(from: u128, sent_at: u64, body: &str, seconds: u32) -> Incoming {
+    Incoming::Message(IncomingMessage {
+        sender: service_id(from),
+        group: None,
+        timestamp: Timestamp::from_millis(sent_at),
+        content: Content::text(body),
+        expire_timer: Some(seconds),
+    })
+}
+
+fn expires_at(message: &Message) -> Option<u64> {
+    message.expiry?.at.map(|at| at.as_millis())
+}
+
+async fn expect_removed(events: &mut Events, message: &Message) {
+    expect(
+        events,
+        Event::MessageRemoved {
+            conversation: message.conversation,
+            id: message.id,
+        },
+    )
+    .await;
+    let summary = conversation_updated(events).await;
+    assert_eq!(summary.id, message.conversation);
+}
+
+#[tokio::test]
+async fn incoming_messages_disappear_after_being_read() {
+    let clock = ManualClock::new(Timestamp::from_millis(NOW));
+    let (_dir, mut running) = ready_at(&clock).await;
+    running
+        .network
+        .deliver(timed_incoming(1, NOW - 1000, "soon gone", 60));
+    let message = message_added(&mut running.events).await;
+    conversation_updated(&mut running.events).await;
+    assert_eq!(
+        message.expiry,
+        Some(Expiry {
+            timer: 60,
+            at: None
+        })
+    );
+
+    // Unread messages wait.
+    clock.advance(Duration::from_secs(3600));
+    sync(&mut running).await;
+    assert_eq!(
+        load_messages(&mut running, message.conversation)
+            .await
+            .len(),
+        1
+    );
+
+    send(&running, Command::MarkRead(message.conversation));
+    let started = message_updated(&mut running.events).await;
+    assert_eq!(expires_at(&started), Some(NOW + 3_660_000));
+    conversation_updated(&mut running.events).await;
+
+    clock.advance(Duration::from_secs(59));
+    sync(&mut running).await;
+    clock.advance(Duration::from_secs(1));
+    expect_removed(&mut running.events, &message).await;
+    assert!(
+        load_messages(&mut running, message.conversation)
+            .await
+            .is_empty()
+    );
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn own_messages_disappear_after_being_sent() {
+    let clock = ManualClock::new(Timestamp::from_millis(NOW));
+    let (_dir, mut running) = ready_at(&clock).await;
+    let peer = Destination::Contact(service_id(2));
+    running.network.set_expire_timer(peer, Some(30));
+    let chat = open_chat(&mut running, 2).await;
+    running.network.pause_sends();
+
+    send_text(&running, chat, "brief");
+    let pending = pending_added(&mut running.events).await;
+    assert_eq!(
+        pending.expiry,
+        Some(Expiry {
+            timer: 30,
+            at: None
+        })
+    );
+    clock.advance(Duration::from_secs(10));
+    running.network.resume_sends();
+    let sent = message_updated(&mut running.events).await;
+    assert_eq!(sent.status, Some(MessageStatus::Sent));
+    assert_eq!(expires_at(&sent), Some(NOW + 40_000));
+
+    clock.advance(Duration::from_secs(30));
+    expect_removed(&mut running.events, &pending).await;
+
+    running.network.set_expire_timer(peer, None);
+    send_text(&running, chat, "stays");
+    assert_eq!(pending_added(&mut running.events).await.expiry, None);
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn messages_from_the_phone_count_down_from_their_sending() {
+    let clock = ManualClock::new(Timestamp::from_millis(NOW));
+    let (_dir, mut running) = ready_at(&clock).await;
+    let from_phone = |sent_at| {
+        Incoming::Sent(SentMessage {
+            destination: Destination::Contact(service_id(2)),
+            timestamp: Timestamp::from_millis(sent_at),
+            content: Content::text("from phone"),
+            expire_timer: Some(60),
+        })
+    };
+
+    // Long gone on the phone: never shown.
+    running.network.deliver(from_phone(NOW - 61_000));
+    running.network.deliver(from_phone(NOW - 1_000));
+    let message = message_added(&mut running.events).await;
+    assert_eq!(message.sent_at, Timestamp::from_millis(NOW - 1_000));
+    assert_eq!(expires_at(&message), Some(NOW + 59_000));
+    conversation_updated(&mut running.events).await;
+
+    clock.advance(Duration::from_secs(59));
+    expect_removed(&mut running.events, &message).await;
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn reads_on_the_phone_start_the_countdown_when_read_there() {
+    let clock = ManualClock::new(Timestamp::from_millis(NOW));
+    let (_dir, mut running) = ready_at(&clock).await;
+    running
+        .network
+        .deliver(timed_incoming(1, NOW - 120_000, "read", 60));
+    let message = message_added(&mut running.events).await;
+    conversation_updated(&mut running.events).await;
+
+    // Read on the phone 90 s ago: already overdue here.
+    running.network.deliver(Incoming::ReadElsewhere {
+        read: vec![(service_id(1), message.sent_at)],
+        at: Timestamp::from_millis(NOW - 90_000),
+    });
+    let started = message_updated(&mut running.events).await;
+    assert_eq!(expires_at(&started), Some(NOW - 30_000));
+    conversation_updated(&mut running.events).await;
+    expect_removed(&mut running.events, &message).await;
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn overdue_messages_are_deleted_on_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = MemorySecretStore::default();
+    let clock = ManualClock::new(Timestamp::from_millis(NOW));
+    let mut running = start_with(dir.path(), &secrets, true, timed(fast(), &clock), |_| {});
+    expect(&mut running.events, Event::Ready).await;
+    expect(&mut running.events, Event::Connected).await;
+    running.network.deliver(timed_incoming(1, NOW, "gone", 60));
+    let gone = message_added(&mut running.events).await;
+    conversation_updated(&mut running.events).await;
+    send(&running, Command::MarkRead(gone.conversation));
+    message_updated(&mut running.events).await;
+    conversation_updated(&mut running.events).await;
+    // Unread, so its countdown hasn't started.
+    running
+        .network
+        .deliver(timed_incoming(1, NOW + 1, "later", 60));
+    let later = message_added(&mut running.events).await;
+    stop(running).await;
+
+    clock.advance(Duration::from_secs(60));
+    let mut running = start_with(dir.path(), &secrets, true, timed(fast(), &clock), |_| {});
+    expect(&mut running.events, Event::Ready).await;
+    expect_removed(&mut running.events, &gone).await;
+    let left = load_messages(&mut running, gone.conversation).await;
+    assert_eq!(left.iter().map(|m| m.id).collect::<Vec<_>>(), [later.id]);
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn timer_changes_stay_in_the_log() {
+    let clock = ManualClock::new(Timestamp::from_millis(NOW));
+    let (_dir, mut running) = ready_at(&clock).await;
+    running.network.deliver(Incoming::Message(IncomingMessage {
+        sender: service_id(1),
+        group: None,
+        timestamp: Timestamp::from_millis(NOW),
+        content: Content::TimerChanged(Some(60)),
+        expire_timer: Some(60),
+    }));
+    let change = message_added(&mut running.events).await;
+    assert_eq!(change.expiry, None);
     stop(running).await;
 }

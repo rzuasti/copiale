@@ -86,6 +86,10 @@ Scope, UI design, architecture and work items for the first usable release.
 - Edits replace the text and add a muted `edited`; remote deletes leave a
   muted `this message was deleted`. "Delete for me" on another device removes
   the message, or the whole chat, here too.
+- Disappearing messages show the time left, e.g. `◷ 4m`, or the whole timer
+  (`◷ 1w`) until the countdown starts: when an incoming message is read,
+  here or on another device, and when an outgoing one is sent. Timer
+  changes stay as system lines. Setting timers is out of scope.
 
 ### Typography
 
@@ -217,6 +221,12 @@ crates/
   sends are retried on request. Sends cut off by quitting are marked failed
   on the next start. libsignal-service copies each sent message to the
   account's other devices.
+- Disappearing messages carry their sender's timer; ours take the
+  conversation's timer from presage, which also applies it when sending.
+  The core sleeps until the next one is due, checking the wall clock at
+  least every minute (timers may not count suspend), deletes it and reports
+  it removed. Overdue ones go at startup; ones sent from the phone and
+  already gone there are never stored.
 - Messages, including those sent from the phone, are stored once: Signal
   identifies a message by author and sent timestamp, so redeliveries are
   ignored. Order is by sent time; the chat list by local receive time.
@@ -240,6 +250,8 @@ crates/
 - Messages live in Copiale's tables only, with edits, deletes and expiry
   applied. presage's own message saving (`thread_messages`) is turned off by
   a delegating `Store` wrapper.
+- `secure_delete` overwrites deleted rows rather than leaving them in free
+  pages.
 - Tests use temporary databases and an in-memory keychain; never real Signal
   servers or the OS keychain.
 

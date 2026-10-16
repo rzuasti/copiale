@@ -26,7 +26,7 @@ use presage::libsignal_service::push_service::ServiceError;
 use presage::libsignal_service::sender::MessageSenderError;
 use presage::manager::Registered;
 use presage::model::messages::Received;
-use presage::store::{ContentsStore as _, StateStore as _};
+use presage::store::{ContentsStore as _, StateStore as _, Thread};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
@@ -344,6 +344,30 @@ impl SignalBackend for PresageBackend {
         .boxed_local()
     }
 
+    /// presage's copy: synced contacts' timers, kept current from their
+    /// messages, and groups' from their state.
+    fn expire_timer(
+        &mut self,
+        destination: Destination,
+    ) -> LocalBoxFuture<'static, Result<Option<u32>, BackendError>> {
+        let manager = self.manager.clone();
+        let thread = match destination {
+            Destination::Contact(peer) => Thread::Contact(Aci::from(peer.uuid()).into()),
+            Destination::Group(group) => Thread::Group(*group.key.as_bytes()),
+        };
+        async move {
+            let timer = manager
+                .store()
+                .expire_timer(&thread)
+                .await
+                .map_err(store_error)?;
+            Ok(timer
+                .map(|(seconds, _version)| seconds)
+                .filter(|seconds| *seconds > 0))
+        }
+        .boxed_local()
+    }
+
     /// Asks who this account is, over the connection receiving messages.
     fn probe(&mut self) -> LocalBoxFuture<'static, Result<(), BackendError>> {
         let manager = self.manager.clone();
@@ -588,7 +612,11 @@ fn signal(content: &Content) -> Option<Incoming> {
                     ))
                 })
                 .collect();
-            Some(Incoming::ReadElsewhere(read))
+            let at = content.metadata.client_timestamp.timestamp_millis().max(0) as u64;
+            Some(Incoming::ReadElsewhere {
+                read,
+                at: Timestamp::from_millis(at),
+            })
         }
         ContentBody::SynchronizeMessage(SyncMessage {
             content: Some(SyncContent::DeleteForMe(delete)),
@@ -669,20 +697,22 @@ fn message_author(message: &AddressableMessage) -> Option<ServiceId> {
 /// A message from another account, 1:1 or in a group, or a call to it.
 fn received_message(content: &Content) -> Option<IncomingMessage> {
     let client_timestamp = || content.metadata.client_timestamp.timestamp_millis().max(0) as u64;
-    let (group, timestamp, message) = match &content.body {
+    let (group, timestamp, message, expire_timer) = match &content.body {
         ContentBody::DataMessage(message) => {
             let group = match &message.group_v2 {
                 Some(context) => Some(group_ref(context)?),
                 None => None,
             };
             let timestamp = message.timestamp.unwrap_or_else(client_timestamp);
-            (group, timestamp, data_content(message, group)?)
+            let content = data_content(message, group)?;
+            (group, timestamp, content, expire_timer(message))
         }
         ContentBody::CallMessage(CallMessage {
             offer: Some(offer), ..
         }) => {
             let video = offer.r#type == Some(offer::Type::OfferVideoCall as i32);
-            (None, client_timestamp(), model::Content::Call { video })
+            let call = model::Content::Call { video };
+            (None, client_timestamp(), call, None)
         }
         _ => return None,
     };
@@ -691,6 +721,7 @@ fn received_message(content: &Content) -> Option<IncomingMessage> {
         group,
         timestamp: Timestamp::from_millis(timestamp),
         content: message,
+        expire_timer,
     })
 }
 
@@ -703,7 +734,13 @@ fn sent_message(content: &Content) -> Option<SentMessage> {
         destination,
         timestamp: Timestamp::from_millis(sent.timestamp?),
         content: data_content(message, group_of(destination))?,
+        expire_timer: expire_timer(message),
     })
+}
+
+/// The message's disappearing timer in seconds; `None` if off.
+fn expire_timer(message: &DataMessage) -> Option<u32> {
+    message.expire_timer.filter(|seconds| *seconds > 0)
 }
 
 /// A sync copy of a message sent from another of this account's devices.
@@ -1068,8 +1105,35 @@ mod tests {
                 group: None,
                 timestamp: Timestamp::from_millis(42),
                 content: model::Content::text("hi"),
+                expire_timer: None,
             }))
         );
+    }
+
+    #[test]
+    fn messages_carry_their_disappearing_timer() {
+        let timed = |seconds| {
+            let body = ContentBody::DataMessage(DataMessage {
+                body: Some("hi".into()),
+                expire_timer: Some(seconds),
+                ..Default::default()
+            });
+            received_message(&content(body)).unwrap().expire_timer
+        };
+        assert_eq!(timed(3600), Some(3600));
+        assert_eq!(timed(0), None);
+
+        let body = sent(Sent {
+            destination_service_id: Some(RECIPIENT.to_string()),
+            timestamp: Some(77),
+            message: Some(DataMessage {
+                body: Some("from phone".into()),
+                expire_timer: Some(60),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        assert_eq!(sent_message(&content(body)).unwrap().expire_timer, Some(60));
     }
 
     #[test]
@@ -1491,10 +1555,13 @@ mod tests {
         }));
         assert_eq!(
             read,
-            Some(Incoming::ReadElsewhere(vec![
-                (ServiceId::new(OTHER), Timestamp::from_millis(5)),
-                (ServiceId::new(SENDER), Timestamp::from_millis(6)),
-            ]))
+            Some(Incoming::ReadElsewhere {
+                read: vec![
+                    (ServiceId::new(OTHER), Timestamp::from_millis(5)),
+                    (ServiceId::new(SENDER), Timestamp::from_millis(6)),
+                ],
+                at: Timestamp::from_millis(1_700_000_000_123),
+            })
         );
 
         let settings = received(ContentBody::SynchronizeMessage(SyncMessage {
@@ -1783,6 +1850,7 @@ mod tests {
                 destination: Destination::Contact(ServiceId::new(RECIPIENT)),
                 timestamp: Timestamp::from_millis(77),
                 content: model::Content::text("from phone"),
+                expire_timer: None,
             }))
         );
     }

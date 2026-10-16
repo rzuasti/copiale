@@ -8,8 +8,8 @@ use super::StorageError;
 use super::changes::apply_pending;
 use super::database::{Database, database_error};
 use crate::model::{
-    Content, ConversationId, ConversationSummary, Destination, Direction, GroupId, GroupInfo,
-    GroupMasterKey, GroupRef, Member, Message, MessageBody, MessageId, MessagePreview,
+    Content, ConversationId, ConversationSummary, Destination, Direction, Expiry, GroupId,
+    GroupInfo, GroupMasterKey, GroupRef, Member, Message, MessageBody, MessageId, MessagePreview,
     MessageStatus, Peer, ServiceId, Timestamp,
 };
 
@@ -33,9 +33,10 @@ macro_rules! summary_query {
 macro_rules! message_columns {
     () => {
         "id, conversation_id, outgoing, author, sent_at, received_at, body, content, read, status, \
-         delivery, edited_at"
+         delivery, edited_at, expires_in, expires_at"
     };
 }
+pub(super) use message_columns;
 
 type SummaryRow = (
     i64,
@@ -48,7 +49,7 @@ type SummaryRow = (
     Option<String>,
     Option<String>,
 );
-type MessageRow = (
+pub(super) type MessageRow = (
     i64,
     i64,
     bool,
@@ -61,6 +62,8 @@ type MessageRow = (
     Option<String>,
     Option<String>,
     Option<i64>,
+    Option<i64>,
+    Option<i64>,
 );
 type DestinationRow = (Option<Vec<u8>>, Option<Vec<u8>>, Option<i64>);
 
@@ -68,18 +71,43 @@ impl Database {
     /// Stores a received message, or one sent from another device, unless
     /// it's already stored (same conversation, author and sent time).
     /// `author` is `None` for this account. Returns it if new.
+    ///
+    /// With `expire_timer`, the countdown starts at once for messages that
+    /// arrive read: at `sent_at` for ours, `now` for others'. System lines
+    /// don't disappear.
     pub(crate) async fn add_message(
         &self,
         destination: &Destination,
         author: Option<ServiceId>,
         sent_at: Timestamp,
         content: &Content,
+        expire_timer: Option<u32>,
+        now: Timestamp,
     ) -> Result<Option<Message>, StorageError> {
         let mut tx = self.app.begin().await.map_err(database_error)?;
         let conversation = conversation_id(&mut tx, destination).await?;
         let status = (author.is_none() && !content.is_system()).then_some(MessageStatus::Sent);
-        let message =
-            insert_message(&mut tx, conversation, author, status, sent_at, content).await?;
+        let start = if author.is_none() {
+            Some(sent_at)
+        } else {
+            content.is_quiet().then_some(now)
+        };
+        let expiry = expire_timer
+            .filter(|_| !content.is_system())
+            .map(|timer| Expiry {
+                timer,
+                at: start.map(|start| expires_at(start, timer)),
+            });
+        let message = insert_message(
+            &mut tx,
+            conversation,
+            author,
+            status,
+            sent_at,
+            content,
+            expiry,
+        )
+        .await?;
         let message = match message {
             Some(message) => Some(apply_pending(&mut tx, message).await?),
             None => None,
@@ -88,13 +116,15 @@ impl Database {
         Ok(message)
     }
 
-    /// Stores a message this device is about to send. `None` if one with the
-    /// same sent time exists, or there is no such conversation.
+    /// Stores a message this device is about to send; with `expire_timer`,
+    /// its countdown starts once sent. `None` if one with the same sent time
+    /// exists, or there is no such conversation.
     pub(crate) async fn add_pending(
         &self,
         conversation: ConversationId,
         sent_at: Timestamp,
         content: &Content,
+        expire_timer: Option<u32>,
     ) -> Result<Option<Message>, StorageError> {
         let mut tx = self.app.begin().await.map_err(database_error)?;
         let exists: Option<i64> = sqlx::query_scalar("SELECT id FROM conversations WHERE id = ?")
@@ -106,7 +136,17 @@ impl Database {
             return Ok(None);
         };
         let status = Some(MessageStatus::Pending);
-        let message = insert_message(&mut tx, conversation, None, status, sent_at, content).await?;
+        let expiry = expire_timer.map(|timer| Expiry { timer, at: None });
+        let message = insert_message(
+            &mut tx,
+            conversation,
+            None,
+            status,
+            sent_at,
+            content,
+            expiry,
+        )
+        .await?;
         tx.commit().await.map_err(database_error)?;
         Ok(message)
     }
@@ -138,18 +178,23 @@ impl Database {
     }
 
     /// Sets a pending message's status, sent or failed; returns it, or
-    /// `None` if there is no such pending message.
+    /// `None` if there is no such pending message. Sent at `now` starts its
+    /// countdown, if it disappears.
     pub(crate) async fn set_status(
         &self,
         id: MessageId,
         status: MessageStatus,
+        now: Timestamp,
     ) -> Result<Option<Message>, StorageError> {
         let row: Option<MessageRow> = sqlx::query_as(concat!(
-            "UPDATE messages SET status = ? WHERE id = ? AND status = 'pending' RETURNING ",
+            "UPDATE messages SET status = ?1,
+                 expires_at = CASE WHEN ?1 = 'sent' THEN ?3 + expires_in * 1000 END
+             WHERE id = ?2 AND status = 'pending' RETURNING ",
             message_columns!()
         ))
         .bind(status_name(status))
         .bind(id.get())
+        .bind(millis(now))
         .fetch_optional(&self.app)
         .await
         .map_err(database_error)?;
@@ -327,23 +372,61 @@ impl Database {
         load_message(&mut conn, id).await
     }
 
-    /// Marks incoming messages read; returns the newly read ones by author
-    /// and sent time.
+    /// Marks incoming messages read at `now`, starting the countdown of
+    /// disappearing ones; returns the newly read ones.
     pub(crate) async fn mark_read(
         &self,
         conversation: ConversationId,
-    ) -> Result<Vec<(ServiceId, Timestamp)>, StorageError> {
-        let rows: Vec<(Vec<u8>, i64)> = sqlx::query_as(
-            "UPDATE messages SET read = 1 WHERE conversation_id = ? AND read = 0
-             RETURNING author, sent_at",
-        )
+        now: Timestamp,
+    ) -> Result<Vec<Message>, StorageError> {
+        let rows: Vec<MessageRow> = sqlx::query_as(concat!(
+            "UPDATE messages SET read = 1, expires_at = ?2 + expires_in * 1000
+             WHERE conversation_id = ?1 AND read = 0
+             RETURNING ",
+            message_columns!()
+        ))
         .bind(conversation.get())
+        .bind(millis(now))
         .fetch_all(&self.app)
         .await
         .map_err(database_error)?;
-        rows.into_iter()
-            .map(|(author, sent_at)| Ok((service_id(&author)?, timestamp(sent_at))))
-            .collect()
+        let mut messages = rows
+            .into_iter()
+            .map(message)
+            .collect::<Result<Vec<_>, _>>()?;
+        messages.sort_by_key(|message| (message.sent_at, message.id));
+        Ok(messages)
+    }
+
+    /// Deletes messages whose countdown ended by `now`; returns them by
+    /// conversation.
+    pub(crate) async fn expire(
+        &self,
+        now: Timestamp,
+    ) -> Result<Vec<(ConversationId, MessageId)>, StorageError> {
+        let rows: Vec<(i64, i64)> = sqlx::query_as(
+            "DELETE FROM messages WHERE expires_at <= ? RETURNING conversation_id, id",
+        )
+        .bind(millis(now))
+        .fetch_all(&self.app)
+        .await
+        .map_err(database_error)?;
+        let mut expired: Vec<_> = rows
+            .into_iter()
+            .map(|(conversation, id)| (ConversationId::new(conversation), MessageId::new(id)))
+            .collect();
+        expired.sort();
+        Ok(expired)
+    }
+
+    /// When the next disappearing message is due.
+    pub(crate) async fn next_expiry(&self) -> Result<Option<Timestamp>, StorageError> {
+        let at: Option<i64> =
+            sqlx::query_scalar("SELECT min(expires_at) FROM messages WHERE expires_at IS NOT NULL")
+                .fetch_one(&self.app)
+                .await
+                .map_err(database_error)?;
+        Ok(at.map(timestamp))
     }
 
     /// Whether any contacts have been synced from the phone.
@@ -492,6 +575,7 @@ async fn insert_message(
     status: Option<MessageStatus>,
     sent_at: Timestamp,
     content: &Content,
+    expiry: Option<Expiry>,
 ) -> Result<Option<Message>, StorageError> {
     let received_at = Timestamp::now();
     let outgoing = author.is_none();
@@ -500,8 +584,9 @@ async fn insert_message(
     let (body, json) = content_columns(content)?;
     let id: Option<i64> = sqlx::query_scalar(
         "INSERT INTO messages
-             (conversation_id, outgoing, author, sent_at, received_at, body, content, read, status)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             (conversation_id, outgoing, author, sent_at, received_at, body, content, read, status,
+              expires_in, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT DO NOTHING
          RETURNING id",
     )
@@ -514,6 +599,8 @@ async fn insert_message(
     .bind(json)
     .bind(read)
     .bind(status.map(status_name))
+    .bind(expiry.map(|expiry| i64::from(expiry.timer)))
+    .bind(expiry.and_then(|expiry| expiry.at).map(millis))
     .fetch_optional(&mut *tx)
     .await
     .map_err(database_error)?;
@@ -542,6 +629,7 @@ async fn insert_message(
         edited: false,
         read,
         status,
+        expiry,
     }))
 }
 
@@ -587,7 +675,7 @@ fn master_key(bytes: &[u8]) -> Result<GroupMasterKey, StorageError> {
         .map_err(|_| StorageError::Database("invalid group master key".into()))
 }
 
-fn message(row: MessageRow) -> Result<Message, StorageError> {
+pub(super) fn message(row: MessageRow) -> Result<Message, StorageError> {
     let (
         id,
         conversation,
@@ -601,6 +689,8 @@ fn message(row: MessageRow) -> Result<Message, StorageError> {
         status,
         delivery,
         edited_at,
+        expires_in,
+        expires_at,
     ) = row;
     let status = match (status.as_deref(), delivery.as_deref()) {
         (Some("sent"), Some("delivered")) => Some(MessageStatus::Delivered),
@@ -623,6 +713,10 @@ fn message(row: MessageRow) -> Result<Message, StorageError> {
         edited: edited_at.is_some(),
         read,
         status,
+        expiry: expires_in.map(|timer| Expiry {
+            timer: u32::try_from(timer).unwrap_or(u32::MAX),
+            at: expires_at.map(timestamp),
+        }),
     })
 }
 
@@ -663,7 +757,12 @@ pub(super) fn millis(timestamp: Timestamp) -> i64 {
     i64::try_from(timestamp.as_millis()).unwrap_or(i64::MAX)
 }
 
-fn timestamp(millis: i64) -> Timestamp {
+/// When a countdown of `timer` seconds from `start` ends.
+fn expires_at(start: Timestamp, timer: u32) -> Timestamp {
+    Timestamp::from_millis(start.as_millis() + u64::from(timer) * 1000)
+}
+
+pub(super) fn timestamp(millis: i64) -> Timestamp {
     Timestamp::from_millis(u64::try_from(millis).unwrap_or(0))
 }
 
@@ -701,6 +800,8 @@ mod tests {
             author,
             Timestamp::from_millis(sent_at),
             &Content::text(body),
+            None,
+            Timestamp::from_millis(0),
         )
         .await
         .unwrap()
@@ -724,6 +825,8 @@ mod tests {
             from.map(peer),
             Timestamp::from_millis(sent_at),
             &Content::text("hi all"),
+            None,
+            Timestamp::from_millis(0),
         )
         .await
         .unwrap()
@@ -820,6 +923,7 @@ mod tests {
             conversation,
             Timestamp::from_millis(sent_at),
             &Content::text("out"),
+            None,
         )
         .await
         .unwrap()
@@ -851,7 +955,7 @@ mod tests {
         let message = pending(&db, 1, 100).await.unwrap();
 
         let sent = db
-            .set_status(message.id, MessageStatus::Sent)
+            .set_status(message.id, MessageStatus::Sent, Timestamp::from_millis(0))
             .await
             .unwrap()
             .unwrap();
@@ -869,7 +973,7 @@ mod tests {
         let message = add(&db, 1, Direction::Incoming, 100, "a").await.unwrap();
 
         let updated = db
-            .set_status(message.id, MessageStatus::Sent)
+            .set_status(message.id, MessageStatus::Sent, Timestamp::from_millis(0))
             .await
             .unwrap();
 
@@ -882,7 +986,7 @@ mod tests {
         let (_dir, db) = db().await;
         let message = pending(&db, 7, 100).await.unwrap();
         assert_eq!(db.retry_send(message.id).await.unwrap(), None);
-        db.set_status(message.id, MessageStatus::Failed)
+        db.set_status(message.id, MessageStatus::Failed, Timestamp::from_millis(0))
             .await
             .unwrap();
 
@@ -900,7 +1004,9 @@ mod tests {
         let (_dir, db) = db().await;
         let first = pending(&db, 1, 100).await.unwrap();
         let second = pending(&db, 2, 100).await.unwrap();
-        db.set_status(second.id, MessageStatus::Sent).await.unwrap();
+        db.set_status(second.id, MessageStatus::Sent, Timestamp::from_millis(0))
+            .await
+            .unwrap();
 
         assert_eq!(db.fail_pending().await.unwrap(), 1);
 
@@ -965,8 +1071,19 @@ mod tests {
         let message = add(&db, 1, Direction::Incoming, 100, "a").await.unwrap();
         add(&db, 1, Direction::Incoming, 101, "b").await;
 
-        assert_eq!(db.mark_read(message.conversation).await.unwrap().len(), 2);
-        assert!(db.mark_read(message.conversation).await.unwrap().is_empty());
+        assert_eq!(
+            db.mark_read(message.conversation, Timestamp::from_millis(0))
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(
+            db.mark_read(message.conversation, Timestamp::from_millis(0))
+                .await
+                .unwrap()
+                .is_empty()
+        );
 
         let summary = db
             .conversation(message.conversation)
@@ -1130,6 +1247,7 @@ mod tests {
                 ConversationId::new(42),
                 Timestamp::from_millis(1),
                 &Content::text("x"),
+                None,
             )
             .await
             .unwrap();
@@ -1143,6 +1261,8 @@ mod tests {
             Some(peer(1)),
             Timestamp::from_millis(sent_at),
             &content,
+            None,
+            Timestamp::from_millis(0),
         )
         .await
         .unwrap()
@@ -1219,11 +1339,140 @@ mod tests {
                 None,
                 Timestamp::from_millis(4),
                 &Content::TimerChanged(None),
+                None,
+                Timestamp::from_millis(0),
             )
             .await
             .unwrap()
             .unwrap();
         assert_eq!(mine.status, None, "system lines have no send status");
+        db.close().await;
+    }
+
+    fn at(millis: u64) -> Timestamp {
+        Timestamp::from_millis(millis)
+    }
+
+    async fn timed(
+        db: &Database,
+        author: Option<u128>,
+        sent_at: u64,
+        content: Content,
+        now: u64,
+    ) -> Message {
+        db.add_message(
+            &Destination::Contact(peer(1)),
+            author.map(peer),
+            at(sent_at),
+            &content,
+            Some(60),
+            at(now),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+    }
+
+    fn expiry(message: &Message) -> Option<Option<u64>> {
+        message
+            .expiry
+            .map(|expiry| expiry.at.map(|at| at.as_millis()))
+    }
+
+    #[tokio::test]
+    async fn countdowns_start_on_reading_sending_or_arrival() {
+        let (_dir, db) = db().await;
+        let unread = timed(&db, Some(1), 100, Content::text("in"), 1_000).await;
+        let reaction = Content::Reaction {
+            emoji: "👍".into()
+        };
+        let quiet = timed(&db, Some(1), 101, reaction, 2_000).await;
+        let from_phone = timed(&db, None, 102, Content::text("out"), 3_000).await;
+        let system = timed(&db, Some(1), 103, Content::TimerChanged(Some(60)), 4_000).await;
+
+        assert_eq!(unread.expiry.map(|expiry| expiry.timer), Some(60));
+        assert_eq!(expiry(&unread), Some(None));
+        assert_eq!(expiry(&quiet), Some(Some(62_000)));
+        assert_eq!(expiry(&from_phone), Some(Some(60_102)));
+        assert_eq!(expiry(&system), None, "system lines stay");
+
+        let read = db.mark_read(unread.conversation, at(5_000)).await.unwrap();
+        assert_eq!(read.len(), 1);
+        assert_eq!(expiry(&read[0]), Some(Some(65_000)));
+        assert_eq!(db.message(unread.id).await.unwrap(), Some(read[0].clone()));
+
+        let conversation = unread.conversation;
+        let pending = db
+            .add_pending(conversation, at(200), &Content::text("out"), Some(30))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(expiry(&pending), Some(None));
+        let sent = db
+            .set_status(pending.id, MessageStatus::Sent, at(7_000))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(expiry(&sent), Some(Some(37_000)));
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn failed_sends_start_no_countdown() {
+        let (_dir, db) = db().await;
+        let conversation = conversation_with(&db, Destination::Contact(peer(1))).await;
+        let pending = db
+            .add_pending(conversation, at(200), &Content::text("out"), Some(30))
+            .await
+            .unwrap()
+            .unwrap();
+        let failed = db
+            .set_status(pending.id, MessageStatus::Failed, at(7_000))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(expiry(&failed), Some(None));
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn due_messages_are_deleted() {
+        let (_dir, db) = db().await;
+        let first = timed(&db, None, 1_000, Content::text("a"), 0).await;
+        let second = timed(&db, None, 2_000, Content::text("b"), 0).await;
+        let kept = add(&db, 1, Direction::Outgoing, 3_000, "kept")
+            .await
+            .unwrap();
+        assert_eq!(db.next_expiry().await.unwrap(), Some(at(61_000)));
+
+        assert!(db.expire(at(60_999)).await.unwrap().is_empty());
+        assert_eq!(
+            db.expire(at(61_000)).await.unwrap(),
+            [(first.conversation, first.id)]
+        );
+        assert_eq!(db.message(first.id).await.unwrap(), None);
+        assert_eq!(db.next_expiry().await.unwrap(), Some(at(62_000)));
+        assert_eq!(
+            db.expire(at(100_000)).await.unwrap(),
+            [(second.conversation, second.id)]
+        );
+        assert_eq!(db.next_expiry().await.unwrap(), None);
+        assert!(db.message(kept.id).await.unwrap().is_some());
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn deletes_overwrite_the_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = Database::open(&path, &DatabaseKey::generate())
+            .await
+            .unwrap();
+        let secure: i64 = sqlx::query_scalar("PRAGMA secure_delete")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(secure, 1);
         db.close().await;
     }
 

@@ -112,6 +112,8 @@ pub struct ChatView {
     countdown: Option<Task<()>>,
     /// Redraws when a typing indicator expires.
     typing_expiry: Option<Task<()>>,
+    /// Redraws disappearing messages' countdowns.
+    timers: Option<Task<()>>,
     /// The log ends with a typing line.
     typing_row: bool,
     /// The row under the pointer.
@@ -159,6 +161,7 @@ impl ChatView {
             composer,
             countdown: None,
             typing_expiry: None,
+            timers: None,
             typing_row: false,
             hovered: None,
             with_actions: Vec::new(),
@@ -194,9 +197,33 @@ impl ChatView {
         }
         match event {
             Event::Disconnected { .. } => self.start_countdown(cx),
-            Event::Typing { .. } | Event::MessageAdded(_) => self.expire_typing(cx),
+            Event::Typing { .. } => self.expire_typing(cx),
+            Event::MessageAdded(_) => {
+                self.expire_typing(cx);
+                self.tick_timers(cx);
+            }
+            Event::Messages { .. } | Event::MessageUpdated(_) => self.tick_timers(cx),
             _ => {}
         }
+    }
+
+    /// Redraws as countdowns change, while any run in the open conversation.
+    fn tick_timers(&mut self, cx: &mut Context<Self>) {
+        self.timers = Some(cx.spawn(async move |view, cx| {
+            loop {
+                let Ok(Some(delay)) = view.read_with(cx, |view, _| view.chat.timers_change_in())
+                else {
+                    break;
+                };
+                // A little late, so the label has changed by then.
+                cx.background_executor()
+                    .timer(delay + Duration::from_millis(10))
+                    .await;
+                if view.update(cx, |_, cx| cx.notify()).is_err() {
+                    break;
+                }
+            }
+        }));
     }
 
     /// Redraws as typing indicators expire.
@@ -1135,6 +1162,13 @@ fn render_log_row(
                         .text_xs()
                         .text_color(muted)
                         .child("edited")
+                }))
+                .children(row.timer.clone().map(|timer| {
+                    div()
+                        .font_family(mono.clone())
+                        .text_xs()
+                        .text_color(muted)
+                        .child(timer)
                 }))
                 .children(status.map(|(status, color)| {
                     div()

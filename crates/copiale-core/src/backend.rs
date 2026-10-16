@@ -35,8 +35,11 @@ pub enum Incoming {
         timestamps: Vec<Timestamp>,
     },
     /// Messages, by author and sent time, read on another of this
-    /// account's devices.
-    ReadElsewhere(Vec<(ServiceId, Timestamp)>),
+    /// account's devices at `at`.
+    ReadElsewhere {
+        read: Vec<(ServiceId, Timestamp)>,
+        at: Timestamp,
+    },
     /// `sender` started or stopped typing, in a group if `group` is set.
     Typing {
         sender: ServiceId,
@@ -134,6 +137,14 @@ pub trait SignalBackend {
     /// Checks the open connection with a round trip to the server. The core
     /// times it out.
     fn probe(&mut self) -> LocalBoxFuture<'static, Result<(), BackendError>>;
+
+    /// The conversation's disappearing messages timer in seconds, as
+    /// [`Self::send`] applies it; `None` if off. Doesn't use the network,
+    /// nor borrow the backend.
+    fn expire_timer(
+        &mut self,
+        destination: Destination,
+    ) -> LocalBoxFuture<'static, Result<Option<u32>, BackendError>>;
 
     /// This account's ID, e.g. the peer of Note to Self.
     fn own_id(&self) -> ServiceId;

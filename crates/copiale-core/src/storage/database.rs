@@ -32,7 +32,9 @@ impl Database {
             .pragma("key", key.pragma_value())
             // SQLCipher otherwise writes to stderr, e.g. on a wrong key.
             // sqlx sends this before the first read.
-            .pragma("cipher_log_level", "NONE");
+            .pragma("cipher_log_level", "NONE")
+            // Deleted messages are overwritten, not left in free pages.
+            .pragma("secure_delete", "ON");
 
         initialize_sqlcipher().await?;
         verify_key(&options).await?;

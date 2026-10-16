@@ -4,11 +4,12 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use copiale_core::storage::{Database, SecretError, SecretStore};
 use copiale_core::{
-    BackendError, Destination, GroupInfo, GroupMasterKey, Incoming, Linker, MessageBody, Outgoing,
-    ServiceId, SignalBackend, Timestamp,
+    BackendError, Clock, Destination, GroupInfo, GroupMasterKey, Incoming, Linker, MessageBody,
+    Outgoing, ServiceId, SignalBackend, Timestamp,
 };
 use futures::future::LocalBoxFuture;
 use futures::stream::LocalBoxStream;
@@ -87,6 +88,8 @@ struct State {
     read_syncs: Vec<Vec<(ServiceId, Timestamp)>>,
     typing: Vec<(Destination, bool)>,
     deleted_for_me: Vec<DeletedForMe>,
+    /// Disappearing messages timers, by conversation.
+    expire_timers: Vec<(Destination, u32)>,
 }
 
 type DeletedForMe = (Destination, Vec<(Option<ServiceId>, Timestamp)>);
@@ -157,6 +160,22 @@ impl SignalBackend for FakeBackend {
             Ok(())
         }
         .boxed_local()
+    }
+
+    /// The scripted timer.
+    fn expire_timer(
+        &mut self,
+        destination: Destination,
+    ) -> LocalBoxFuture<'static, Result<Option<u32>, BackendError>> {
+        let timer = self
+            .state
+            .lock()
+            .unwrap()
+            .expire_timers
+            .iter()
+            .find(|(known, _)| same_conversation(known, &destination))
+            .map(|(_, seconds)| *seconds);
+        async move { Ok(timer) }.boxed_local()
     }
 
     /// Answers unless the network is down.
@@ -405,6 +424,61 @@ impl FakeNetwork {
     /// Typing indicators sent so far.
     pub fn typing(&self) -> Vec<(Destination, bool)> {
         self.state.lock().unwrap().typing.clone()
+    }
+
+    /// Sets the conversation's disappearing messages timer in seconds;
+    /// `None` turns it off.
+    pub fn set_expire_timer(&self, destination: Destination, seconds: Option<u32>) {
+        let timers = &mut self.state.lock().unwrap().expire_timers;
+        timers.retain(|(known, _)| !same_conversation(known, &destination));
+        timers.extend(seconds.map(|seconds| (destination, seconds)));
+    }
+}
+
+/// Same contact, or same group at any revision.
+fn same_conversation(a: &Destination, b: &Destination) -> bool {
+    match (a, b) {
+        (Destination::Contact(a), Destination::Contact(b)) => a == b,
+        (Destination::Group(a), Destination::Group(b)) => a.key == b.key,
+        _ => false,
+    }
+}
+
+/// [`Clock`] that moves only when told. Clones share the time.
+#[derive(Clone, Debug)]
+pub struct ManualClock {
+    now: Arc<watch::Sender<Timestamp>>,
+}
+
+impl ManualClock {
+    pub fn new(now: Timestamp) -> Self {
+        Self {
+            now: Arc::new(watch::Sender::new(now)),
+        }
+    }
+
+    pub fn set(&self, now: Timestamp) {
+        self.now.send_replace(now);
+    }
+
+    pub fn advance(&self, by: Duration) {
+        self.now.send_modify(|now| {
+            *now = Timestamp::from_millis(now.as_millis() + by.as_millis() as u64)
+        });
+    }
+}
+
+impl Clock for ManualClock {
+    fn now(&self) -> Timestamp {
+        *self.now.borrow()
+    }
+
+    fn sleep_until(&self, at: Timestamp) -> LocalBoxFuture<'static, ()> {
+        let mut now = self.now.subscribe();
+        async move {
+            now.wait_for(|now| *now >= at).await.ok();
+        }
+        .boxed_local()
     }
 }
 

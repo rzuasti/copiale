@@ -417,6 +417,8 @@ pub struct IncomingMessage {
     pub group: Option<GroupRef>,
     pub timestamp: Timestamp,
     pub content: Content,
+    /// Disappears this many seconds after being read; `None` if it doesn't.
+    pub expire_timer: Option<u32>,
 }
 
 /// A message this account sent from another device (the phone).
@@ -425,6 +427,8 @@ pub struct SentMessage {
     pub destination: Destination,
     pub timestamp: Timestamp,
     pub content: Content,
+    /// Disappears this many seconds after being sent; `None` if it doesn't.
+    pub expire_timer: Option<u32>,
 }
 
 /// A group's state as last fetched.
@@ -544,6 +548,18 @@ pub struct Message {
     pub read: bool,
     /// Outgoing messages only.
     pub status: Option<MessageStatus>,
+    /// Set if the message disappears.
+    pub expiry: Option<Expiry>,
+}
+
+/// When a disappearing message goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Expiry {
+    /// Seconds from the countdown's start: reading an incoming message,
+    /// sending an outgoing one.
+    pub timer: u32,
+    /// When it's deleted; `None` until the countdown starts.
+    pub at: Option<Timestamp>,
 }
 
 /// A conversation as the chat list shows it. `Debug` hides the title.

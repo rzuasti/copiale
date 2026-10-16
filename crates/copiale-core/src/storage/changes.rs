@@ -272,6 +272,8 @@ mod tests {
             Some(peer(from)),
             at(sent_at),
             &Content::text(body),
+            None,
+            Timestamp::from_millis(0),
         )
         .await
         .unwrap()
@@ -418,7 +420,14 @@ mod tests {
             revision: 0,
         });
         let mine = db
-            .add_message(&group, None, at(100), &Content::text("hi all"))
+            .add_message(
+                &group,
+                None,
+                at(100),
+                &Content::text("hi all"),
+                None,
+                Timestamp::from_millis(0),
+            )
             .await
             .unwrap()
             .unwrap();
@@ -459,6 +468,8 @@ mod tests {
                 Some(peer(1)),
                 at(100),
                 &reply,
+                None,
+                Timestamp::from_millis(0),
             )
             .await
             .unwrap()
@@ -480,6 +491,8 @@ mod tests {
                 None,
                 at(102),
                 &Content::text("c"),
+                None,
+                Timestamp::from_millis(0),
             )
             .await
             .unwrap()

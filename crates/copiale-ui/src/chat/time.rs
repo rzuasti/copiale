@@ -1,5 +1,7 @@
 //! Local times for display: message times, day labels, chat list ages.
 
+use std::time::Duration;
+
 use chrono::{DateTime, Datelike as _, FixedOffset, Local, NaiveDate, NaiveDateTime, Utc};
 use copiale_core::Timestamp;
 
@@ -81,6 +83,34 @@ impl Clock {
     }
 }
 
+/// Countdown units, largest first, in milliseconds.
+const UNITS: [(u64, &str); 5] = [
+    (604_800_000, "w"),
+    (86_400_000, "d"),
+    (3_600_000, "h"),
+    (60_000, "m"),
+    (1000, "s"),
+];
+
+/// Time left in its largest whole unit: "1w", "3d", "5h", "4m", "30s".
+pub fn countdown(millis: u64) -> String {
+    let (unit, suffix) = unit(millis);
+    format!("{}{suffix}", millis / unit)
+}
+
+/// How long until [`countdown`] of `millis` changes as time passes.
+pub fn countdown_changes_in(millis: u64) -> Duration {
+    let (unit, _) = unit(millis);
+    Duration::from_millis(millis % unit + 1)
+}
+
+fn unit(millis: u64) -> (u64, &'static str) {
+    UNITS
+        .into_iter()
+        .find(|(unit, _)| millis >= *unit)
+        .unwrap_or(UNITS[UNITS.len() - 1])
+}
+
 fn millis(timestamp: Timestamp) -> i64 {
     i64::try_from(timestamp.as_millis()).unwrap_or(i64::MAX)
 }
@@ -132,6 +162,25 @@ mod tests {
         assert_eq!(clock.age(ago(2 * DAY)), "2d");
         assert_eq!(clock.age(ago(8 * DAY)), "5 Oct");
         assert_eq!(clock.age(ago(400 * DAY)), "Sep 2025");
+    }
+
+    #[test]
+    fn countdowns_use_the_largest_whole_unit() {
+        assert_eq!(countdown(7 * DAY), "1w");
+        assert_eq!(countdown(13 * DAY), "1w");
+        assert_eq!(countdown(DAY), "1d");
+        assert_eq!(countdown(8 * 60 * MINUTE), "8h");
+        assert_eq!(countdown(5 * MINUTE - 1), "4m");
+        assert_eq!(countdown(30_000), "30s");
+        assert_eq!(countdown(400), "0s");
+    }
+
+    #[test]
+    fn countdowns_change_when_the_number_does() {
+        assert_eq!(countdown_changes_in(60_500), Duration::from_millis(501));
+        assert_eq!(countdown(60_500 - 501), "59s");
+        assert_eq!(countdown_changes_in(60_000), Duration::from_millis(1));
+        assert_eq!(countdown_changes_in(59_999), Duration::from_millis(1000));
     }
 
     #[test]

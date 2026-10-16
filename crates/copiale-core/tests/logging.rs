@@ -166,6 +166,7 @@ fn identifiers_and_secrets_are_redacted_in_logs() {
         }),
         timestamp: Timestamp::from_millis(1),
         content: Content::text(body.as_str()),
+        expire_timer: None,
     };
     let event = Event::MessageAdded(Message {
         id: MessageId::new(1),
@@ -178,6 +179,7 @@ fn identifiers_and_secrets_are_redacted_in_logs() {
         edited: false,
         read: false,
         status: None,
+        expiry: None,
     });
     let summary = Event::ConversationUpdated(ConversationSummary {
         id: ConversationId::new(1),
