@@ -1,7 +1,5 @@
 //! Conversations and messages in Copiale's tables.
 
-use presage::libsignal_service::protocol::{Aci, ServiceId as SignalServiceId};
-use presage::store::ContentsStore as _;
 use uuid::Uuid;
 
 use super::StorageError;
@@ -84,7 +82,7 @@ impl Database {
         expire_timer: Option<u32>,
         now: Timestamp,
     ) -> Result<Option<Message>, StorageError> {
-        let mut tx = self.app.begin().await.map_err(database_error)?;
+        let mut tx = self.begin_write().await?;
         let conversation = conversation_id(&mut tx, destination).await?;
         let status = (author.is_none() && !content.is_system()).then_some(MessageStatus::Sent);
         let start = if author.is_none() {
@@ -126,7 +124,7 @@ impl Database {
         content: &Content,
         expire_timer: Option<u32>,
     ) -> Result<Option<Message>, StorageError> {
-        let mut tx = self.app.begin().await.map_err(database_error)?;
+        let mut tx = self.begin_write().await?;
         let exists: Option<i64> = sqlx::query_scalar("SELECT id FROM conversations WHERE id = ?")
             .bind(conversation.get())
             .fetch_optional(&mut *tx)
@@ -156,7 +154,7 @@ impl Database {
         &self,
         destination: &Destination,
     ) -> Result<ConversationId, StorageError> {
-        let mut tx = self.app.begin().await.map_err(database_error)?;
+        let mut tx = self.begin_write().await?;
         let id = conversation_id(&mut tx, destination).await?;
         tx.commit().await.map_err(database_error)?;
         Ok(ConversationId::new(id))
@@ -207,7 +205,7 @@ impl Database {
         &self,
         id: MessageId,
     ) -> Result<Option<(Destination, Message)>, StorageError> {
-        let mut tx = self.app.begin().await.map_err(database_error)?;
+        let mut tx = self.begin_write().await?;
         let row: Option<MessageRow> = sqlx::query_as(concat!(
             "UPDATE messages SET status = 'pending' WHERE id = ? AND status = 'failed' RETURNING ",
             message_columns!()
@@ -274,7 +272,7 @@ impl Database {
         key: GroupMasterKey,
         info: &GroupInfo,
     ) -> Result<Option<ConversationId>, StorageError> {
-        let mut tx = self.app.begin().await.map_err(database_error)?;
+        let mut tx = self.begin_write().await?;
         let id: Option<i64> = sqlx::query_scalar(
             "UPDATE conversations SET group_title = ?, group_revision = ?
              WHERE group_master_key = ? RETURNING id",
@@ -429,21 +427,6 @@ impl Database {
         Ok(at.map(timestamp))
     }
 
-    /// Whether any contacts have been synced from the phone.
-    pub(crate) async fn has_contacts(&self) -> Result<bool, StorageError> {
-        Ok(self.contact_count().await? > 0)
-    }
-
-    /// Contacts synced from the phone.
-    pub(crate) async fn contact_count(&self) -> Result<usize, StorageError> {
-        let contacts = self
-            .presage
-            .contacts()
-            .await
-            .map_err(|error| StorageError::Database(error.to_string()))?;
-        Ok(contacts.count())
-    }
-
     async fn summary(&self, row: SummaryRow) -> Result<ConversationSummary, StorageError> {
         let (id, peer, group_id, group_title, last_activity, unread, outgoing, body, content) = row;
         let last_message = match outgoing.zip(body) {
@@ -501,19 +484,6 @@ impl Database {
                 })
             })
             .collect()
-    }
-
-    /// The synced contact name; `None` if unknown or blank.
-    async fn contact_name(&self, peer: ServiceId) -> Option<String> {
-        let id: SignalServiceId = Aci::from(peer.uuid()).into();
-        match self.presage.contact_by_id(&id).await {
-            Ok(Some(contact)) if !contact.name.trim().is_empty() => Some(contact.name),
-            Ok(_) => None,
-            Err(error) => {
-                tracing::warn!(%error, "reading a contact failed");
-                None
-            }
-        }
     }
 }
 
@@ -768,7 +738,6 @@ pub(super) fn timestamp(millis: i64) -> Timestamp {
 
 #[cfg(test)]
 mod tests {
-    use presage::model::contacts::Contact;
     use tempfile::TempDir;
 
     use super::*;
@@ -1091,42 +1060,6 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(summary.unread, 0);
-        db.close().await;
-    }
-
-    #[tokio::test]
-    async fn titles_come_from_synced_contacts() {
-        let (_dir, db) = db().await;
-        let named = add(&db, 1, Direction::Incoming, 100, "a").await.unwrap();
-        let unnamed = add(&db, 2, Direction::Incoming, 100, "b").await.unwrap();
-        assert!(!db.has_contacts().await.unwrap());
-
-        let mut store = db.presage.clone();
-        for (uuid, name) in [(1, "Alice"), (2, "  ")] {
-            let contact = Contact {
-                uuid: Uuid::from_u128(uuid),
-                phone_number: None,
-                name: name.into(),
-                verified: Default::default(),
-                profile_key: Vec::new(),
-                expire_timer: 0,
-                expire_timer_version: 1,
-                inbox_position: 0,
-                avatar: None,
-            };
-            store.save_contact(&contact).await.unwrap();
-        }
-
-        assert!(db.has_contacts().await.unwrap());
-        assert_eq!(db.contact_count().await.unwrap(), 2);
-        let named = db.conversation(named.conversation).await.unwrap().unwrap();
-        let unnamed = db
-            .conversation(unnamed.conversation)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(named.title.as_deref(), Some("Alice"));
-        assert_eq!(unnamed.title, None);
         db.close().await;
     }
 

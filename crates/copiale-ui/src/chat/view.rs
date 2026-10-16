@@ -17,9 +17,10 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, FocusHandle, Focusable as _, FollowMode,
     HighlightStyle, Hsla, InteractiveElement as _, IntoElement, KeyBinding, ListAlignment,
-    ListState, MouseMoveEvent, ParentElement as _, Pixels, Rems, Render, SharedString,
+    ListState, MouseButton, MouseMoveEvent, ParentElement as _, Pixels, Rems, Render, SharedString,
     StatefulInteractiveElement as _, Styled as _, StyledText, Subscription, Task,
-    TestSupportExt as _, TextRun, Window, actions, canvas, div, font, list, point, px, rems,
+    TestSupportExt as _, TextRun, Window, actions, canvas, div, font, list, point, px, relative,
+    rems,
 };
 
 use super::model::{Chat, Compose, Connection, Effects, LogChange, Row, member_list, title};
@@ -62,6 +63,9 @@ actions!(
         DeleteForEveryone,
         DeleteForMe,
         Cancel,
+        NewChat,
+        PickPrevious,
+        PickNext,
     ]
 );
 
@@ -70,6 +74,8 @@ actions!(
 const COMPOSING: &str = "Composing";
 const SELECTING: &str = "Selecting";
 const CONFIRMING: &str = "Confirming";
+/// Key context of the new chat picker.
+const PICKING: &str = "Picking";
 
 /// Registers the chat key bindings. Composer bindings act on the input
 /// itself, ahead of its own, and pass keys on when they don't apply.
@@ -79,6 +85,9 @@ pub fn init(cx: &mut App) {
     let confirming = Some("Confirming > Input");
     cx.bind_keys([
         KeyBinding::new("secondary-f", FocusSearch, Some(CONTEXT)),
+        KeyBinding::new("secondary-n", NewChat, Some(CONTEXT)),
+        KeyBinding::new("up", PickPrevious, Some("Picking > Input")),
+        KeyBinding::new("down", PickNext, Some("Picking > Input")),
         KeyBinding::new("up", EditLast, composing),
         KeyBinding::new("shift-up", SelectLast, composing),
         KeyBinding::new("escape", Cancel, composing),
@@ -108,6 +117,8 @@ pub struct ChatView {
     search_hovered: bool,
     sidebar_top: Rc<Cell<Pixels>>,
     composer: Entity<TextareaState>,
+    /// The new chat picker's query.
+    new_chat: Entity<InputState>,
     /// Redraws the reconnect countdown.
     countdown: Option<Task<()>>,
     /// Redraws when a typing indicator expires.
@@ -135,8 +146,10 @@ impl ChatView {
                 .submit_on_enter(true)
                 .placeholder("Message")
         });
+        let new_chat = cx.new(|cx| InputState::new(window, cx).placeholder("New chat with…"));
         let subscriptions = vec![
             cx.subscribe_in(&search, window, Self::on_search_event),
+            cx.subscribe_in(&new_chat, window, Self::on_new_chat_event),
             cx.subscribe_in(&composer, window, Self::on_composer_event),
             cx.observe_window_activation(window, |view, window, _| {
                 if window.is_window_active()
@@ -159,6 +172,7 @@ impl ChatView {
             search_hovered: false,
             sidebar_top: Rc::default(),
             composer,
+            new_chat,
             countdown: None,
             typing_expiry: None,
             timers: None,
@@ -189,6 +203,9 @@ impl ChatView {
     pub fn on_event(&mut self, event: &Event, window: &mut Window, cx: &mut Context<Self>) {
         let effects = self.chat.apply(event, window.is_window_active());
         self.run(effects, cx);
+        if let Some(id) = self.chat.take_requested_open() {
+            self.open(id, window, cx);
+        }
         if let Event::Conversations(_) = event
             && let Some(effects) = self.chat.open_latest(window.is_window_active())
         {
@@ -456,6 +473,176 @@ impl ChatView {
 
     fn retry(&mut self, id: MessageId) {
         self.send(self.chat.retry(id));
+    }
+
+    /// Opens the new chat picker, empty, with contacts refreshed.
+    fn start_new_chat(&mut self, _: &NewChat, window: &mut Window, cx: &mut Context<Self>) {
+        self.core.send(self.chat.start_new_chat());
+        self.new_chat.update(cx, |input, cx| {
+            input.set_value("", window, cx);
+            input.focus(window, cx);
+        });
+        cx.notify();
+    }
+
+    fn on_new_chat_event(
+        &mut self,
+        input: &Entity<InputState>,
+        event: &InputEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            InputEvent::Change => {
+                self.chat.set_new_chat_query(&input.read(cx).value());
+                cx.notify();
+            }
+            InputEvent::PressEnter { .. } => self.choose_new_chat(None, window, cx),
+            _ => {}
+        }
+    }
+
+    fn pick_previous(&mut self, _: &PickPrevious, _: &mut Window, cx: &mut Context<Self>) {
+        self.chat.new_chat_step(-1);
+        cx.notify();
+    }
+
+    fn pick_next(&mut self, _: &PickNext, _: &mut Window, cx: &mut Context<Self>) {
+        self.chat.new_chat_step(1);
+        cx.notify();
+    }
+
+    /// Opens the chat with candidate `ix`, or the highlighted one; a new
+    /// one opens once the core has created it.
+    fn choose_new_chat(&mut self, ix: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.chat.new_chat_open() {
+            return;
+        }
+        let command = self.chat.choose_new_chat(ix);
+        self.send(command);
+        match self.chat.take_requested_open() {
+            Some(id) => self.open(id, window, cx),
+            None if !self.chat.new_chat_open() => window.focus(&self.focus, cx),
+            None => {}
+        }
+        cx.notify();
+    }
+
+    /// Closes the picker and returns to the composer.
+    fn close_new_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.chat.close_new_chat();
+        if self.chat.open_id().is_some() {
+            self.composer
+                .update(cx, |composer, cx| composer.focus(window, cx));
+        } else {
+            window.focus(&self.focus, cx);
+        }
+        cx.notify();
+    }
+
+    fn render_new_chat(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.chat.new_chat_open() {
+            return None;
+        }
+        let palette = cx.palette();
+        let muted = palette.text_muted;
+        let mono = cx.theme().mono_font_family.clone();
+        let selected = self.chat.new_chat_selected();
+        let rows: Vec<_> = self
+            .chat
+            .new_chat_candidates()
+            .into_iter()
+            .enumerate()
+            .map(|(ix, candidate)| {
+                let highlight = HighlightStyle {
+                    color: Some(palette.accent),
+                    ..Default::default()
+                };
+                let highlights: Vec<_> = candidate
+                    .highlights
+                    .into_iter()
+                    .map(|range| (range, highlight))
+                    .collect();
+                let detail = |text: SharedString| {
+                    div()
+                        .flex_none()
+                        .font_family(mono.clone())
+                        .text_xs()
+                        .text_color(muted)
+                        .child(text)
+                };
+                ListItem::new(("contact", ix as u64))
+                    .selected(selected == Some(ix))
+                    .on_click(cx.listener(move |view, _, window, cx| {
+                        view.choose_new_chat(Some(ix), window, cx)
+                    }))
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .gap_2()
+                            .child(div().flex_1().min_w_0().truncate().child(
+                                StyledText::new(candidate.label).with_highlights(highlights),
+                            ))
+                            .children(
+                                candidate
+                                    .detail
+                                    .map(|phone| detail(phone.to_owned().into())),
+                            )
+                            .children(candidate.existing.then(|| detail("chat".into()))),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+        let empty = rows.is_empty().then(|| {
+            let text = if self.chat.has_contacts() {
+                "No matches"
+            } else {
+                "No contacts yet; they sync from your phone"
+            };
+            div().px_3().py_2().text_sm().text_color(muted).child(text)
+        });
+        let card = v_flex()
+            .id("new-chat")
+            .key_context(PICKING)
+            .on_action(cx.listener(Self::pick_previous))
+            .on_action(cx.listener(Self::pick_next))
+            .on_action(cx.listener(|view, _: &Escape, window, cx| view.close_new_chat(window, cx)))
+            // Clicks inside don't reach the backdrop.
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .w(px(420.))
+            .max_w(relative(0.9))
+            .bg(palette.background)
+            .border_1()
+            .border_color(palette.border)
+            .rounded(px(6.))
+            .shadow_lg()
+            .child(
+                div()
+                    .p_2()
+                    .border_b_1()
+                    .border_color(palette.border)
+                    .child(Input::new(&self.new_chat).small()),
+            )
+            .child(v_flex().p_1().children(rows).children(empty))
+            .test_support();
+        Some(
+            div()
+                .id("new-chat-backdrop")
+                .absolute()
+                .inset_0()
+                .flex()
+                .justify_center()
+                .items_start()
+                .pt(px(64.))
+                .bg(palette.background.opacity(0.6))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|view, _, window, cx| view.close_new_chat(window, cx)),
+                )
+                .child(card)
+                .test_support()
+                .into_any_element(),
+        )
     }
 
     fn focus_search(&mut self, _: &FocusSearch, window: &mut Window, cx: &mut Context<Self>) {
@@ -1299,10 +1486,13 @@ fn truncate(text: &str, max: usize) -> Cow<'_, str> {
 impl Render for ChatView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_actions();
+        let new_chat = self.render_new_chat(cx);
         h_flex()
             .key_context(CONTEXT)
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::focus_search))
+            .on_action(cx.listener(Self::start_new_chat))
+            .relative()
             .size_full()
             .items_stretch()
             .bg(cx.palette().background)
@@ -1315,6 +1505,7 @@ impl Render for ChatView {
                     .h_full()
                     .child(self.render_conversation_pane(cx)),
             )
+            .children(new_chat)
     }
 }
 

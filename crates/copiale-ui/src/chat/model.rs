@@ -6,12 +6,13 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use copiale_core::{
-    BackendError, Command, Content, ConversationId, ConversationSummary, DELETE_WINDOW, Direction,
-    EDIT_WINDOW, Event, Message, MessageBody, MessageId, MessageStatus, Peer, ServiceId,
+    BackendError, Command, Contact, Content, ConversationId, ConversationSummary, DELETE_WINDOW,
+    Direction, EDIT_WINDOW, Event, Message, MessageBody, MessageId, MessageStatus, Peer, ServiceId,
     TYPING_TIMEOUT, Timestamp,
 };
 
 use super::content::{placeholders, quote_line, system_lines};
+use super::new_chat::{Candidate, NewChat, candidates};
 use super::time::{Clock, countdown, countdown_changes_in};
 
 /// Messages loaded per page.
@@ -128,6 +129,13 @@ pub struct Chat {
     typing: Vec<Typing>,
     /// A conversation has been opened since starting.
     opened: bool,
+    /// Synced contacts, by name.
+    contacts: Vec<Contact>,
+    new_chat: Option<NewChat>,
+    /// Chosen in the picker; opens once its conversation exists.
+    pending_peer: Option<ServiceId>,
+    /// A conversation for the view to open.
+    requested_open: Option<ConversationId>,
 }
 
 #[derive(Debug)]
@@ -199,6 +207,10 @@ impl Chat {
             connection: Connection::Connecting,
             typing: Vec::new(),
             opened: false,
+            contacts: Vec::new(),
+            new_chat: None,
+            pending_peer: None,
+            requested_open: None,
         }
     }
 
@@ -242,17 +254,25 @@ impl Chat {
         }
     }
 
-    /// Whether any conversations exist, regardless of the search.
+    /// Whether any conversations are listed, regardless of the search.
     pub fn has_conversations(&self) -> bool {
-        !self.conversations.is_empty()
+        self.conversations
+            .iter()
+            .any(|summary| self.listed(summary))
     }
 
     /// Conversations matching the search, most recently active first.
     pub fn conversations(&self) -> impl Iterator<Item = &ConversationSummary> {
         let search = self.search.trim().to_lowercase();
         self.conversations.iter().filter(move |summary| {
-            search.is_empty() || title(summary).to_lowercase().contains(&search)
+            self.listed(summary)
+                && (search.is_empty() || title(summary).to_lowercase().contains(&search))
         })
+    }
+
+    /// Chats without messages are listed only while open.
+    fn listed(&self, summary: &ConversationSummary) -> bool {
+        summary.last_activity.is_some() || self.open_id() == Some(summary.id)
     }
 
     pub fn set_search(&mut self, search: &str) {
@@ -358,6 +378,18 @@ impl Chat {
                     None => self.conversations.push(summary.clone()),
                 }
                 self.sort();
+                if let Peer::Contact(peer) = summary.peer
+                    && self.pending_peer == Some(peer)
+                {
+                    self.pending_peer = None;
+                    self.requested_open = Some(summary.id);
+                }
+            }
+            Event::Contacts(contacts) => {
+                self.contacts = contacts.clone();
+                if let Some(new_chat) = &mut self.new_chat {
+                    new_chat.selected = 0;
+                }
             }
             Event::Messages {
                 conversation,
@@ -434,7 +466,11 @@ impl Chat {
         if self.opened {
             return None;
         }
-        let latest = self.conversations.first()?.id;
+        let latest = self
+            .conversations
+            .iter()
+            .find(|summary| summary.last_activity.is_some())?
+            .id;
         let mut effects = self.open(latest);
         if !active {
             effects
@@ -442,6 +478,87 @@ impl Chat {
                 .retain(|command| !matches!(command, Command::MarkRead(_)));
         }
         Some(effects)
+    }
+
+    /// Opens the new chat picker; refreshes contacts.
+    pub fn start_new_chat(&mut self) -> Command {
+        self.new_chat = Some(NewChat::default());
+        Command::LoadContacts
+    }
+
+    /// Whether any contacts have synced.
+    pub fn has_contacts(&self) -> bool {
+        !self.contacts.is_empty()
+    }
+
+    pub fn new_chat_open(&self) -> bool {
+        self.new_chat.is_some()
+    }
+
+    pub fn close_new_chat(&mut self) {
+        self.new_chat = None;
+    }
+
+    pub fn set_new_chat_query(&mut self, query: &str) {
+        if let Some(new_chat) = &mut self.new_chat {
+            new_chat.query = query.into();
+            new_chat.selected = 0;
+        }
+    }
+
+    /// Contacts matching the picker's query, best first.
+    pub fn new_chat_candidates(&self) -> Vec<Candidate<'_>> {
+        let Some(new_chat) = &self.new_chat else {
+            return Vec::new();
+        };
+        candidates(&self.contacts, &new_chat.query, |contact| {
+            self.chat_with(contact.id).is_some()
+        })
+    }
+
+    /// The highlighted candidate's index.
+    pub fn new_chat_selected(&self) -> Option<usize> {
+        self.new_chat.as_ref().map(|new_chat| new_chat.selected)
+    }
+
+    /// Moves the highlight, stopping at the ends.
+    pub fn new_chat_step(&mut self, step: isize) {
+        let count = self.new_chat_candidates().len();
+        if let Some(new_chat) = &mut self.new_chat {
+            let last = count.saturating_sub(1);
+            new_chat.selected = new_chat.selected.saturating_add_signed(step).min(last);
+        }
+    }
+
+    /// Picks candidate `ix`, or the highlighted one, and closes the
+    /// picker: its chat opens through [`Self::take_requested_open`], once
+    /// the core has created it if new.
+    pub fn choose_new_chat(&mut self, ix: Option<usize>) -> Option<Command> {
+        let ix = ix.or(self.new_chat_selected())?;
+        let peer = self.new_chat_candidates().get(ix)?.contact.id;
+        self.new_chat = None;
+        match self.chat_with(peer) {
+            Some(id) => {
+                self.requested_open = Some(id);
+                None
+            }
+            None => {
+                self.pending_peer = Some(peer);
+                Some(Command::OpenConversation(peer))
+            }
+        }
+    }
+
+    /// A conversation the view should open, e.g. one chosen in the picker.
+    pub fn take_requested_open(&mut self) -> Option<ConversationId> {
+        self.requested_open.take()
+    }
+
+    fn chat_with(&self, peer: ServiceId) -> Option<ConversationId> {
+        self.conversations
+            .iter()
+            .find(|summary| summary.peer == Peer::Contact(peer))
+            .map(|summary| summary.id)
     }
 
     /// Shows a conversation, loads its newest messages and marks it read.
@@ -1775,6 +1892,127 @@ mod tests {
             true,
         );
         assert_eq!(chat.timers_change_in(), Some(Duration::from_millis(30_001)));
+    }
+
+    fn contact(n: u128, name: Option<&str>, phone: Option<&str>) -> Contact {
+        Contact {
+            id: peer(n),
+            name: name.map(Into::into),
+            phone: phone.map(copiale_core::PhoneNumber::new),
+        }
+    }
+
+    /// Conversations 1 (Alice) and 2, with contacts Alice (1), Bob (3)
+    /// and a number-only one (4).
+    fn picking() -> Chat {
+        let mut chat = with_conversations();
+        chat.apply(
+            &Event::Contacts(vec![
+                contact(1, Some("Alice"), Some("+14155550123")),
+                contact(3, Some("Bob Builder"), None),
+                contact(4, None, Some("+14155550100")),
+            ]),
+            true,
+        );
+        assert!(matches!(chat.start_new_chat(), Command::LoadContacts));
+        chat
+    }
+
+    fn labels(chat: &Chat) -> Vec<String> {
+        chat.new_chat_candidates()
+            .into_iter()
+            .map(|candidate| candidate.label)
+            .collect()
+    }
+
+    #[test]
+    fn the_picker_filters_contacts_fuzzily() {
+        let mut chat = picking();
+        assert_eq!(labels(&chat), ["Alice", "Bob Builder", "+14155550100"]);
+        let alice = &chat.new_chat_candidates()[0];
+        assert!(alice.existing);
+        assert_eq!(alice.detail, Some("+14155550123"));
+
+        chat.set_new_chat_query("bb");
+        let candidates = chat.new_chat_candidates();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].highlights, [0..1, 4..5]);
+        assert!(!candidates[0].existing);
+
+        // Numbers match, unhighlighted under a name.
+        chat.set_new_chat_query("0123");
+        let candidates = chat.new_chat_candidates();
+        assert_eq!(candidates[0].label, "Alice");
+        assert!(candidates[0].highlights.is_empty());
+
+        chat.set_new_chat_query("zz");
+        assert!(chat.new_chat_candidates().is_empty());
+        assert!(chat.choose_new_chat(None).is_none());
+    }
+
+    #[test]
+    fn the_picker_highlight_moves_within_the_list() {
+        let mut chat = picking();
+        assert_eq!(chat.new_chat_selected(), Some(0));
+        chat.new_chat_step(-1);
+        assert_eq!(chat.new_chat_selected(), Some(0));
+        chat.new_chat_step(5);
+        assert_eq!(chat.new_chat_selected(), Some(2));
+        chat.set_new_chat_query("b");
+        assert_eq!(chat.new_chat_selected(), Some(0), "a new query starts over");
+        chat.close_new_chat();
+        assert!(!chat.new_chat_open());
+        assert_eq!(chat.new_chat_selected(), None);
+    }
+
+    #[test]
+    fn choosing_an_existing_chat_opens_it() {
+        let mut chat = picking();
+        assert!(chat.choose_new_chat(Some(0)).is_none());
+        assert!(!chat.new_chat_open());
+        assert_eq!(chat.take_requested_open(), Some(ConversationId::new(1)));
+        assert_eq!(chat.take_requested_open(), None);
+    }
+
+    #[test]
+    fn choosing_a_new_contact_opens_the_chat_once_created() {
+        let mut chat = picking();
+        chat.new_chat_step(1);
+        assert!(matches!(
+            chat.choose_new_chat(None),
+            Some(Command::OpenConversation(id)) if id == peer(3)
+        ));
+        assert_eq!(chat.take_requested_open(), None);
+
+        let empty = ConversationSummary {
+            last_activity: None,
+            ..summary(3, 0, 0, Some("Bob Builder"))
+        };
+        chat.apply(&Event::ConversationUpdated(empty), true);
+        let id = chat.take_requested_open().unwrap();
+        assert_eq!(id, ConversationId::new(3));
+        assert!(!chat.conversations().any(|c| c.id == id), "empty: unlisted");
+
+        chat.open(id);
+        assert!(
+            chat.conversations().any(|c| c.id == id),
+            "listed while open"
+        );
+        chat.open(ConversationId::new(1));
+        assert!(!chat.conversations().any(|c| c.id == id));
+        assert_eq!(chat.conversations().count(), 2);
+    }
+
+    #[test]
+    fn empty_chats_dont_open_at_start() {
+        let mut chat = chat();
+        let empty = ConversationSummary {
+            last_activity: None,
+            ..summary(3, 0, 0, None)
+        };
+        chat.apply(&Event::Conversations(vec![empty.clone()]), true);
+        assert!(!chat.has_conversations());
+        assert!(chat.open_latest(true).is_none());
     }
 
     #[test]

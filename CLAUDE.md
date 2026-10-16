@@ -107,5 +107,5 @@ Pre-development. MVP planned (`docs/mvp.md`, Codeberg issues #1–#28);
 M0 (foundations) and M1 (walking skeleton, #7–#11) done. M2: group text
 (#12), placeholders for non-text content (#13), receipts and typing
 indicators (#14), incoming edits, deletes and quoted replies (#15), sending
-them (#16), and disappearing message timers (#17) done. Next: new 1:1 chat
-from contacts (#18).
+them (#16), disappearing message timers (#17), and new 1:1 chats from
+contacts (#18) done. Next: notifications (#19).

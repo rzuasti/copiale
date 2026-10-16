@@ -457,6 +457,25 @@ impl fmt::Debug for Member {
     }
 }
 
+/// A contact synced from the phone. `Debug` hides the name and number.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Contact {
+    pub id: ServiceId,
+    /// Contact or profile name, if known.
+    pub name: Option<String>,
+    pub phone: Option<PhoneNumber>,
+}
+
+impl fmt::Debug for Contact {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Contact")
+            .field("id", &self.id)
+            .field("named", &self.name.is_some())
+            .field("phone", &self.phone)
+            .finish()
+    }
+}
+
 /// Local ID of a conversation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ConversationId(i64);

@@ -7,11 +7,11 @@ use std::time::Duration;
 
 use copiale_core::storage::{KdfParams, Passphrase, Storage, StoragePaths};
 use copiale_core::{
-    BackendError, Change, ChatRef, Command, Content, ConversationId, ConversationSummary,
+    BackendError, Change, ChatRef, Command, Contact, Content, ConversationId, ConversationSummary,
     CoreHandle, CoreOptions, Destination, Direction, Event, Events, Expiry, GroupInfo, GroupRef,
     GroupUpdate, Incoming, IncomingMessage, Member, Message, MessageBody, MessageChange,
-    MessagePreview, MessageRef, MessageStatus, Outgoing, Peer, Quote, ReceiptKind, SentMessage,
-    StorageFailure, Timestamp,
+    MessagePreview, MessageRef, MessageStatus, Outgoing, Peer, PhoneNumber, Quote, ReceiptKind,
+    SentMessage, StorageFailure, Timestamp,
 };
 use copiale_testkit::{
     FAKE_LINK_URL, FakeNetwork, FakePhone, ManualClock, MemorySecretStore, OWN_ID, SentText,
@@ -330,6 +330,74 @@ async fn contacts_are_requested_and_refresh_conversations() {
         next_event(&mut running.events).await,
         Event::Conversations(_)
     ));
+    expect(&mut running.events, Event::Contacts(Vec::new())).await;
+    stop(running).await;
+}
+
+fn contact(n: u128, name: Option<&str>, phone: Option<&str>) -> Contact {
+    Contact {
+        id: service_id(n),
+        name: name.map(Into::into),
+        phone: phone.map(PhoneNumber::new),
+    }
+}
+
+async fn contacts(events: &mut Events) -> Vec<Contact> {
+    loop {
+        if let Event::Contacts(contacts) = next_event(events).await {
+            break contacts;
+        }
+    }
+}
+
+#[tokio::test]
+async fn synced_contacts_are_listed_and_title_chats() {
+    let (_dir, mut running) = ready().await;
+    running.network.deliver(incoming(1, 100, "hi"));
+    message_added(&mut running.events).await;
+    conversation_updated(&mut running.events).await;
+
+    let alice = contact(1, Some("Alice"), Some("+14155550123"));
+    let bob = contact(2, Some("Bob"), None);
+    running
+        .network
+        .sync_contacts(&[bob.clone(), alice.clone()])
+        .await;
+
+    let Event::Conversations(conversations) = next_event(&mut running.events).await else {
+        panic!("expected Conversations");
+    };
+    assert_eq!(conversations[0].title.as_deref(), Some("Alice"));
+    assert_eq!(
+        contacts(&mut running.events).await,
+        [alice.clone(), bob.clone()]
+    );
+
+    send(&running, Command::LoadContacts);
+    assert_eq!(contacts(&mut running.events).await, [alice, bob]);
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn contacts_are_asked_for_daily() {
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = MemorySecretStore::default();
+    let mut running = start(dir.path(), &secrets, true);
+    expect(&mut running.events, Event::Ready).await;
+    expect(&mut running.events, Event::Connected).await;
+    running
+        .network
+        .sync_contacts(&[contact(1, Some("Alice"), None)])
+        .await;
+    contacts(&mut running.events).await;
+    assert_eq!(running.network.contact_sync_requests(), 1);
+    stop(running).await;
+
+    // Asked less than a day ago, with contacts stored.
+    let mut running = start(dir.path(), &secrets, true);
+    expect(&mut running.events, Event::Ready).await;
+    expect(&mut running.events, Event::Connected).await;
+    assert_eq!(running.network.contact_sync_requests(), 0);
     stop(running).await;
 }
 
@@ -1358,6 +1426,10 @@ async fn synced_contacts_refresh_group_members() {
     assert!(matches!(
         next_event(&mut running.events).await,
         Event::Conversations(_)
+    ));
+    assert!(matches!(
+        next_event(&mut running.events).await,
+        Event::Contacts(_)
     ));
     let refreshed = conversation_updated(&mut running.events).await;
     assert_eq!(refreshed.members[1], member(2, Some("Bob B.")));

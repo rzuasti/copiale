@@ -2,6 +2,7 @@
 
 pub mod chat;
 mod drawer;
+mod fuzzy;
 mod kinetic;
 pub mod onboarding;
 mod qr;

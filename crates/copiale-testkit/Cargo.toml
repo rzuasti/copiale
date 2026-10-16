@@ -10,6 +10,8 @@ publish.workspace = true
 [dependencies]
 copiale-core.workspace = true
 futures.workspace = true
+presage.workspace = true
+presage-store-sqlite.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 uuid.workspace = true
 zeroize.workspace = true

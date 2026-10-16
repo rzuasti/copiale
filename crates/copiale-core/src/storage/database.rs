@@ -77,6 +77,20 @@ impl Database {
         self.presage.close().await;
     }
 
+    /// A transaction holding the write lock from the start.
+    ///
+    /// presage writes through its own pool. A deferred transaction that
+    /// reads, then writes after presage did, fails at once with "database is
+    /// locked" (`SQLITE_BUSY_SNAPSHOT`) instead of waiting.
+    pub(super) async fn begin_write(
+        &self,
+    ) -> Result<sqlx::Transaction<'static, sqlx::Sqlite>, StorageError> {
+        self.app
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(database_error)
+    }
+
     #[cfg(test)]
     pub(crate) fn pool(&self) -> &SqlitePool {
         &self.app
@@ -175,6 +189,45 @@ mod tests {
         ] {
             assert!(names.iter().any(|name| name == table), "missing {table}");
         }
+    }
+
+    /// Reads in `tx`, lets another connection write, as presage's does,
+    /// then writes.
+    async fn write_after_presage(
+        db: &Database,
+        mut tx: sqlx::Transaction<'static, sqlx::Sqlite>,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query("SELECT count(*) FROM app_meta")
+            .execute(&mut *tx)
+            .await?;
+        let pool = db.app.clone();
+        let other = tokio::spawn(async move {
+            sqlx::query("INSERT OR REPLACE INTO app_meta (key, value) VALUES ('other', '1')")
+                .execute(&pool)
+                .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        sqlx::query("INSERT OR REPLACE INTO app_meta (key, value) VALUES ('test', '1')")
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        other.await.unwrap().map(drop)
+    }
+
+    #[tokio::test]
+    async fn writes_wait_for_other_connections_instead_of_failing() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("test.db"), &DatabaseKey::generate())
+            .await
+            .unwrap();
+
+        let deferred = db.app.begin().await.unwrap();
+        let error = write_after_presage(&db, deferred).await.unwrap_err();
+        assert!(error.to_string().contains("locked"), "{error}");
+
+        let immediate = db.begin_write().await.unwrap();
+        write_after_presage(&db, immediate).await.unwrap();
+        db.close().await;
     }
 
     #[tokio::test]

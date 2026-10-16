@@ -23,7 +23,7 @@ impl Database {
         let read = kind == ReceiptKind::Read;
         let mut changed = Vec::new();
         for sent_at in timestamps {
-            let mut tx = self.app.begin().await.map_err(database_error)?;
+            let mut tx = self.begin_write().await?;
             // Sent messages to `sender`, or to a group they're in.
             let targets: Vec<(i64, i64, bool)> = sqlx::query_as(
                 "SELECT m.id, m.conversation_id, c.group_id IS NOT NULL

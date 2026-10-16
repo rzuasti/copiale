@@ -8,12 +8,16 @@ use std::time::Duration;
 
 use copiale_core::storage::{Database, SecretError, SecretStore};
 use copiale_core::{
-    BackendError, Clock, Destination, GroupInfo, GroupMasterKey, Incoming, Linker, MessageBody,
-    Outgoing, ServiceId, SignalBackend, Timestamp,
+    BackendError, Clock, Contact, Destination, GroupInfo, GroupMasterKey, Incoming, Linker,
+    MessageBody, Outgoing, ServiceId, SignalBackend, Timestamp,
 };
 use futures::future::LocalBoxFuture;
 use futures::stream::LocalBoxStream;
 use futures::{FutureExt as _, StreamExt as _};
+use presage::libsignal_service::prelude::phonenumber;
+use presage::model::contacts::Contact as StoredContact;
+use presage::store::ContentsStore as _;
+use presage_store_sqlite::SqliteStore;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::sync::{oneshot, watch};
 use uuid::Uuid;
@@ -88,6 +92,8 @@ struct State {
     read_syncs: Vec<Vec<(ServiceId, Timestamp)>>,
     typing: Vec<(Destination, bool)>,
     deleted_for_me: Vec<DeletedForMe>,
+    /// presage's store in the core's database, once the account is loaded.
+    store: Option<SqliteStore>,
     /// Disappearing messages timers, by conversation.
     expire_timers: Vec<(Destination, u32)>,
 }
@@ -426,6 +432,38 @@ impl FakeNetwork {
         self.state.lock().unwrap().typing.clone()
     }
 
+    /// Saves contacts to presage's store, as a sync from the phone does, and
+    /// delivers [`Incoming::ContactsSynced`].
+    ///
+    /// Panics before the account is loaded or linked.
+    pub async fn sync_contacts(&self, contacts: &[Contact]) {
+        let mut store = self
+            .state
+            .lock()
+            .unwrap()
+            .store
+            .clone()
+            .expect("account not loaded");
+        for contact in contacts {
+            let stored = StoredContact {
+                uuid: contact.id.uuid(),
+                phone_number: contact
+                    .phone
+                    .as_ref()
+                    .map(|phone| phonenumber::parse(None, phone.as_str()).expect("E.164 number")),
+                name: contact.name.clone().unwrap_or_default(),
+                verified: Default::default(),
+                profile_key: Vec::new(),
+                expire_timer: 0,
+                expire_timer_version: 1,
+                inbox_position: 0,
+                avatar: None,
+            };
+            store.save_contact(&stored).await.expect("contact saved");
+        }
+        self.deliver(Incoming::ContactsSynced);
+    }
+
     /// Sets the conversation's disappearing messages timer in seconds;
     /// `None` turns it off.
     pub fn set_expire_timer(&self, destination: Destination, seconds: Option<u32>) {
@@ -587,21 +625,20 @@ pub struct FakeLinker {
 impl Linker for FakeLinker {
     type Backend = FakeBackend;
 
-    async fn load(&mut self, _db: &Database) -> Result<Option<FakeBackend>, BackendError> {
-        let mut state = self.state.lock().unwrap();
-        if let Some(error) = state.load_failure.take() {
-            return Err(error);
-        }
-        Ok(if state.linked {
-            self.backend.take()
-        } else {
-            None
-        })
+    async fn load(&mut self, db: &Database) -> Result<Option<FakeBackend>, BackendError> {
+        let linked = {
+            let mut state = self.state.lock().unwrap();
+            if let Some(error) = state.load_failure.take() {
+                return Err(error);
+            }
+            state.linked
+        };
+        Ok(if linked { self.take_backend(db) } else { None })
     }
 
     async fn link(
         &mut self,
-        _db: &Database,
+        db: &Database,
         device_name: &str,
         url: oneshot::Sender<String>,
     ) -> Result<FakeBackend, BackendError> {
@@ -610,13 +647,21 @@ impl Linker for FakeLinker {
         match self.approvals.recv().await {
             Some(Ok(())) => {
                 self.state.lock().unwrap().linked = true;
-                self.backend
-                    .take()
+                self.take_backend(db)
                     .ok_or_else(|| BackendError::new("already linked"))
             }
             Some(Err(error)) => Err(error),
             None => Err(BackendError::new("phone gone")),
         }
+    }
+}
+
+impl FakeLinker {
+    /// The backend, once, sharing presage's store in `db`.
+    fn take_backend(&mut self, db: &Database) -> Option<FakeBackend> {
+        let backend = self.backend.take()?;
+        backend.state.lock().unwrap().store = Some(db.presage_store().clone());
+        Some(backend)
     }
 }
 

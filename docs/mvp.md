@@ -124,6 +124,10 @@ Scope, UI design, architecture and work items for the first usable release.
   own messages, within 24 hours.
 - Replies and edits show a line above the composer (`↳ replying to alice: …`,
   `editing your message`); `Esc` cancels.
+- `Ctrl/⌘+N` opens a contact picker over the window: fuzzy search by name
+  or number, `↑`/`↓` and `Enter` or a click to pick, `Esc` or a click
+  outside to close. Picking opens the existing chat, or a new one; chats
+  without messages are listed only while open.
 
 ### Quick mode and background
 
@@ -230,8 +234,9 @@ crates/
 - Messages, including those sent from the phone, are stored once: Signal
   identifies a message by author and sent timestamp, so redeliveries are
   ignored. Order is by sent time; the chat list by local receive time.
-- Contact sync is requested after linking and while no contacts are
-  stored; synced names title conversations.
+- Contact sync is requested after linking, while no contacts are stored,
+  and at startup a day after the last request; the phone also pushes
+  changes. Synced names, else cached profile names, title conversations.
 
 ### Storage
 

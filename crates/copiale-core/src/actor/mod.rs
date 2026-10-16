@@ -16,7 +16,7 @@ use tokio::task::LocalSet;
 use crate::backend::{BackendError, Linker};
 use crate::clock::{Clock, SystemClock};
 use crate::model::{
-    ConversationId, ConversationSummary, Message, MessageBody, MessageId, ServiceId,
+    Contact, ConversationId, ConversationSummary, Message, MessageBody, MessageId, ServiceId,
 };
 use crate::storage::{Passphrase, SecretStore, Storage};
 
@@ -68,6 +68,8 @@ pub enum Command {
     OpenConversation(ServiceId),
     /// Answered with [`Event::Conversations`].
     LoadConversations,
+    /// Answered with [`Event::Contacts`].
+    LoadContacts,
     /// Up to `limit` messages before `before` (or the newest); answered
     /// with [`Event::Messages`].
     LoadMessages {
@@ -122,6 +124,9 @@ pub enum Event {
     /// All conversations, most recently active first. Answers
     /// [`Command::LoadConversations`]; also sent when names change.
     Conversations(Vec<ConversationSummary>),
+    /// Contacts synced from the phone, by name. Answers
+    /// [`Command::LoadContacts`]; also sent when the phone syncs them.
+    Contacts(Vec<Contact>),
     /// A page of messages, oldest first. Answers [`Command::LoadMessages`].
     Messages {
         conversation: ConversationId,

@@ -5,8 +5,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use copiale_core::{
-    Attachment, BackendError, Command, Content, ConversationId, ConversationSummary, Direction,
-    Event, Expiry, GroupMasterKey, GroupUpdate, Member, Message, MessageBody, MessageId,
+    Attachment, BackendError, Command, Contact, Content, ConversationId, ConversationSummary,
+    Direction, Event, Expiry, GroupMasterKey, GroupUpdate, Member, Message, MessageBody, MessageId,
     MessageStatus, Peer, Quote, ServiceId, StorageFailure, Timestamp, Unsupported,
 };
 use copiale_ui::chat::Compose;
@@ -1157,4 +1157,85 @@ fn the_latest_chat_opens_at_start(cx: &mut TestAppContext) {
 
     assert_eq!(open, Some(ConversationId::new(1)));
     assert!(focused);
+}
+
+fn contact(id: i64, name: &str) -> Contact {
+    Contact {
+        id: peer(id),
+        name: Some(name.into()),
+        phone: None,
+    }
+}
+
+fn open_id(ui: &Ui, cx: &mut TestAppContext) -> Option<ConversationId> {
+    cx.update(|cx| ui.shell.read(cx).chat().unwrap().read(cx).chat().open_id())
+}
+
+#[gpui_kit::test]
+fn new_chat_picks_a_contact_from_the_keyboard(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.open_alice(cx);
+    ui.event(
+        Event::Contacts(vec![contact(1, "Alice"), contact(3, "Carol Danvers")]),
+        cx,
+    );
+
+    ui.press("ctrl-n", cx);
+    assert!(ui.shows("new-chat", cx));
+    assert!(matches!(ui.core.take().as_slice(), [Command::LoadContacts]));
+    assert!(ui.shows(("contact", 1u64), cx), "both listed");
+    ui.press("down", cx);
+    let selected = cx.update(|cx| {
+        let chat = ui.shell.read(cx).chat().unwrap().read(cx).chat();
+        chat.new_chat_selected()
+    });
+    assert_eq!(selected, Some(1));
+
+    ui.type_text("cd", cx);
+    ui.frame(cx);
+    assert!(!ui.shows(("contact", 1u64), cx), "only Carol matches");
+    ui.press("enter", cx);
+    assert!(!ui.shows("new-chat", cx));
+    assert!(matches!(
+        ui.core.take().as_slice(),
+        [Command::OpenConversation(id)] if *id == peer(3)
+    ));
+
+    // The core creates the chat; it opens, ready to type in.
+    ui.event(
+        Event::ConversationUpdated(ConversationSummary {
+            last_activity: None,
+            ..summary(3, "Carol Danvers", 0)
+        }),
+        cx,
+    );
+    assert_eq!(open_id(&ui, cx), Some(ConversationId::new(3)));
+    let composer_focused = cx
+        .update_window(ui.window, |_, window, cx| {
+            let chat = ui.shell.read(cx).chat().unwrap().read(cx);
+            chat.composer().focus_handle(cx).is_focused(window)
+        })
+        .unwrap();
+    assert!(composer_focused);
+}
+
+#[gpui_kit::test]
+fn new_chat_reuses_existing_chats_and_closes_on_escape(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.event(Event::Contacts(vec![contact(2, "Bob")]), cx);
+
+    ui.press("ctrl-n", cx);
+    ui.core.take();
+    ui.press("escape", cx);
+    assert!(!ui.shows("new-chat", cx));
+
+    ui.press("ctrl-n", cx);
+    ui.core.take();
+    ui.click(("contact", 0u64), cx);
+    assert!(!ui.shows("new-chat", cx));
+    assert_eq!(open_id(&ui, cx), Some(ConversationId::new(2)));
+    assert!(matches!(
+        ui.core.take().as_slice(),
+        [Command::LoadMessages { conversation, .. }] if *conversation == ConversationId::new(2)
+    ));
 }

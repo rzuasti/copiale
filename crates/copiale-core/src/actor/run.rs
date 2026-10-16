@@ -238,11 +238,16 @@ impl Core {
             Ok(count) => tracing::info!(count, "edits and deletes for unknown messages dropped"),
             Err(error) => self.database_error(error),
         }
-        // Contact names title conversations; ask the phone if there are none.
-        if linked_now || !db.has_contacts().await.unwrap_or(false) {
+        // Contact names title conversations; ask the phone if there are none,
+        // or daily for changes it didn't push.
+        if linked_now || self.contacts_due(db).await {
             let request = backend.request_contact_sync();
             match tokio::time::timeout(self.options.connect_timeout, request).await {
-                Ok(Ok(())) => {}
+                Ok(Ok(())) => {
+                    if let Err(error) = db.set_contacts_requested_at(Timestamp::now()).await {
+                        self.database_error(error);
+                    }
+                }
                 Ok(Err(error)) => tracing::warn!(%error, "requesting contacts failed"),
                 Err(_) => tracing::warn!("requesting contacts timed out"),
             }
@@ -323,6 +328,7 @@ impl Core {
                         }
                     }
                     Some(Command::LoadConversations) => self.send_conversations(db).await,
+                    Some(Command::LoadContacts) => self.send_contacts(db).await,
                     Some(Command::LoadMessages { conversation, before, limit }) => {
                         match db.messages(conversation, before, limit.min(MAX_PAGE)).await {
                             Ok(messages) => self.emit(Event::Messages { conversation, before, messages }),
@@ -487,6 +493,7 @@ impl Core {
                             Err(error) => self.database_error(error),
                         }
                         self.send_conversations(db).await;
+                        self.send_contacts(db).await;
                         // Member names may come from contacts.
                         match db.group_keys().await {
                             Ok(keys) => keys.into_iter().for_each(|key| groups.refresh(key, &mut backend)),
@@ -975,6 +982,24 @@ impl Core {
         }
     }
 
+    async fn send_contacts(&self, db: &Database) {
+        match db.contacts().await {
+            Ok(contacts) => self.emit(Event::Contacts(contacts)),
+            Err(error) => self.database_error(error),
+        }
+    }
+
+    /// Whether to ask the phone for contacts: none stored, or not asked for
+    /// a day.
+    async fn contacts_due(&self, db: &Database) -> bool {
+        match (db.has_contacts().await, db.contacts_requested_at().await) {
+            (Ok(true), Ok(Some(at))) => {
+                Timestamp::now().as_millis().saturating_sub(at.as_millis()) >= CONTACTS_REFRESH_MS
+            }
+            _ => true,
+        }
+    }
+
     async fn send_conversations(&self, db: &Database) {
         match db.conversations().await {
             Ok(conversations) => self.emit(Event::Conversations(conversations)),
@@ -1053,6 +1078,9 @@ fn quote_of(message: &Message) -> Option<Quote> {
         attachment,
     })
 }
+
+/// How often contacts are asked of the phone, besides the syncs it pushes.
+const CONTACTS_REFRESH_MS: u64 = 24 * 3600 * 1000;
 
 /// How long an edit or delete waits for its message.
 const PENDING_CHANGE_LIFETIME_MS: u64 = 24 * 3600 * 1000;

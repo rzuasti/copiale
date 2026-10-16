@@ -1340,6 +1340,8 @@ version = "0.1.0"
 dependencies = [
  "copiale-core",
  "futures",
+ "presage",
+ "presage-store-sqlite",
  "tokio",
  "uuid",
  "zeroize",

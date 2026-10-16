@@ -7,6 +7,7 @@
 //! database is async.
 
 mod changes;
+mod contacts;
 mod database;
 mod key;
 mod messages;

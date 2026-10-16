@@ -16,7 +16,7 @@ impl Database {
         &self,
         change: &MessageChange,
     ) -> Result<Option<Message>, StorageError> {
-        let mut tx = self.app.begin().await.map_err(database_error)?;
+        let mut tx = self.begin_write().await?;
         let author = author_bytes(change.author);
         let conversation: Option<i64> = match change.destination {
             Destination::Contact(peer) => {
