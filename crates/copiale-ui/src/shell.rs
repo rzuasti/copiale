@@ -8,40 +8,67 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::{Disableable as _, v_flex};
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render,
-    SharedString, Styled as _, Subscription, Task, Window, div, px,
+    SharedString, Styled as _, Subscription, Task, Window, WindowId, div, px,
 };
 
-use crate::CoreSink;
 use crate::chat::{ChatView, NoticeKey};
 use crate::notifier::Notifier;
 use crate::onboarding::{Onboarding, Screen, describe};
 use crate::qr::{QrMatrix, qr_code};
 use crate::theme::ActivePalette as _;
+use crate::{CoreSink, main_window};
 
 /// Root view of the main window: onboarding until the core is ready, then
-/// the chats.
+/// the chats. Outlives the window: hiding closes it, and the next one shows
+/// this again.
 pub struct Shell {
     core: Rc<dyn CoreSink>,
     notifier: Rc<dyn Notifier>,
     onboarding: Onboarding,
     chat: Option<Entity<ChatView>>,
-    passphrase: Entity<InputState>,
-    confirmation: Entity<InputState>,
-    device_name: Entity<InputState>,
+    inputs: Option<Inputs>,
+    /// The screen's input needs focus once a window shows it.
+    focus_pending: bool,
     /// QR code for the current provisioning URL.
     qr: Option<(String, Option<QrMatrix>)>,
-    _subscriptions: Vec<Subscription>,
     _events: Option<Task<()>>,
     _clicks: Option<Task<()>>,
 }
 
+/// The onboarding inputs, made for the window showing them.
+struct Inputs {
+    window: WindowId,
+    passphrase: Entity<InputState>,
+    confirmation: Entity<InputState>,
+    device_name: Entity<InputState>,
+    _subscriptions: Vec<Subscription>,
+}
+
 impl Shell {
-    pub fn new(
-        core: Rc<dyn CoreSink>,
-        notifier: Rc<dyn Notifier>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(core: Rc<dyn CoreSink>, notifier: Rc<dyn Notifier>) -> Self {
+        Self {
+            core,
+            notifier,
+            onboarding: Onboarding::default(),
+            chat: None,
+            inputs: None,
+            focus_pending: true,
+            qr: None,
+            _events: None,
+            _clicks: None,
+        }
+    }
+
+    /// Makes the inputs for `window`, unless it already has them.
+    fn attach(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let id = window.window_handle().window_id();
+        if self
+            .inputs
+            .as_ref()
+            .is_some_and(|inputs| inputs.window == id)
+        {
+            return;
+        }
         let passphrase = cx.new(|cx| {
             InputState::new(window, cx)
                 .masked(true)
@@ -69,83 +96,80 @@ impl Shell {
             cx.subscribe_in(&confirmation, window, on_enter(Self::submit_passphrase)),
             cx.subscribe_in(&device_name, window, on_enter(Self::link)),
         ];
-        Self {
-            core,
-            notifier,
-            onboarding: Onboarding::default(),
-            chat: None,
+        self.inputs = Some(Inputs {
+            window: id,
             passphrase,
             confirmation,
             device_name,
-            qr: None,
             _subscriptions: subscriptions,
-            _events: None,
-            _clicks: None,
+        });
+        self.focus_pending = true;
+    }
+
+    /// The window closed; the next one makes new inputs.
+    pub fn detach(&mut self, cx: &mut Context<Self>) {
+        self.inputs = None;
+        if let Some(chat) = &self.chat {
+            chat.update(cx, |chat, cx| chat.detach(cx));
         }
     }
 
-    /// Applies core events as they arrive.
-    pub fn listen(&mut self, mut events: Events, window: &mut Window, cx: &mut Context<Self>) {
-        self._events = Some(cx.spawn_in(window, async move |this, cx| {
+    fn inputs(&self) -> &Inputs {
+        self.inputs.as_ref().expect("attached to a window")
+    }
+
+    /// Focuses the composer once a window shows the chats.
+    pub fn focus_composer(&mut self, cx: &mut Context<Self>) {
+        if let Some(chat) = &self.chat {
+            chat.update(cx, |chat, cx| chat.focus_composer(cx));
+        }
+    }
+
+    /// Applies core events as they arrive, shown or not.
+    pub fn listen(&mut self, mut events: Events, cx: &mut Context<Self>) {
+        self._events = Some(cx.spawn(async move |this, cx| {
             while let Some(event) = events.recv().await {
-                let applied = this.update_in(cx, |shell, window, cx| {
-                    shell.on_event(&event, window, cx);
-                });
-                if applied.is_err() {
+                if this
+                    .update(cx, |shell, cx| shell.on_event(&event, cx))
+                    .is_err()
+                {
                     break;
                 }
             }
         }));
     }
 
-    /// Raises the window on clicked notifications, on their chat.
+    /// Shows the window on clicked notifications, on their chat.
     pub fn listen_to_notifications(
         &mut self,
         mut clicks: UnboundedReceiver<NoticeKey>,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self._clicks = Some(cx.spawn_in(window, async move |this, cx| {
+        self._clicks = Some(cx.spawn(async move |this, cx| {
             while let Some(key) = clicks.next().await {
-                let applied = this.update_in(cx, |shell, window, cx| {
-                    shell.notification_clicked(key, window, cx)
-                });
-                if applied.is_err() {
+                if this
+                    .update(cx, |shell, cx| shell.notification_clicked(key, cx))
+                    .is_err()
+                {
                     break;
                 }
             }
         }));
     }
 
-    pub fn notification_clicked(
-        &mut self,
-        key: NoticeKey,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        window.activate_window();
+    pub fn notification_clicked(&mut self, key: NoticeKey, cx: &mut Context<Self>) {
         if let (NoticeKey::Chat(id), Some(chat)) = (key, &self.chat) {
-            chat.update(cx, |chat, cx| chat.open(id, window, cx));
+            chat.update(cx, |chat, cx| chat.open_later(id, cx));
         }
+        // Deferred: showing may open a window, which renders this.
+        cx.defer(|cx| main_window::show(None, cx));
     }
 
-    pub fn on_event(&mut self, event: &Event, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn on_event(&mut self, event: &Event, cx: &mut Context<Self>) {
         self.onboarding.apply(event);
         match self.onboarding.screen() {
-            Screen::Passphrase { busy: false, .. } => {
-                self.passphrase
-                    .update(cx, |input, cx| input.focus(window, cx));
-            }
-            Screen::Unlinked {
-                device_name,
-                busy: false,
-                ..
-            } => {
-                let name = device_name.clone();
-                self.device_name.update(cx, |input, cx| {
-                    input.set_value(name, window, cx);
-                    input.focus(window, cx);
-                });
+            Screen::Passphrase { busy: false, .. } | Screen::Unlinked { busy: false, .. } => {
+                self.focus_pending = true;
             }
             Screen::Linking { url } if self.qr.as_ref().is_none_or(|(cached, _)| cached != url) => {
                 self.qr = Some((url.clone(), QrMatrix::encode(url)));
@@ -154,13 +178,36 @@ impl Shell {
                 let (core, notifier) = (self.core.clone(), self.notifier.clone());
                 let chat = self
                     .chat
-                    .get_or_insert_with(|| cx.new(|cx| ChatView::new(core, notifier, window, cx)))
+                    .get_or_insert_with(|| cx.new(|cx| ChatView::new(core, notifier, cx)))
                     .clone();
-                chat.update(cx, |chat, cx| chat.on_event(event, window, cx));
+                chat.update(cx, |chat, cx| chat.on_event(event, cx));
             }
             _ => {}
         }
         cx.notify();
+    }
+
+    /// Focuses the current screen's input.
+    fn focus_screen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.onboarding.screen() {
+            Screen::Passphrase { busy: false, .. } => {
+                let input = self.inputs().passphrase.clone();
+                input.update(cx, |input, cx| input.focus(window, cx));
+            }
+            Screen::Unlinked {
+                device_name,
+                busy: false,
+                ..
+            } => {
+                let name = device_name.clone();
+                let input = self.inputs().device_name.clone();
+                input.update(cx, |input, cx| {
+                    input.set_value(name, window, cx);
+                    input.focus(window, cx);
+                });
+            }
+            _ => {}
+        }
     }
 
     /// The chats, once the core is ready.
@@ -173,13 +220,13 @@ impl Shell {
     }
 
     fn submit_passphrase(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let passphrase = self.passphrase.read(cx).value();
-        let confirmation = self.confirmation.read(cx).value();
+        let inputs = self.inputs();
+        let (passphrase, confirmation) = (inputs.passphrase.clone(), inputs.confirmation.clone());
         if let Some(command) = self
             .onboarding
-            .submit_passphrase(&passphrase, &confirmation)
+            .submit_passphrase(&passphrase.read(cx).value(), &confirmation.read(cx).value())
         {
-            for input in [&self.passphrase, &self.confirmation] {
+            for input in [&passphrase, &confirmation] {
                 input.update(cx, |input, cx| input.set_value("", window, cx));
             }
             self.core.send(command);
@@ -188,7 +235,7 @@ impl Shell {
     }
 
     fn link(&mut self, _: &mut Window, cx: &mut Context<Self>) {
-        let name = self.device_name.read(cx).value();
+        let name = self.inputs().device_name.read(cx).value();
         if let Some(command) = self.onboarding.link(&name) {
             self.core.send(command);
         }
@@ -298,7 +345,7 @@ impl Shell {
                     .into(),
                 cx,
             )
-            .child(Input::new(&self.device_name).disabled(busy))
+            .child(Input::new(&self.inputs().device_name).disabled(busy))
             .child(error_text(error, cx))
             .child(
                 Button::new("link")
@@ -356,10 +403,11 @@ impl Shell {
                 "Unlocking…",
             )
         };
+        let inputs = self.inputs();
         let mut form =
-            card(title, body.into(), cx).child(Input::new(&self.passphrase).disabled(busy));
+            card(title, body.into(), cx).child(Input::new(&inputs.passphrase).disabled(busy));
         if new {
-            form = form.child(Input::new(&self.confirmation).disabled(busy));
+            form = form.child(Input::new(&inputs.confirmation).disabled(busy));
         }
         form.child(error_text(error, cx))
             .child(
@@ -376,9 +424,15 @@ impl Shell {
 }
 
 impl Render for Shell {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.attach(window, cx);
         if let (Screen::Ready, Some(chat)) = (self.onboarding.screen(), &self.chat) {
-            return div().size_full().child(chat.clone());
+            let chat = chat.clone();
+            chat.update(cx, |chat, cx| chat.attach(window, cx));
+            return div().size_full().child(chat);
+        }
+        if std::mem::take(&mut self.focus_pending) {
+            self.focus_screen(window, cx);
         }
         div()
             .size_full()

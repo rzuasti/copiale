@@ -22,7 +22,7 @@ Scope, UI design, architecture and work items for the first usable release.
   system preference), overridable in settings.
 - Notifications showing the sender name only by default; message content is
   opt-in.
-- Runs in the background when the window is closed.
+- Runs in the background when the window is closed, with a tray icon.
 - Unlink and wipe local data.
 
 ### Out
@@ -32,7 +32,7 @@ Scope, UI design, architecture and work items for the first usable release.
 - Message history transfer: chats start empty at link time.
 - Group creation and management.
 - Custom themes, base16 import, accent override.
-- Tray icon, global hotkey, notification quick reply.
+- Global hotkey, notification quick reply.
 - Multiple accounts.
 - CI.
 
@@ -121,7 +121,7 @@ Scope, UI design, architecture and work items for the first usable release.
   | `Ctrl/⌘+F` | Search chats |
   | `Alt+↑/↓` | Previous/next chat |
   | `Ctrl/⌘+,` | Settings (until #24: points to `config.toml`) |
-  | `Esc` | Close overlay; in compact mode, hide window (#22) |
+  | `Esc` | Close overlay; in compact mode, then hide the window |
   | `Ctrl/⌘+Q` | Quit |
 
 - `↑` in an empty composer edits the last own message.
@@ -142,11 +142,27 @@ Scope, UI design, architecture and work items for the first usable release.
 
 - Closing the window keeps the app running and connected; quitting is
   explicit (palette, `Ctrl/⌘+Q`, `copiale --quit`).
+- Hiding closes the window, as GPUI can't hide one; chats, drafts and
+  onboarding carry over to the next. On Linux the app also goes headless
+  while hidden, and reconnects with the requesting process's
+  `XDG_ACTIVATION_TOKEN` so the new window takes focus on Wayland.
+- On Wayland, an open but unfocused window is raised by reopening it:
+  compositors may ignore activation requests (Hyprland by default) but
+  focus new windows. With a token it reopens through a new connection.
 - Single instance. The CLI talks to the running instance:
+  - `copiale`: show the window.
   - `copiale --toggle`: show and focus the composer, or hide if focused.
   - `copiale --quit`.
 - Users bind `--toggle` to a key in their compositor/WM or OS.
-- Notification click opens the window on that chat.
+- Notification click opens the window on that chat; on macOS, so does the
+  Dock icon.
+- Tray icon (placeholder artwork until there's an app icon):
+  - Click: hides an open window, else shows it; clicking the tray takes
+    focus, so focus doesn't count here.
+  - Menu: `Show Copiale`/`Hide Copiale`, `Quit`.
+  - A dot while any chat has unread messages.
+  - Linux: StatusNotifierItem; GNOME needs the AppIndicator extension.
+    Clicks carry no activation token, so Wayland may not focus the window.
 
 ### Notifications
 
@@ -285,7 +301,13 @@ crates/
 ### Platform
 
 - Config file watching: `notify`.
-- Single-instance IPC: Unix socket / named pipe (`interprocess`).
+- Single-instance IPC (`copiale` crate): the first process holds
+  `copiale.lock` and listens on `copiale.sock` (a per-user named pipe on
+  Windows), in the runtime dir (`$XDG_RUNTIME_DIR/copiale` on Linux, else
+  the data dir), private to the user. One request line per connection
+  (`show`, `toggle`, `quit`, with an optional activation token), answered
+  `ok` or `error`.
+- Tray: `tray-icon`, with `ksni` (D-Bus, no GTK) on Linux.
 - Notifications: `notify-rust` on its own thread: the freedesktop D-Bus
   service (Linux), the notification center (macOS), WinRT toasts
   (Windows). Replacing and closing work on Linux; macOS and Windows wait

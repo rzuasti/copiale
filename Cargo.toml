@@ -23,6 +23,8 @@ directories = "6"
 fontconfig = "0.10"
 futures = "0.3"
 gethostname = "1"
+# Single-instance IPC: Unix sockets, Windows named pipes.
+interprocess = "2.4"
 # GPUI snapshots may break the API between releases; upgrade deliberately.
 gpui-kit = "=0.7.3"
 keyring = "4.2"
@@ -42,6 +44,8 @@ thiserror = "2"
 tokio = "1"
 toml = "1"
 toml_edit = "0.25"
+# On Linux: StatusNotifierItem over D-Bus through ksni, no GTK.
+tray-icon = { version = "0.26", default-features = false, features = ["ksni"] }
 tracing = "0.1"
 tracing-log = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

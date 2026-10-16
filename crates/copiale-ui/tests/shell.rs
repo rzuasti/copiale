@@ -15,12 +15,14 @@ use copiale_ui::notifier::Notifier;
 use copiale_ui::onboarding::Screen;
 use copiale_ui::settings::Settings;
 use copiale_ui::theme::{self, ActivePalette as _, Appearance, Scheme, Theme};
-use copiale_ui::{APP_ID, CoreSink, Quit, Shell, main_window_options};
+use copiale_ui::tray::{self, Tray, TrayAction, TrayState};
+use copiale_ui::{APP_ID, CoreSink, Quit, Request, Shell, main_window, main_window_options};
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
     AnyWindowHandle, App, AppContext as _, Entity, Focusable as _, Hsla, InputEvent as _,
-    MouseMoveEvent, Pixels, Point, Rgba, ScrollDelta, TestAppContext, point, px, size,
+    MouseMoveEvent, Pixels, Point, Rgba, ScrollDelta, TestAppContext, VisualTestContext, point, px,
+    size,
 };
 use uuid::Uuid;
 
@@ -56,73 +58,111 @@ impl Notifications {
     }
 }
 
+#[derive(Default)]
+struct TrayRecorder(Cell<TrayState>);
+
+impl Tray for TrayRecorder {
+    fn set(&self, state: TrayState) {
+        self.0.set(state);
+    }
+}
+
 struct Ui {
-    window: AnyWindowHandle,
+    /// The main window, as of the last [`Ui::sync_window`].
+    window: Cell<Option<AnyWindowHandle>>,
     shell: Entity<Shell>,
     core: Rc<Recorder>,
     notifications: Rc<Notifications>,
+    tray: Rc<TrayRecorder>,
 }
 
 impl Ui {
     fn open(cx: &mut TestAppContext) -> Self {
+        Self::open_with(
+            main_window::Options {
+                switch_displays: false,
+                follow_window_appearance: true,
+                raise_by_reopening: false,
+            },
+            cx,
+        )
+    }
+
+    fn open_with(options: main_window::Options, cx: &mut TestAppContext) -> Self {
         cx.update(copiale_ui::init);
         let core = Rc::new(Recorder::default());
         let notifications = Rc::new(Notifications::default());
         let sink: Rc<dyn CoreSink> = core.clone();
         let notifier: Rc<dyn Notifier> = notifications.clone();
-        let (window, shell) = cx
-            .update(|cx| {
-                gpui_kit::open_window(main_window_options(cx), cx, |window, cx| {
-                    theme::init_from_window(window, cx);
-                    cx.new(|cx| Shell::new(sink, notifier, window, cx))
-                })
-            })
-            .expect("open main window");
+        let tray = Rc::new(TrayRecorder::default());
+        let shell = cx.update(|cx| {
+            tray::install(tray.clone(), cx);
+            let shell = cx.new(|_| Shell::new(sink, notifier));
+            main_window::install(shell.clone(), options, cx);
+            main_window::show(None, cx);
+            shell
+        });
         let ui = Self {
-            window,
+            window: Cell::new(None),
             shell,
             core,
             notifications,
+            tray,
         };
+        assert!(ui.sync_window(cx));
         ui.frame(cx);
         ui
     }
 
+    fn window(&self) -> AnyWindowHandle {
+        self.window.get().expect("main window open")
+    }
+
+    /// Follows the main window as it closes and opens; whether it's open.
+    fn sync_window(&self, cx: &mut TestAppContext) -> bool {
+        cx.run_until_parked();
+        let handle = cx.update(|cx| main_window::handle(cx));
+        self.window.set(handle);
+        handle.is_some()
+    }
+
     fn event(&self, event: Event, cx: &mut TestAppContext) {
         let shell = self.shell.clone();
-        cx.update_window(self.window, |_, window, cx| {
-            shell.update(cx, |shell, cx| shell.on_event(&event, window, cx));
-            window.render_frame(cx);
-        })
-        .unwrap();
+        cx.update(|cx| shell.update(cx, |shell, cx| shell.on_event(&event, cx)));
+        if self.window.get().is_some() {
+            self.frame(cx);
+        }
     }
 
     fn frame(&self, cx: &mut TestAppContext) {
-        cx.update_window(self.window, |_, window, cx| window.render_frame(cx))
+        cx.update_window(self.window(), |_, window, cx| window.render_frame(cx))
             .unwrap();
     }
 
     fn click(&self, id: impl Into<gpui_kit::ElementId>, cx: &mut TestAppContext) {
         let id = id.into();
-        cx.update_window(self.window, |_, window, cx| window.click(id.clone(), cx))
+        cx.update_window(self.window(), |_, window, cx| window.click(id.clone(), cx))
             .unwrap();
         self.frame(cx);
     }
 
     fn type_text(&self, text: &str, cx: &mut TestAppContext) {
-        cx.update_window(self.window, |_, window, cx| window.input(text, cx))
+        cx.update_window(self.window(), |_, window, cx| window.input(text, cx))
             .unwrap();
     }
 
+    /// Presses `key`, then draws if the window is still open.
     fn press(&self, key: &str, cx: &mut TestAppContext) {
-        cx.update_window(self.window, |_, window, cx| window.press(key, cx))
+        cx.update_window(self.window(), |_, window, cx| window.press(key, cx))
             .unwrap();
-        self.frame(cx);
+        if cx.update(|cx| main_window::handle(cx)).is_some() {
+            self.frame(cx);
+        }
     }
 
     /// Moves the pointer to `offset` from the top-left of element `id`.
     fn point_at(&self, id: &'static str, offset: Point<Pixels>, cx: &mut TestAppContext) {
-        cx.update_window(self.window, |_, window, cx| {
+        cx.update_window(self.window(), |_, window, cx| {
             let position = window.find(id).bounds().origin + offset;
             window.dispatch_event(
                 MouseMoveEvent {
@@ -148,19 +188,19 @@ impl Ui {
 
     fn top(&self, id: impl Into<gpui_kit::ElementId>, cx: &mut TestAppContext) -> Pixels {
         let id = id.into();
-        cx.update_window(self.window, |_, window, _| window.find(id).bounds().top())
+        cx.update_window(self.window(), |_, window, _| window.find(id).bounds().top())
             .unwrap()
     }
 
     fn shows(&self, id: impl Into<gpui_kit::ElementId>, cx: &mut TestAppContext) -> bool {
         let id = id.into();
-        cx.update_window(self.window, |_, window, _| window.try_find(id).is_some())
+        cx.update_window(self.window(), |_, window, _| window.try_find(id).is_some())
             .unwrap()
     }
 
     fn hover(&self, id: impl Into<gpui_kit::ElementId>, cx: &mut TestAppContext) {
         let id = id.into();
-        cx.update_window(self.window, |_, window, cx| window.hover(id, cx))
+        cx.update_window(self.window(), |_, window, cx| window.hover(id, cx))
             .unwrap();
     }
 
@@ -469,7 +509,7 @@ fn failed_message_can_be_retried(cx: &mut TestAppContext) {
 fn search_filters_and_enter_opens_the_match(cx: &mut TestAppContext) {
     let ui = Ui::ready(cx);
     let search = cx.update(|cx| ui.shell.read(cx).chat().unwrap().read(cx).search().clone());
-    cx.update_window(ui.window, |_, window, cx| {
+    cx.update_window(ui.window(), |_, window, cx| {
         search.update(cx, |search, cx| search.focus(window, cx));
     })
     .unwrap();
@@ -540,7 +580,7 @@ fn theme_follows_the_system_appearance(cx: &mut TestAppContext) {
         Scheme::NoPreference,
         Scheme::Light,
     ] {
-        cx.update_window(ui.window, |_, window, cx| {
+        cx.update_window(ui.window(), |_, window, cx| {
             theme::follow(scheme, cx);
             window.render_frame(cx);
         })
@@ -564,7 +604,7 @@ fn search_shows_from_the_sidebar_top_until_the_pointer_leaves(cx: &mut TestAppCo
     assert!(ui.shows("search", cx));
 
     let width = cx
-        .update_window(ui.window, |_, window, _| {
+        .update_window(ui.window(), |_, window, _| {
             window.find("sidebar").bounds().size.width
         })
         .unwrap();
@@ -611,7 +651,7 @@ fn ctrl_f_searches_and_escape_dismisses(cx: &mut TestAppContext) {
     assert!(!ui.shows("search", cx));
     assert_eq!(count(cx), 2);
     let composer_focused = cx
-        .update_window(ui.window, |_, window, cx| {
+        .update_window(ui.window(), |_, window, cx| {
             let chat = ui.shell.read(cx).chat().unwrap().read(cx);
             chat.composer().focus_handle(cx).is_focused(window)
         })
@@ -646,7 +686,7 @@ fn wheel_scrolls_the_log_smoothly(cx: &mut TestAppContext) {
     let start = position(cx);
 
     // One notch up.
-    cx.update_window(ui.window, |_, window, cx| {
+    cx.update_window(ui.window(), |_, window, cx| {
         window.scroll("log", ScrollDelta::Lines(point(0., 3.)), cx);
     })
     .unwrap();
@@ -1170,7 +1210,7 @@ fn the_latest_chat_opens_at_start(cx: &mut TestAppContext) {
     let ui = Ui::ready(cx);
 
     let (open, focused) = cx
-        .update_window(ui.window, |_, window, cx| {
+        .update_window(ui.window(), |_, window, cx| {
             let view = ui.shell.read(cx).chat().unwrap().read(cx);
             let focused = view.composer().focus_handle(cx).is_focused(window);
             (view.chat().open_id(), focused)
@@ -1233,7 +1273,7 @@ fn new_chat_picks_a_contact_from_the_keyboard(cx: &mut TestAppContext) {
     );
     assert_eq!(open_id(&ui, cx), Some(ConversationId::new(3)));
     let composer_focused = cx
-        .update_window(ui.window, |_, window, cx| {
+        .update_window(ui.window(), |_, window, cx| {
             let chat = ui.shell.read(cx).chat().unwrap().read(cx);
             chat.composer().focus_handle(cx).is_focused(window)
         })
@@ -1287,12 +1327,13 @@ fn messages_in_unfocused_chats_notify_and_clicks_open_them(cx: &mut TestAppConte
         })]
     );
 
-    cx.update_window(ui.window, |_, window, cx| {
+    cx.update(|cx| {
         ui.shell.update(cx, |shell, cx| {
-            shell.notification_clicked(NoticeKey::Chat(ConversationId::new(2)), window, cx)
+            shell.notification_clicked(NoticeKey::Chat(ConversationId::new(2)), cx)
         })
-    })
-    .unwrap();
+    });
+    ui.sync_window(cx);
+    ui.frame(cx);
     assert_eq!(open_id(&ui, cx), Some(ConversationId::new(2)));
 }
 
@@ -1317,7 +1358,7 @@ fn notifications_follow_the_settings(cx: &mut TestAppContext) {
 }
 
 fn composer_focused(ui: &Ui, cx: &mut TestAppContext) -> bool {
-    cx.update_window(ui.window, |_, window, cx| {
+    cx.update_window(ui.window(), |_, window, cx| {
         let chat = ui.shell.read(cx).chat().unwrap().read(cx);
         chat.composer().focus_handle(cx).is_focused(window)
     })
@@ -1522,7 +1563,7 @@ fn tab_moves_focus_from_the_input_to_the_button(cx: &mut TestAppContext) {
 }
 
 fn resize(ui: &Ui, width: f32, cx: &mut TestAppContext) {
-    cx.simulate_window_resize(ui.window, size(px(width), px(720.)));
+    cx.simulate_window_resize(ui.window(), size(px(width), px(720.)));
     ui.frame(cx);
 }
 
@@ -1553,7 +1594,7 @@ fn the_chat_list_slides_out(cx: &mut TestAppContext) {
     let ui = Ui::ready(cx);
     ui.open_alice(cx);
     let width = |cx: &mut TestAppContext| {
-        cx.update_window(ui.window, |_, window, _| {
+        cx.update_window(ui.window(), |_, window, _| {
             window
                 .try_find("sidebar-slot")
                 .map_or(px(0.), |slot| slot.bounds().size.width)
@@ -1602,7 +1643,7 @@ fn the_log_keeps_its_place_across_layouts(cx: &mut TestAppContext) {
     ui.click(("conversation", 1u64), cx);
     long_messages(&ui, cx);
     let log_bottom = |cx: &mut TestAppContext| {
-        cx.update_window(ui.window, |_, window, _| {
+        cx.update_window(ui.window(), |_, window, _| {
             window.find("log").bounds().bottom()
         })
         .unwrap()
@@ -1628,7 +1669,7 @@ fn the_log_keeps_its_place_across_layouts(cx: &mut TestAppContext) {
     );
 
     // Scrolled well up, the top message stays the top one.
-    cx.update_window(ui.window, |_, window, cx| {
+    cx.update_window(ui.window(), |_, window, cx| {
         window.scroll("log", ScrollDelta::Lines(point(0., 150.)), cx);
     })
     .unwrap();
@@ -1703,4 +1744,208 @@ fn going_compact_drops_the_search(cx: &mut TestAppContext) {
     });
     assert_eq!(count, 2);
     assert!(composer_focused(&ui, cx));
+}
+
+fn request(ui: &Ui, request: Request, cx: &mut TestAppContext) -> bool {
+    cx.update(|cx| main_window::handle_request(request, cx));
+    let open = ui.sync_window(cx);
+    if open {
+        ui.frame(cx);
+    }
+    open
+}
+
+fn show() -> Request {
+    Request::Show {
+        activation_token: None,
+    }
+}
+
+fn toggle() -> Request {
+    Request::Toggle {
+        activation_token: None,
+    }
+}
+
+fn focused(cx: &mut TestAppContext) -> bool {
+    cx.update(main_window::is_focused)
+}
+
+#[gpui_kit::test]
+fn hidden_windows_keep_chats_running(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.open_alice(cx);
+    ui.type_text("half a thought", cx);
+
+    cx.update(main_window::hide);
+    assert!(!ui.sync_window(cx), "closed");
+
+    // Events still apply, and notify since nothing is focused.
+    bob_writes(&ui, 20, cx);
+    assert!(!ui.notifications.take().is_empty());
+
+    assert!(request(&ui, show(), cx), "reopened");
+    assert_eq!(open_id(&ui, cx), Some(ConversationId::new(1)));
+    let draft = cx.update(|cx| {
+        let chat = ui.shell.read(cx).chat().unwrap().read(cx);
+        chat.composer().read(cx).value()
+    });
+    assert_eq!(draft, "half a thought");
+    assert!(composer_focused(&ui, cx));
+    // Typing still reaches the composer.
+    ui.type_text("!", cx);
+    let draft = cx.update(|cx| {
+        let chat = ui.shell.read(cx).chat().unwrap().read(cx);
+        chat.composer().read(cx).value()
+    });
+    assert_eq!(draft, "half a thought!");
+}
+
+#[gpui_kit::test]
+fn toggle_hides_focused_windows_and_shows_others(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.open_alice(cx);
+    cx.update_window(ui.window(), |_, window, _| window.activate_window())
+        .unwrap();
+    cx.run_until_parked();
+    assert!(focused(cx));
+
+    assert!(!request(&ui, toggle(), cx), "focused: hidden");
+    assert!(request(&ui, toggle(), cx), "hidden: shown");
+    assert!(composer_focused(&ui, cx));
+
+    // Open but unfocused: raised, not hidden.
+    VisualTestContext::from_window(ui.window(), cx).deactivate_window();
+    assert!(!focused(cx));
+    assert!(request(&ui, toggle(), cx));
+    assert!(focused(cx));
+}
+
+#[gpui_kit::test]
+fn escape_hides_compact_windows_last(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    chat_with_recent(&ui, cx);
+    ui.press("escape", cx);
+    assert!(ui.sync_window(cx), "full: stays");
+
+    resize(&ui, 500., cx);
+    // A reply is cancelled first.
+    ui.hover(("row", 10u64), cx);
+    ui.click(("reply", 10u64), cx);
+    let compose = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            let chat = ui.shell.read(cx).chat().unwrap().read(cx);
+            chat.chat().compose()
+        })
+    };
+    assert_eq!(compose(cx), Compose::Reply(MessageId::new(10)));
+    ui.press("escape", cx);
+    assert!(ui.sync_window(cx), "cancelled the reply");
+    assert_eq!(compose(cx), Compose::New);
+
+    ui.press("escape", cx);
+    assert!(!ui.sync_window(cx), "hidden");
+}
+
+#[gpui_kit::test]
+fn notification_clicks_show_hidden_windows(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.open_alice(cx);
+    cx.update(main_window::hide);
+    ui.sync_window(cx);
+
+    cx.update(|cx| {
+        ui.shell.update(cx, |shell, cx| {
+            shell.notification_clicked(NoticeKey::Chat(ConversationId::new(2)), cx)
+        })
+    });
+    assert!(ui.sync_window(cx));
+    ui.frame(cx);
+    assert_eq!(open_id(&ui, cx), Some(ConversationId::new(2)));
+    assert!(composer_focused(&ui, cx));
+}
+
+#[gpui_kit::test]
+fn onboarding_survives_hiding(cx: &mut TestAppContext) {
+    let ui = Ui::open(cx);
+    ui.event(
+        Event::Unlinked {
+            device_name: "Copiale on host".into(),
+        },
+        cx,
+    );
+    cx.update(main_window::hide);
+    ui.sync_window(cx);
+    ui.event(Event::LinkUrl(URL.into()), cx);
+
+    assert!(request(&ui, show(), cx));
+    assert!(matches!(ui.screen(cx), Screen::Linking { .. }));
+    assert!(ui.shows("cancel-link", cx));
+}
+
+#[gpui_kit::test]
+fn the_tray_follows_the_window_and_unread_chats(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    assert_eq!(
+        ui.tray.0.get(),
+        TrayState {
+            shown: true,
+            unread: true
+        }
+    );
+
+    ui.event(Event::ConversationUpdated(summary(1, "Alice", 0)), cx);
+    assert!(!ui.tray.0.get().unread);
+
+    cx.update(main_window::hide);
+    ui.sync_window(cx);
+    assert!(!ui.tray.0.get().shown);
+    bob_writes(&ui, 20, cx);
+    assert!(ui.tray.0.get().unread, "while hidden too");
+}
+
+#[gpui_kit::test]
+fn tray_clicks_hide_open_windows_and_show_hidden_ones(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    let click = |cx: &mut TestAppContext| {
+        cx.update(|cx| main_window::handle_tray(TrayAction::Activate, cx));
+        ui.sync_window(cx)
+    };
+    // Unfocused, as clicking the tray takes focus: hidden all the same.
+    assert!(!focused(cx));
+    assert!(!click(cx));
+    assert!(click(cx));
+    assert!(ui.tray.0.get().shown);
+}
+
+#[gpui_kit::test]
+fn unfocused_windows_raise_by_reopening_where_activation_is_ignored(cx: &mut TestAppContext) {
+    let ui = Ui::open_with(
+        main_window::Options {
+            switch_displays: false,
+            follow_window_appearance: true,
+            raise_by_reopening: true,
+        },
+        cx,
+    );
+    ui.event(Event::Ready, cx);
+    ui.event(Event::Conversations(vec![summary(1, "Alice", 0)]), cx);
+    ui.type_text("draft", cx);
+    let before = ui.window().window_id();
+
+    assert!(!focused(cx));
+    assert!(request(&ui, show(), cx));
+    assert_ne!(ui.window().window_id(), before, "a new window");
+    assert!(composer_focused(&ui, cx));
+    let draft = cx.update(|cx| {
+        let chat = ui.shell.read(cx).chat().unwrap().read(cx);
+        chat.composer().read(cx).value()
+    });
+    assert_eq!(draft, "draft");
+
+    // Focused: toggling hides, as before.
+    cx.update_window(ui.window(), |_, window, _| window.activate_window())
+        .unwrap();
+    cx.run_until_parked();
+    assert!(!request(&ui, toggle(), cx));
 }

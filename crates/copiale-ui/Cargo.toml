@@ -17,6 +17,7 @@ qrcode.workspace = true
 serde.workspace = true
 toml.workspace = true
 tracing.workspace = true
+tray-icon.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ashpd.workspace = true

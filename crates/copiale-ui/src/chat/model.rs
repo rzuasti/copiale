@@ -292,6 +292,13 @@ impl Chat {
         })
     }
 
+    /// Whether any listed chat has unread messages.
+    pub fn has_unread(&self) -> bool {
+        self.conversations
+            .iter()
+            .any(|summary| summary.unread > 0 && self.listed(summary))
+    }
+
     /// Listed chats with unread messages, other than the open one.
     pub fn unread_elsewhere(&self) -> usize {
         self.conversations
@@ -2289,5 +2296,11 @@ mod tests {
         assert_eq!(chat.unread_elsewhere(), 2);
         chat.open(ConversationId::new(1));
         assert_eq!(chat.unread_elsewhere(), 1);
+        assert!(chat.has_unread());
+
+        for id in [1, 2] {
+            chat.apply(&Event::ConversationUpdated(summary(id, NOW, 0, None)), true);
+        }
+        assert!(!chat.has_unread());
     }
 }

@@ -22,6 +22,7 @@ pub use actor::{
 };
 pub use backend::{BackendError, Incoming, Linker, SignalBackend};
 pub use clock::{Clock, SystemClock};
+pub use dirs::runtime_dir;
 pub use model::{
     AccountSettings, Attachment, Change, ChatRef, Contact, Content, ConversationId,
     ConversationSummary, Destination, Direction, Expiry, GroupId, GroupInfo, GroupMasterKey,

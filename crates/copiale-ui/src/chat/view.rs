@@ -22,8 +22,8 @@ use gpui_kit::{
     Focusable as _, FollowMode, HighlightStyle, Hsla, InteractiveElement as _, IntoElement,
     KeyBinding, KeyContext, ListAlignment, ListState, MouseButton, MouseMoveEvent,
     ParentElement as _, Pixels, Rems, Render, SharedString, StatefulInteractiveElement as _,
-    Styled as _, StyledText, Subscription, Task, TestSupportExt as _, TextRun, Window, actions,
-    canvas, div, font, list, point, px, relative, rems,
+    Styled as _, StyledText, Subscription, Task, TestSupportExt as _, TextRun, Window, WindowId,
+    actions, canvas, div, font, list, point, px, relative, rems,
 };
 
 use super::layout::Layout;
@@ -39,7 +39,7 @@ use crate::kinetic::{self, Kinetic, kinetic};
 use crate::notifier::Notifier;
 use crate::settings::{self, Settings};
 use crate::theme::ActivePalette as _;
-use crate::{CoreSink, Quit};
+use crate::{CoreSink, Quit, main_window, tray};
 
 /// Load the previous page when the top visible row is this close to the
 /// oldest loaded one.
@@ -87,6 +87,7 @@ actions!(
         NextChat,
         SearchPrevious,
         SearchNext,
+        HideWindow,
     ]
 );
 
@@ -116,6 +117,8 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("alt-up", PreviousChat, Some(CONTEXT)),
         KeyBinding::new("alt-down", NextChat, Some(CONTEXT)),
         KeyBinding::new("escape", CloseOverlay, Some(OVERLAY)),
+        // After everything else Esc does.
+        KeyBinding::new("escape", HideWindow, Some(CONTEXT)),
         KeyBinding::new("up", PickPrevious, Some("Picking > Input")),
         KeyBinding::new("down", PickNext, Some("Picking > Input")),
         KeyBinding::new("up", SearchPrevious, Some("Searching > Input")),
@@ -146,15 +149,19 @@ pub struct ChatView {
     kinetic: Kinetic,
     /// Holds focus while no input does, so shortcuts work.
     focus: FocusHandle,
-    search: Entity<InputState>,
+    /// Inputs for the window showing the view, if any.
+    inputs: Option<Inputs>,
+    /// The window is active.
+    active: bool,
+    /// The composer's text while no window shows it.
+    draft: String,
+    /// Clear and focus the composer on the next frame.
+    ready_pending: bool,
+    /// Focus the composer on the next frame.
+    focus_pending: bool,
     /// The pointer reached the sidebar's top and hasn't left the sidebar.
     search_hovered: bool,
     sidebar_top: Rc<Cell<Pixels>>,
-    composer: Entity<TextareaState>,
-    /// The new chat picker's query.
-    new_chat: Entity<InputState>,
-    /// The palette's query.
-    palette: Entity<InputState>,
     /// Holds focus while an overlay without an input is open.
     overlay_focus: FocusHandle,
     layout: Layout,
@@ -177,46 +184,30 @@ pub struct ChatView {
     _subscriptions: Vec<Subscription>,
 }
 
+/// The inputs and window subscriptions, made for the window showing the
+/// view.
+struct Inputs {
+    window: WindowId,
+    search: Entity<InputState>,
+    composer: Entity<TextareaState>,
+    /// The new chat picker's query.
+    new_chat: Entity<InputState>,
+    /// The palette's query.
+    palette: Entity<InputState>,
+    _subscriptions: Vec<Subscription>,
+}
+
 impl ChatView {
-    /// Asks the core for the chat list.
-    pub fn new(
-        core: Rc<dyn CoreSink>,
-        notifier: Rc<dyn Notifier>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
-        let composer = cx.new(|cx| {
-            TextareaState::new(window, cx)
-                .auto_grow(1, 8)
-                .submit_on_enter(true)
-                .placeholder("Message")
-        });
-        let new_chat = cx.new(|cx| InputState::new(window, cx).placeholder("New chat with…"));
-        let palette = cx.new(|cx| InputState::new(window, cx).placeholder("Chat or command…"));
-        let subscriptions = vec![
-            cx.subscribe_in(&search, window, Self::on_search_event),
-            cx.subscribe_in(&new_chat, window, Self::on_picker_event),
-            cx.subscribe_in(&palette, window, Self::on_picker_event),
-            cx.observe_global::<Settings>(|view, cx| {
-                let content = Settings::get(cx).notifications.content;
-                for action in view.notices.set_content(content) {
-                    view.notifier.apply(action);
-                }
-            }),
-            cx.subscribe_in(&composer, window, Self::on_composer_event),
-            cx.observe_window_bounds(window, |view, window, cx| view.resized(window, cx)),
-            cx.observe_window_activation(window, |view, window, _| {
-                if window.is_window_active()
-                    && let Some(command) = view.chat.activated()
-                {
-                    view.core.send(command);
-                }
-            }),
-        ];
+    /// Asks the core for the chat list; shown once attached to a window.
+    pub fn new(core: Rc<dyn CoreSink>, notifier: Rc<dyn Notifier>, cx: &mut Context<Self>) -> Self {
+        let subscriptions = vec![cx.observe_global::<Settings>(|view, cx| {
+            let content = Settings::get(cx).notifications.content;
+            for action in view.notices.set_content(content) {
+                view.notifier.apply(action);
+            }
+        })];
         core.send(Command::LoadConversations);
         let focus = cx.focus_handle();
-        window.focus(&focus, cx);
         Self {
             core,
             chat: Chat::new(Clock::system()),
@@ -225,14 +216,15 @@ impl ChatView {
             log: ListState::new(0, ListAlignment::Top, px(1000.)),
             kinetic: Kinetic::default(),
             focus,
-            search,
+            inputs: None,
+            active: false,
+            draft: String::new(),
+            ready_pending: false,
+            focus_pending: true,
             search_hovered: false,
             sidebar_top: Rc::default(),
-            composer,
-            new_chat,
-            palette,
             overlay_focus: cx.focus_handle(),
-            layout: layout_for(window),
+            layout: Layout::default(),
             drawn: false,
             countdown: None,
             typing_expiry: None,
@@ -249,12 +241,106 @@ impl ChatView {
         &self.chat
     }
 
+    /// Makes the inputs for `window`, unless it already has them, keeping
+    /// the composer's draft.
+    pub fn attach(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let id = window.window_handle().window_id();
+        if self
+            .inputs
+            .as_ref()
+            .is_some_and(|inputs| inputs.window == id)
+        {
+            return;
+        }
+        let draft = match self.inputs.take() {
+            Some(old) => old.composer.read(cx).value().to_string(),
+            None => std::mem::take(&mut self.draft),
+        };
+        let placeholder = self
+            .chat
+            .open_conversation()
+            .map_or("Message".into(), |summary| {
+                format!("Message {}", title(summary))
+            });
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
+        let composer = cx.new(|cx| {
+            let mut composer = TextareaState::new(window, cx)
+                .auto_grow(1, 8)
+                .submit_on_enter(true)
+                .placeholder(placeholder);
+            // Inserted, so the cursor ends up after it.
+            composer.insert(draft, window, cx);
+            composer
+        });
+        let new_chat = cx.new(|cx| InputState::new(window, cx).placeholder("New chat with…"));
+        let palette = cx.new(|cx| InputState::new(window, cx).placeholder("Chat or command…"));
+        let subscriptions = vec![
+            cx.subscribe_in(&search, window, Self::on_search_event),
+            cx.subscribe_in(&new_chat, window, Self::on_picker_event),
+            cx.subscribe_in(&palette, window, Self::on_picker_event),
+            cx.subscribe_in(&composer, window, Self::on_composer_event),
+            cx.observe_window_bounds(window, |view, window, cx| view.resized(window, cx)),
+            cx.observe_window_activation(window, |view, window, _| {
+                view.active = window.is_window_active();
+                if view.active
+                    && let Some(command) = view.chat.activated()
+                {
+                    view.core.send(command);
+                }
+            }),
+        ];
+        self.inputs = Some(Inputs {
+            window: id,
+            search,
+            composer,
+            new_chat,
+            palette,
+            _subscriptions: subscriptions,
+        });
+        self.active = window.is_window_active();
+        self.layout = layout_for(window);
+        self.drawn = false;
+        self.chat.close_overlay();
+        self.focus_pending = true;
+        cx.notify();
+    }
+
+    /// The window closed: keeps the draft and drops what the next window
+    /// starts without.
+    pub fn detach(&mut self, cx: &mut Context<Self>) {
+        if let Some(inputs) = self.inputs.take() {
+            self.draft = inputs.composer.read(cx).value().to_string();
+        }
+        self.active = false;
+        self.chat.set_search("");
+        self.chat.close_overlay();
+        self.search_hovered = false;
+        self.hovered = None;
+    }
+
+    fn inputs(&self) -> &Inputs {
+        self.inputs.as_ref().expect("attached to a window")
+    }
+
+    /// Focuses the composer on the next frame.
+    pub fn focus_composer(&mut self, cx: &mut Context<Self>) {
+        self.focus_pending = true;
+        cx.notify();
+    }
+
+    /// Opens a chat, ready to type in once shown.
+    pub fn open_later(&mut self, id: ConversationId, cx: &mut Context<Self>) {
+        self.open_chat(id, cx);
+        self.ready_pending = true;
+        cx.notify();
+    }
+
     pub fn search(&self) -> &Entity<InputState> {
-        &self.search
+        &self.inputs().search
     }
 
     pub fn composer(&self) -> &Entity<TextareaState> {
-        &self.composer
+        &self.inputs().composer
     }
 
     pub fn log(&self) -> &ListState {
@@ -274,8 +360,14 @@ impl ChatView {
         }
         self.layout = layout;
         if !layout.shows_chat_list() {
-            let focused = self.search.read(cx).focus_handle(cx).is_focused(window);
-            self.search
+            let focused = self
+                .inputs()
+                .search
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window);
+            self.inputs()
+                .search
                 .update(cx, |search, cx| search.set_value("", window, cx));
             self.chat.set_search("");
             self.search_hovered = false;
@@ -286,24 +378,24 @@ impl ChatView {
         cx.notify();
     }
 
-    pub fn on_event(&mut self, event: &Event, window: &mut Window, cx: &mut Context<Self>) {
-        let effects = self.chat.apply(event, window.is_window_active());
+    /// Applies a core event, shown or not.
+    pub fn on_event(&mut self, event: &Event, cx: &mut Context<Self>) {
+        let effects = self.chat.apply(event, self.active);
         self.run(effects, cx);
         if let Some(id) = self.chat.take_requested_open() {
-            self.open(id, window, cx);
+            self.open_later(id, cx);
         }
-        let focused = window
-            .is_window_active()
-            .then(|| self.chat.open_id())
-            .flatten();
+        let focused = self.active.then(|| self.chat.open_id()).flatten();
         for action in self.notices.apply(event, focused) {
             self.notifier.apply(action);
         }
+        let unread = self.chat.has_unread();
+        tray::update(cx, |tray| tray.unread = unread);
         if let Event::Conversations(_) = event
-            && let Some(effects) = self.chat.open_latest(window.is_window_active())
+            && let Some(effects) = self.chat.open_latest(self.active)
         {
             self.run(effects, cx);
-            self.ready_composer(window, cx);
+            self.ready_pending = true;
         }
         match event {
             Event::Disconnected { .. } => self.start_countdown(cx),
@@ -392,12 +484,16 @@ impl ChatView {
     }
 
     pub fn open(&mut self, id: ConversationId, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_chat(id, cx);
+        self.ready_composer(window, cx);
+    }
+
+    fn open_chat(&mut self, id: ConversationId, cx: &mut Context<Self>) {
         if self.chat.open_id() != Some(id) && self.typing_idle.take().is_some() {
             self.send(self.chat.typing_command(""));
         }
         let effects = self.chat.open(id);
         self.run(effects, cx);
-        self.ready_composer(window, cx);
     }
 
     /// Clears the composer for the open conversation and focuses it.
@@ -406,7 +502,7 @@ impl ChatView {
             .chat
             .open_conversation()
             .map(|summary| format!("Message {}", title(summary)));
-        self.composer.update(cx, |composer, cx| {
+        self.inputs().composer.update(cx, |composer, cx| {
             composer.set_value("", window, cx);
             if let Some(placeholder) = placeholder {
                 composer.set_placeholder(placeholder, window, cx);
@@ -570,14 +666,14 @@ impl ChatView {
     /// Opens the new chat picker, empty, with contacts refreshed.
     fn start_new_chat(&mut self, _: &NewChat, window: &mut Window, cx: &mut Context<Self>) {
         self.core.send(self.chat.start_new_chat());
-        Self::ready_query(&self.new_chat, window, cx);
+        Self::ready_query(&self.inputs().new_chat, window, cx);
         cx.notify();
     }
 
     /// Opens the palette, empty.
     fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.chat.open_overlay(Overlay::Palette);
-        Self::ready_query(&self.palette, window, cx);
+        Self::ready_query(&self.inputs().palette, window, cx);
         cx.notify();
     }
 
@@ -585,11 +681,19 @@ impl ChatView {
     fn toggle_palette(&mut self, _: &TogglePalette, window: &mut Window, cx: &mut Context<Self>) {
         self.chat.toggle_palette();
         if self.chat.overlay() == Some(Overlay::Palette) {
-            Self::ready_query(&self.palette, window, cx);
+            Self::ready_query(&self.inputs().palette, window, cx);
         } else {
             self.restore_focus(window, cx);
         }
         cx.notify();
+    }
+
+    /// In compact mode, `Esc` with nothing else to do hides the window.
+    fn hide_window(&mut self, _: &HideWindow, _: &mut Window, cx: &mut Context<Self>) {
+        if self.layout.shows_chat_list() {
+            return cx.propagate();
+        }
+        cx.defer(main_window::hide);
     }
 
     fn open_settings(&mut self, _: &OpenSettings, window: &mut Window, cx: &mut Context<Self>) {
@@ -681,7 +785,8 @@ impl ChatView {
     /// Focuses the composer, or the view without an open chat.
     fn restore_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.chat.open_id().is_some() {
-            self.composer
+            self.inputs()
+                .composer
                 .update(cx, |composer, cx| composer.focus(window, cx));
         } else {
             window.focus(&self.focus, cx);
@@ -808,7 +913,7 @@ impl ChatView {
         } else {
             "No contacts yet; they sync from your phone"
         };
-        self.picker(&self.new_chat, rows, empty, cx)
+        self.picker(&self.inputs().new_chat, rows, empty, cx)
     }
 
     fn render_palette(&self, window: &Window, cx: &mut Context<Self>) -> gpui_kit::Div {
@@ -848,7 +953,7 @@ impl ChatView {
                 .into_any_element()
             })
             .collect();
-        self.picker(&self.palette, rows, "No matches", cx)
+        self.picker(&self.inputs().palette, rows, "No matches", cx)
     }
 
     /// Where settings live until the settings screen arrives.
@@ -899,13 +1004,15 @@ impl ChatView {
         if !self.layout.shows_chat_list() {
             return self.open_palette(window, cx);
         }
-        self.search
+        self.inputs()
+            .search
             .update(cx, |search, cx| search.focus(window, cx));
     }
 
     /// Clears the search and returns to the composer.
     fn dismiss_search(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
-        self.search
+        self.inputs()
+            .search
             .update(cx, |search, cx| search.set_value("", window, cx));
         self.chat.set_search("");
         self.restore_focus(window, cx);
@@ -944,7 +1051,7 @@ impl ChatView {
 
     /// Search shows while hovered, focused or in use.
     pub fn search_visible(&self, window: &Window, cx: &App) -> bool {
-        let search = self.search.read(cx);
+        let search = self.inputs().search.read(cx);
         self.search_hovered
             || !search.value().is_empty()
             || search.focus_handle(cx).is_focused(window)
@@ -952,7 +1059,12 @@ impl ChatView {
 
     fn render_sidebar(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         // While searching, the highlight picks; otherwise it marks the open chat.
-        let searching = self.search.read(cx).focus_handle(cx).is_focused(window);
+        let searching = self
+            .inputs()
+            .search
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window);
         let highlighted = if searching {
             self.chat.search_selected()
         } else {
@@ -1000,7 +1112,7 @@ impl ChatView {
                     .on_action(cx.listener(Self::dismiss_search))
                     .on_action(cx.listener(Self::search_previous))
                     .on_action(cx.listener(Self::search_next))
-                    .child(Input::new(&self.search).small().cleanable(true))
+                    .child(Input::new(&self.inputs().search).small().cleanable(true))
                     .test_support(),
             )
         });
@@ -1253,7 +1365,7 @@ impl ChatView {
                             )
                             .test_support()
                     }))
-                    .child(Textarea::new(&self.composer)),
+                    .child(Textarea::new(&self.inputs().composer)),
             )
             .into_any_element()
     }
@@ -1388,7 +1500,7 @@ impl ChatView {
     }
 
     fn composer_empty(&self, cx: &App) -> bool {
-        self.composer.read(cx).value().trim().is_empty()
+        self.inputs().composer.read(cx).value().trim().is_empty()
     }
 
     /// Loads a message's text for editing.
@@ -1396,7 +1508,7 @@ impl ChatView {
         let Some(text) = text else {
             return;
         };
-        self.composer.update(cx, |composer, cx| {
+        self.inputs().composer.update(cx, |composer, cx| {
             composer.set_value(text, window, cx);
             composer.focus(window, cx);
         });
@@ -1487,7 +1599,8 @@ impl ChatView {
             return cx.propagate();
         }
         if editing && self.chat.compose() == Compose::New {
-            self.composer
+            self.inputs()
+                .composer
                 .update(cx, |composer, cx| composer.set_value("", window, cx));
         }
         cx.notify();
@@ -1498,7 +1611,8 @@ impl ChatView {
             return;
         };
         if self.chat.start_reply(open, id) {
-            self.composer
+            self.inputs()
+                .composer
                 .update(cx, |composer, cx| composer.focus(window, cx));
             cx.notify();
         }
@@ -1908,6 +2022,13 @@ fn truncate(text: &str, max: usize) -> Cow<'_, str> {
 
 impl Render for ChatView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.attach(window, cx);
+        if std::mem::take(&mut self.ready_pending) {
+            self.focus_pending = false;
+            self.ready_composer(window, cx);
+        } else if std::mem::take(&mut self.focus_pending) {
+            self.restore_focus(window, cx);
+        }
         self.sync_actions();
         let overlay = self.render_overlay(window, cx);
         let sidebar = self.render_sidebar_slot(window, cx);
@@ -1918,6 +2039,7 @@ impl Render for ChatView {
             .on_action(cx.listener(Self::start_new_chat))
             .on_action(cx.listener(Self::toggle_palette))
             .on_action(cx.listener(Self::open_settings))
+            .on_action(cx.listener(Self::hide_window))
             .on_action(
                 cx.listener(|view, _: &PreviousChat, window, cx| view.step_chat(-1, window, cx)),
             )

@@ -13,7 +13,7 @@ use serde::{Deserialize, Deserializer};
 mod system;
 
 pub(crate) use system::watch_settings;
-pub use system::{Scheme, follow, init, init_from_window};
+pub use system::{Scheme, follow, follow_system, follow_window};
 
 const DARK: &str = include_str!("../../themes/dark.toml");
 const LIGHT: &str = include_str!("../../themes/light.toml");

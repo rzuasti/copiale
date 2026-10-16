@@ -4,12 +4,14 @@ pub mod chat;
 mod drawer;
 mod fuzzy;
 mod kinetic;
+pub mod main_window;
 pub mod notifier;
 pub mod onboarding;
 mod qr;
 pub mod settings;
 mod shell;
 pub mod theme;
+pub mod tray;
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -17,6 +19,8 @@ use std::rc::Rc;
 pub use copiale_core::APP_ID;
 use copiale_core::config::ConfigFile;
 use copiale_core::{Command, CoreHandle, Events};
+use futures::StreamExt as _;
+use futures::channel::mpsc::UnboundedReceiver;
 use gpui_kit::{
     App, AppContext as _, Bounds, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions,
     actions, px, size,
@@ -24,8 +28,23 @@ use gpui_kit::{
 use notifier::{DesktopNotifier, NoNotifier, Notifier};
 pub use qr::QrMatrix;
 pub use shell::Shell;
+use tray::SystemTray;
 
 actions!(copiale, [Quit]);
+
+/// What another `copiale` process asks of the running one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Request {
+    /// Show the window and focus the composer.
+    Show {
+        activation_token: Option<String>,
+    },
+    /// Show the window, or hide it if focused.
+    Toggle {
+        activation_token: Option<String>,
+    },
+    Quit,
+}
 
 /// Where the UI sends commands: the running core, or a fake in tests.
 pub trait CoreSink {
@@ -57,54 +76,72 @@ impl RunningCore {
 }
 
 /// Runs the UI event loop with the main window open; returns on quit, after
-/// shutting down `core`.
-pub fn run(core: CoreHandle, events: Events) {
+/// shutting down `core`. Closing the window keeps running; `requests` come
+/// from other `copiale` processes.
+pub fn run(core: CoreHandle, events: Events, mut requests: UnboundedReceiver<Request>) {
     let core = Rc::new(RunningCore(RefCell::new(Some(core))));
-    gpui_kit::application()
-        .with_assets(gpui_kit::assets::Assets)
-        .run(move |cx| {
-            init(cx);
-            cx.on_action(|_: &Quit, cx| cx.quit());
-            cx.on_window_closed(|cx, _| {
-                if cx.windows().is_empty() {
-                    cx.quit();
-                }
-            })
-            .detach();
-            cx.on_app_quit({
-                let core = core.clone();
-                move |_| {
-                    core.shutdown();
-                    async {}
-                }
-            })
-            .detach();
-
-            match ConfigFile::platform() {
-                Some(file) => settings::load(file, cx),
-                None => tracing::warn!("no config directory; using default settings"),
+    let app = gpui_kit::application().with_assets(gpui_kit::assets::Assets);
+    // The Dock icon on macOS.
+    app.on_reopen(|cx| main_window::show(None, cx));
+    app.run(move |cx| {
+        init(cx);
+        cx.on_action(|_: &Quit, cx| cx.quit());
+        cx.on_app_quit({
+            let core = core.clone();
+            move |_| {
+                core.shutdown();
+                async {}
             }
-            let (notifier, clicks): (Rc<dyn Notifier>, _) = match DesktopNotifier::new() {
-                Ok((notifier, clicks)) => (Rc::new(notifier), Some(clicks)),
-                Err(error) => {
-                    tracing::warn!(%error, "notifications unavailable");
-                    (Rc::new(NoNotifier), None)
-                }
-            };
-            let sink: Rc<dyn CoreSink> = core;
-            gpui_kit::open_window(main_window_options(cx), cx, |window, cx| {
-                theme::init(window, cx);
-                cx.new(|cx| {
-                    let mut shell = Shell::new(sink, notifier, window, cx);
-                    shell.listen(events, window, cx);
-                    if let Some(clicks) = clicks {
-                        shell.listen_to_notifications(clicks, window, cx);
-                    }
-                    shell
-                })
-            })
-            .expect("open main window");
+        })
+        .detach();
+
+        match ConfigFile::platform() {
+            Some(file) => settings::load(file, cx),
+            None => tracing::warn!("no config directory; using default settings"),
+        }
+        let follows_system = theme::follow_system(cx);
+        let (notifier, clicks): (Rc<dyn Notifier>, _) = match DesktopNotifier::new() {
+            Ok((notifier, clicks)) => (Rc::new(notifier), Some(clicks)),
+            Err(error) => {
+                tracing::warn!(%error, "notifications unavailable");
+                (Rc::new(NoNotifier), None)
+            }
+        };
+        let sink: Rc<dyn CoreSink> = core;
+        let shell = cx.new(|cx| {
+            let mut shell = Shell::new(sink, notifier);
+            shell.listen(events, cx);
+            if let Some(clicks) = clicks {
+                shell.listen_to_notifications(clicks, cx);
+            }
+            shell
         });
+        let options = main_window::Options {
+            switch_displays: cfg!(target_os = "linux"),
+            follow_window_appearance: !follows_system,
+            raise_by_reopening: cx.compositor_name() == "Wayland",
+        };
+        main_window::install(shell, options, cx);
+        match SystemTray::new() {
+            Ok((system_tray, mut actions)) => {
+                tray::install(Rc::new(system_tray), cx);
+                cx.spawn(async move |cx| {
+                    while let Some(action) = actions.next().await {
+                        cx.update(|cx| main_window::handle_tray(action, cx));
+                    }
+                })
+                .detach();
+            }
+            Err(error) => tracing::warn!(%error, "no tray icon"),
+        }
+        main_window::show(None, cx);
+        cx.spawn(async move |cx| {
+            while let Some(request) = requests.next().await {
+                cx.update(|cx| main_window::handle_request(request, cx));
+            }
+        })
+        .detach();
+    });
 }
 
 /// Initializes GPUI Kit and registers key bindings. [`Quit`] is left for

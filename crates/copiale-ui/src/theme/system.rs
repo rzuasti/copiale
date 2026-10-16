@@ -78,18 +78,20 @@ pub(crate) fn watch_settings(cx: &mut App) {
     cx.observe_global::<Settings>(refresh).detach();
 }
 
-/// Follows the system color scheme. On Linux, reads it from the desktop
-/// portal, as GPUI reports no preference as light.
-pub fn init(window: &mut Window, cx: &mut App) {
+/// Follows the system color scheme from the desktop portal on Linux, as
+/// GPUI reports no preference as light; `false` if windows must report it
+/// instead, through [`follow_window`].
+pub fn follow_system(cx: &mut App) -> bool {
     #[cfg(target_os = "linux")]
     if portal::listen(cx) {
-        return;
+        return true;
     }
-    init_from_window(window, cx);
+    let _ = cx;
+    false
 }
 
-/// Follows the system appearance as GPUI reports it.
-pub fn init_from_window(window: &mut Window, cx: &mut App) {
+/// Follows the system appearance as `window` reports it.
+pub fn follow_window(window: &mut Window, cx: &mut App) {
     follow(window.appearance().into(), cx);
     window
         .observe_window_appearance(|window, cx| follow(window.appearance().into(), cx))
