@@ -9,14 +9,6 @@ use crate::fuzzy::fuzzy_match;
 /// Most contacts the picker lists.
 pub const MAX_CANDIDATES: usize = 8;
 
-/// The picker while open.
-#[derive(Debug, Default)]
-pub(super) struct NewChat {
-    pub(super) query: String,
-    /// Index into the candidates.
-    pub(super) selected: usize,
-}
-
 /// A contact as the picker lists it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Candidate<'a> {

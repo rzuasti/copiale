@@ -155,6 +155,28 @@ pub enum Setting {
     NotificationContent(NotificationContent),
 }
 
+impl Config {
+    /// Applies a change as writing it to the file and reloading would.
+    pub fn set(&mut self, setting: &Setting) {
+        match setting.clone() {
+            Setting::Theme(v) => self.appearance.theme = v,
+            Setting::UiFont(font) => self.typography.ui_font = font.filter(|f| !f.is_empty()),
+            Setting::MonoFont(font) => self.typography.mono_font = font.filter(|f| !f.is_empty()),
+            Setting::BodyFont(font) => self.typography.body_font = font.filter(|f| !f.is_empty()),
+            Setting::FontSize(v) => self.typography.size = v,
+            Setting::LineHeight(v) => self.typography.line_height = v,
+            Setting::Density(v) => self.layout.density = v,
+            Setting::MessageStyle(v) => self.layout.message_style = v,
+            Setting::Timestamps(v) => self.layout.timestamps = v,
+            Setting::Clock(v) => self.layout.clock = v,
+            Setting::Avatars(v) => self.layout.avatars = v,
+            Setting::Opacity(v) => self.window.opacity = v,
+            Setting::Blur(v) => self.window.blur = v,
+            Setting::NotificationContent(v) => self.notifications.content = v,
+        }
+    }
+}
+
 impl Setting {
     /// `(table, key)` in the file.
     pub(crate) fn key(&self) -> (&'static str, &'static str) {

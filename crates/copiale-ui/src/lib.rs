@@ -18,11 +18,14 @@ pub use copiale_core::APP_ID;
 use copiale_core::config::ConfigFile;
 use copiale_core::{Command, CoreHandle, Events};
 use gpui_kit::{
-    App, AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size,
+    App, AppContext as _, Bounds, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions,
+    actions, px, size,
 };
 use notifier::{DesktopNotifier, NoNotifier, Notifier};
 pub use qr::QrMatrix;
 pub use shell::Shell;
+
+actions!(copiale, [Quit]);
 
 /// Where the UI sends commands: the running core, or a fake in tests.
 pub trait CoreSink {
@@ -61,6 +64,7 @@ pub fn run(core: CoreHandle, events: Events) {
         .with_assets(gpui_kit::assets::Assets)
         .run(move |cx| {
             init(cx);
+            cx.on_action(|_: &Quit, cx| cx.quit());
             cx.on_window_closed(|cx, _| {
                 if cx.windows().is_empty() {
                     cx.quit();
@@ -103,10 +107,13 @@ pub fn run(core: CoreHandle, events: Events) {
         });
 }
 
-/// Initializes GPUI Kit and registers key bindings.
+/// Initializes GPUI Kit and registers key bindings. [`Quit`] is left for
+/// the caller to handle.
 pub fn init(cx: &mut App) {
     gpui_kit::init(cx);
+    cx.bind_keys([KeyBinding::new("secondary-q", Quit, None)]);
     chat::init(cx);
+    theme::watch_settings(cx);
 }
 
 /// Options for the main window: centered, titled, tagged with [`APP_ID`].

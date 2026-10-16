@@ -1,21 +1,21 @@
 //! Headless tests for the main window shell, with a recording core.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
-use copiale_core::config::{Config, NotificationContent};
+use copiale_core::config::{Config, NotificationContent, ThemeMode};
 use copiale_core::{
     Attachment, BackendError, Command, Contact, Content, ConversationId, ConversationSummary,
     Direction, Event, Expiry, GroupMasterKey, GroupUpdate, Member, Message, MessageBody, MessageId,
     MessageStatus, Peer, Quote, ServiceId, StorageFailure, Timestamp, Unsupported,
 };
-use copiale_ui::chat::{Compose, Notice, NoticeAction, NoticeKey};
+use copiale_ui::chat::{Compose, Notice, NoticeAction, NoticeKey, Overlay};
 use copiale_ui::notifier::Notifier;
 use copiale_ui::onboarding::Screen;
 use copiale_ui::settings::Settings;
 use copiale_ui::theme::{self, ActivePalette as _, Appearance, Scheme, Theme};
-use copiale_ui::{APP_ID, CoreSink, Shell, main_window_options};
+use copiale_ui::{APP_ID, CoreSink, Quit, Shell, main_window_options};
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
@@ -1209,7 +1209,7 @@ fn new_chat_picks_a_contact_from_the_keyboard(cx: &mut TestAppContext) {
     ui.press("down", cx);
     let selected = cx.update(|cx| {
         let chat = ui.shell.read(cx).chat().unwrap().read(cx).chat();
-        chat.new_chat_selected()
+        chat.picker_selected()
     });
     assert_eq!(selected, Some(1));
 
@@ -1314,4 +1314,209 @@ fn notifications_follow_the_settings(cx: &mut TestAppContext) {
     );
     bob_writes(&ui, 21, cx);
     assert!(ui.notifications.take().is_empty());
+}
+
+fn composer_focused(ui: &Ui, cx: &mut TestAppContext) -> bool {
+    cx.update_window(ui.window, |_, window, cx| {
+        let chat = ui.shell.read(cx).chat().unwrap().read(cx);
+        chat.composer().focus_handle(cx).is_focused(window)
+    })
+    .unwrap()
+}
+
+fn overlay(ui: &Ui, cx: &mut TestAppContext) -> Option<Overlay> {
+    cx.update(|cx| ui.shell.read(cx).chat().unwrap().read(cx).chat().overlay())
+}
+
+#[gpui_kit::test]
+fn palette_switches_to_other_chats(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.open_alice(cx);
+
+    ui.press("ctrl-k", cx);
+    assert!(ui.shows("palette", cx));
+    assert!(ui.shows(("palette-entry", 0u64), cx));
+    // Bob is first: the open chat isn't listed.
+    ui.press("enter", cx);
+    assert!(!ui.shows("palette", cx));
+    assert_eq!(open_id(&ui, cx), Some(ConversationId::new(2)));
+    assert!(composer_focused(&ui, cx));
+
+    ui.press("ctrl-k", cx);
+    ui.type_text("ali", cx);
+    ui.frame(cx);
+    assert!(!ui.shows(("palette-entry", 1u64), cx), "only Alice matches");
+    ui.click(("palette-entry", 0u64), cx);
+    assert_eq!(open_id(&ui, cx), Some(ConversationId::new(1)));
+}
+
+#[gpui_kit::test]
+fn palette_toggles_and_closes_on_escape(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.open_alice(cx);
+
+    ui.press("ctrl-k", cx);
+    ui.press("ctrl-k", cx);
+    assert!(!ui.shows("palette", cx));
+    assert!(composer_focused(&ui, cx));
+
+    ui.press("ctrl-k", cx);
+    ui.type_text("zzz", cx);
+    ui.frame(cx);
+    assert!(!ui.shows(("palette-entry", 0u64), cx));
+    ui.press("escape", cx);
+    assert!(!ui.shows("palette", cx));
+    assert!(composer_focused(&ui, cx));
+
+    // Reopens empty.
+    ui.press("ctrl-k", cx);
+    assert!(ui.shows(("palette-entry", 0u64), cx));
+}
+
+#[gpui_kit::test]
+fn palette_runs_commands(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.open_alice(cx);
+
+    ui.press("ctrl-k", cx);
+    ui.type_text("new chat", cx);
+    ui.frame(cx);
+    ui.press("enter", cx);
+    assert_eq!(overlay(&ui, cx), Some(Overlay::NewChat));
+    assert!(ui.shows("new-chat", cx));
+    assert!(matches!(ui.core.take().as_slice(), [Command::LoadContacts]));
+
+    // One overlay at a time.
+    ui.press("ctrl-k", cx);
+    assert!(!ui.shows("new-chat", cx));
+    ui.type_text("settings", cx);
+    ui.frame(cx);
+    ui.press("down", cx);
+    ui.press("up", cx);
+    ui.press("enter", cx);
+    assert_eq!(overlay(&ui, cx), Some(Overlay::Settings));
+}
+
+#[gpui_kit::test]
+fn palette_theme_overrides_the_system(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.open_alice(cx);
+    let pick = |query: &str, cx: &mut TestAppContext| {
+        ui.press("ctrl-k", cx);
+        ui.type_text(query, cx);
+        ui.frame(cx);
+        ui.press("enter", cx);
+    };
+
+    pick("theme dark", cx);
+    let theme = cx.update(|cx| Settings::get(cx).appearance.theme);
+    assert_eq!(theme, ThemeMode::Dark);
+    cx.update(|cx| assert_theme(&Theme::dark(), cx));
+    assert!(composer_focused(&ui, cx));
+
+    // The system no longer decides.
+    cx.update(|cx| theme::follow(Scheme::Light, cx));
+    cx.update(|cx| assert_theme(&Theme::dark(), cx));
+
+    pick("theme system", cx);
+    cx.update(|cx| assert_theme(&Theme::light(), cx));
+}
+
+#[gpui_kit::test]
+fn settings_open_from_the_keyboard_and_close(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.open_alice(cx);
+
+    ui.press("ctrl-,", cx);
+    assert!(ui.shows("settings", cx));
+    assert!(ui.shows("config-path", cx));
+    ui.press("escape", cx);
+    assert!(!ui.shows("settings", cx));
+    assert!(composer_focused(&ui, cx));
+
+    ui.press("ctrl-,", cx);
+    ui.click("close-settings", cx);
+    assert!(!ui.shows("settings", cx));
+}
+
+#[gpui_kit::test]
+fn quit_from_the_keyboard_and_the_palette(cx: &mut TestAppContext) {
+    let quits = Rc::new(Cell::new(0));
+    let ui = Ui::open(cx);
+    cx.update(|cx| {
+        let quits = quits.clone();
+        cx.on_action(move |_: &Quit, _| quits.set(quits.get() + 1));
+    });
+
+    // Anywhere, even before the chats show.
+    ui.press("ctrl-q", cx);
+    assert_eq!(quits.get(), 1);
+
+    ui.event(Event::Ready, cx);
+    ui.event(Event::Conversations(vec![summary(1, "Alice", 0)]), cx);
+    ui.press("ctrl-k", cx);
+    ui.type_text("quit", cx);
+    ui.frame(cx);
+    ui.press("enter", cx);
+    assert_eq!(quits.get(), 2);
+}
+
+#[gpui_kit::test]
+fn alt_arrows_switch_chats(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.open_alice(cx);
+    ui.type_text("draft", cx);
+
+    ui.press("alt-up", cx);
+    assert_eq!(open_id(&ui, cx), Some(ConversationId::new(1)), "first");
+    let draft = cx.update(|cx| {
+        let chat = ui.shell.read(cx).chat().unwrap().read(cx);
+        chat.composer().read(cx).value()
+    });
+    assert_eq!(draft, "draft", "staying keeps the draft");
+
+    ui.press("alt-down", cx);
+    assert_eq!(open_id(&ui, cx), Some(ConversationId::new(2)));
+    assert!(composer_focused(&ui, cx));
+    ui.press("alt-down", cx);
+    assert_eq!(open_id(&ui, cx), Some(ConversationId::new(2)), "last");
+    ui.press("alt-up", cx);
+    assert_eq!(open_id(&ui, cx), Some(ConversationId::new(1)));
+}
+
+#[gpui_kit::test]
+fn search_arrows_pick_a_match(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.open_alice(cx);
+
+    ui.press("ctrl-f", cx);
+    ui.press("down", cx);
+    let highlighted = cx.update(|cx| {
+        let chat = ui.shell.read(cx).chat().unwrap().read(cx);
+        chat.chat().search_selected()
+    });
+    assert_eq!(highlighted, Some(ConversationId::new(2)));
+    ui.press("enter", cx);
+    assert_eq!(open_id(&ui, cx), Some(ConversationId::new(2)));
+    assert!(composer_focused(&ui, cx));
+}
+
+#[gpui_kit::test]
+fn tab_moves_focus_from_the_input_to_the_button(cx: &mut TestAppContext) {
+    let ui = Ui::open(cx);
+    ui.event(
+        Event::Unlinked {
+            device_name: "Copiale on host".into(),
+        },
+        cx,
+    );
+    ui.press("tab", cx);
+    // Typed text no longer reaches the input; Enter presses the button.
+    ui.type_text("x", cx);
+    ui.press("enter", cx);
+    let commands = ui.core.take();
+    assert!(
+        matches!(commands.as_slice(), [Command::Link { device_name }] if device_name == "Copiale on host"),
+        "{commands:?}"
+    );
 }

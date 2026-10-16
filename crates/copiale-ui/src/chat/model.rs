@@ -12,7 +12,8 @@ use copiale_core::{
 };
 
 use super::content::{placeholders, quote_line, system_lines};
-use super::new_chat::{Candidate, NewChat, candidates};
+use super::new_chat::{Candidate, candidates};
+use super::palette::{self, Entry, PaletteAction};
 use super::time::{Clock, countdown, countdown_changes_in};
 
 /// Messages loaded per page.
@@ -109,6 +110,21 @@ pub enum Compose {
     Edit(MessageId),
 }
 
+/// What covers the window, taking the keyboard.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Overlay {
+    NewChat,
+    Palette,
+    Settings,
+}
+
+/// A picker's query and highlighted entry.
+#[derive(Debug, Default)]
+struct Picker {
+    query: String,
+    selected: usize,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Prefix {
     pub sender: String,
@@ -123,6 +139,8 @@ pub struct Chat {
     /// Most recently active first.
     conversations: Vec<ConversationSummary>,
     search: String,
+    /// The search's highlighted match.
+    search_selected: usize,
     open: Option<Log>,
     connection: Connection,
     /// Who is typing where, until when.
@@ -131,7 +149,9 @@ pub struct Chat {
     opened: bool,
     /// Synced contacts, by name.
     contacts: Vec<Contact>,
-    new_chat: Option<NewChat>,
+    overlay: Option<Overlay>,
+    /// The new chat picker's or palette's state.
+    picker: Picker,
     /// Chosen in the picker; opens once its conversation exists.
     pending_peer: Option<ServiceId>,
     /// A conversation for the view to open.
@@ -203,12 +223,14 @@ impl Chat {
             clock,
             conversations: Vec::new(),
             search: String::new(),
+            search_selected: 0,
             open: None,
             connection: Connection::Connecting,
             typing: Vec::new(),
             opened: false,
             contacts: Vec::new(),
-            new_chat: None,
+            overlay: None,
+            picker: Picker::default(),
             pending_peer: None,
             requested_open: None,
         }
@@ -277,6 +299,37 @@ impl Chat {
 
     pub fn set_search(&mut self, search: &str) {
         self.search = search.into();
+        self.search_selected = 0;
+    }
+
+    /// The search's highlighted match: the best one until moved.
+    pub fn search_selected(&self) -> Option<ConversationId> {
+        let count = self.conversations().count();
+        let ix = self.search_selected.min(count.checked_sub(1)?);
+        self.conversations().nth(ix).map(|summary| summary.id)
+    }
+
+    /// Moves the search's highlight, stopping at the ends.
+    pub fn search_step(&mut self, step: isize) {
+        let last = self.conversations().count().saturating_sub(1);
+        self.search_selected = self
+            .search_selected
+            .min(last)
+            .saturating_add_signed(step)
+            .min(last);
+    }
+
+    /// The chat `step` places from the open one in the list, stopping at
+    /// the ends; the first or last one if none is open or listed.
+    pub fn step_chat(&self, step: isize) -> Option<ConversationId> {
+        let ids: Vec<_> = self.conversations().map(|summary| summary.id).collect();
+        let last = ids.len().checked_sub(1)?;
+        let ix = match ids.iter().position(|id| Some(*id) == self.open_id()) {
+            Some(ix) => ix.saturating_add_signed(step).min(last),
+            None if step < 0 => last,
+            None => 0,
+        };
+        Some(ids[ix])
     }
 
     pub fn open_id(&self) -> Option<ConversationId> {
@@ -382,8 +435,8 @@ impl Chat {
             }
             Event::Contacts(contacts) => {
                 self.contacts = contacts.clone();
-                if let Some(new_chat) = &mut self.new_chat {
-                    new_chat.selected = 0;
+                if self.new_chat_open() {
+                    self.picker.selected = 0;
                 }
             }
             Event::Messages {
@@ -475,9 +528,23 @@ impl Chat {
         Some(effects)
     }
 
+    pub fn overlay(&self) -> Option<Overlay> {
+        self.overlay
+    }
+
+    /// Shows `overlay` in place of any other, with an empty query.
+    pub fn open_overlay(&mut self, overlay: Overlay) {
+        self.overlay = Some(overlay);
+        self.picker = Picker::default();
+    }
+
+    pub fn close_overlay(&mut self) {
+        self.overlay = None;
+    }
+
     /// Opens the new chat picker; refreshes contacts.
     pub fn start_new_chat(&mut self) -> Command {
-        self.new_chat = Some(NewChat::default());
+        self.open_overlay(Overlay::NewChat);
         Command::LoadContacts
     }
 
@@ -487,51 +554,52 @@ impl Chat {
     }
 
     pub fn new_chat_open(&self) -> bool {
-        self.new_chat.is_some()
+        self.overlay == Some(Overlay::NewChat)
     }
 
-    pub fn close_new_chat(&mut self) {
-        self.new_chat = None;
-    }
-
-    pub fn set_new_chat_query(&mut self, query: &str) {
-        if let Some(new_chat) = &mut self.new_chat {
-            new_chat.query = query.into();
-            new_chat.selected = 0;
-        }
+    /// Sets the open picker's query, highlighting the best match.
+    pub fn set_picker_query(&mut self, query: &str) {
+        self.picker.query = query.into();
+        self.picker.selected = 0;
     }
 
     /// Contacts matching the picker's query, best first.
     pub fn new_chat_candidates(&self) -> Vec<Candidate<'_>> {
-        let Some(new_chat) = &self.new_chat else {
+        if !self.new_chat_open() {
             return Vec::new();
-        };
-        candidates(&self.contacts, &new_chat.query, |contact| {
+        }
+        candidates(&self.contacts, &self.picker.query, |contact| {
             self.chat_with(contact.id).is_some()
         })
     }
 
-    /// The highlighted candidate's index.
-    pub fn new_chat_selected(&self) -> Option<usize> {
-        self.new_chat.as_ref().map(|new_chat| new_chat.selected)
+    /// The open picker's highlighted entry.
+    pub fn picker_selected(&self) -> Option<usize> {
+        matches!(self.overlay, Some(Overlay::NewChat | Overlay::Palette))
+            .then_some(self.picker.selected)
     }
 
-    /// Moves the highlight, stopping at the ends.
-    pub fn new_chat_step(&mut self, step: isize) {
-        let count = self.new_chat_candidates().len();
-        if let Some(new_chat) = &mut self.new_chat {
-            let last = count.saturating_sub(1);
-            new_chat.selected = new_chat.selected.saturating_add_signed(step).min(last);
-        }
+    /// Moves the open picker's highlight, stopping at the ends.
+    pub fn picker_step(&mut self, step: isize) {
+        let count = match self.overlay {
+            Some(Overlay::NewChat) => self.new_chat_candidates().len(),
+            Some(Overlay::Palette) => self.palette_entries().len(),
+            _ => return,
+        };
+        let last = count.saturating_sub(1);
+        self.picker.selected = self.picker.selected.saturating_add_signed(step).min(last);
     }
 
     /// Picks candidate `ix`, or the highlighted one, and closes the
     /// picker: its chat opens through [`Self::take_requested_open`], once
     /// the core has created it if new.
     pub fn choose_new_chat(&mut self, ix: Option<usize>) -> Option<Command> {
-        let ix = ix.or(self.new_chat_selected())?;
+        if !self.new_chat_open() {
+            return None;
+        }
+        let ix = ix.or(self.picker_selected())?;
         let peer = self.new_chat_candidates().get(ix)?.contact.id;
-        self.new_chat = None;
+        self.overlay = None;
         match self.chat_with(peer) {
             Some(id) => {
                 self.requested_open = Some(id);
@@ -542,6 +610,37 @@ impl Chat {
                 Some(Command::OpenConversation(peer))
             }
         }
+    }
+
+    /// Opens the palette, or closes it if open.
+    pub fn toggle_palette(&mut self) {
+        if self.overlay == Some(Overlay::Palette) {
+            self.overlay = None;
+        } else {
+            self.open_overlay(Overlay::Palette);
+        }
+    }
+
+    /// Chats other than the open one, and commands, matching the palette's
+    /// query, best first.
+    pub fn palette_entries(&self) -> Vec<Entry> {
+        if self.overlay != Some(Overlay::Palette) {
+            return Vec::new();
+        }
+        let chats = self
+            .conversations
+            .iter()
+            .filter(|summary| self.listed(summary) && Some(summary.id) != self.open_id())
+            .map(|summary| (summary.id, title(summary)));
+        palette::entries(chats, &self.picker.query)
+    }
+
+    /// Picks entry `ix`, or the highlighted one, and closes the palette.
+    pub fn choose_palette(&mut self, ix: Option<usize>) -> Option<PaletteAction> {
+        let ix = ix.or(self.picker_selected())?;
+        let action = self.palette_entries().get(ix)?.action;
+        self.overlay = None;
+        Some(action)
     }
 
     /// A conversation the view should open, e.g. one chosen in the picker.
@@ -1942,19 +2041,19 @@ mod tests {
         assert!(alice.existing);
         assert_eq!(alice.detail, Some("+14155550123"));
 
-        chat.set_new_chat_query("bb");
+        chat.set_picker_query("bb");
         let candidates = chat.new_chat_candidates();
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].highlights, [0..1, 4..5]);
         assert!(!candidates[0].existing);
 
         // Numbers match, unhighlighted under a name.
-        chat.set_new_chat_query("0123");
+        chat.set_picker_query("0123");
         let candidates = chat.new_chat_candidates();
         assert_eq!(candidates[0].label, "Alice");
         assert!(candidates[0].highlights.is_empty());
 
-        chat.set_new_chat_query("zz");
+        chat.set_picker_query("zz");
         assert!(chat.new_chat_candidates().is_empty());
         assert!(chat.choose_new_chat(None).is_none());
     }
@@ -1962,16 +2061,16 @@ mod tests {
     #[test]
     fn the_picker_highlight_moves_within_the_list() {
         let mut chat = picking();
-        assert_eq!(chat.new_chat_selected(), Some(0));
-        chat.new_chat_step(-1);
-        assert_eq!(chat.new_chat_selected(), Some(0));
-        chat.new_chat_step(5);
-        assert_eq!(chat.new_chat_selected(), Some(2));
-        chat.set_new_chat_query("b");
-        assert_eq!(chat.new_chat_selected(), Some(0), "a new query starts over");
-        chat.close_new_chat();
+        assert_eq!(chat.picker_selected(), Some(0));
+        chat.picker_step(-1);
+        assert_eq!(chat.picker_selected(), Some(0));
+        chat.picker_step(5);
+        assert_eq!(chat.picker_selected(), Some(2));
+        chat.set_picker_query("b");
+        assert_eq!(chat.picker_selected(), Some(0), "a new query starts over");
+        chat.close_overlay();
         assert!(!chat.new_chat_open());
-        assert_eq!(chat.new_chat_selected(), None);
+        assert_eq!(chat.picker_selected(), None);
     }
 
     #[test]
@@ -1986,7 +2085,7 @@ mod tests {
     #[test]
     fn choosing_a_new_contact_opens_the_chat_once_created() {
         let mut chat = picking();
-        chat.new_chat_step(1);
+        chat.picker_step(1);
         assert!(matches!(
             chat.choose_new_chat(None),
             Some(Command::OpenConversation(id)) if id == peer(3)
@@ -2049,5 +2148,121 @@ mod tests {
         assert!(chat.open_latest(true).is_none());
         let mut empty = super::tests::chat();
         assert!(empty.open_latest(true).is_none(), "no conversations");
+    }
+
+    /// Alice (1), Bob (2) and Carol (3), most recent first.
+    fn three_chats() -> Chat {
+        let mut chat = chat();
+        chat.apply(
+            &Event::Conversations(vec![
+                summary(1, NOW, 0, Some("Alice")),
+                summary(2, NOW - MINUTE, 0, Some("Bob")),
+                summary(3, NOW - 2 * MINUTE, 0, Some("Carol")),
+            ]),
+            true,
+        );
+        chat
+    }
+
+    #[test]
+    fn chats_step_through_the_list_stopping_at_the_ends() {
+        let mut chat = three_chats();
+        let id = ConversationId::new;
+        assert_eq!(chat.step_chat(1), Some(id(1)), "none open: the first");
+        assert_eq!(chat.step_chat(-1), Some(id(3)), "none open: the last");
+
+        chat.open(id(2));
+        assert_eq!(chat.step_chat(1), Some(id(3)));
+        assert_eq!(chat.step_chat(-1), Some(id(1)));
+        chat.open(id(3));
+        assert_eq!(chat.step_chat(1), Some(id(3)));
+
+        // Within the search's matches.
+        chat.set_search("a");
+        assert_eq!(chat.step_chat(-1), Some(id(1)));
+        chat.set_search("zz");
+        assert_eq!(chat.step_chat(1), None);
+    }
+
+    #[test]
+    fn search_highlight_moves_within_the_matches() {
+        let mut chat = three_chats();
+        let id = ConversationId::new;
+        assert_eq!(chat.search_selected(), Some(id(1)));
+        chat.search_step(-1);
+        assert_eq!(chat.search_selected(), Some(id(1)));
+        chat.search_step(5);
+        assert_eq!(chat.search_selected(), Some(id(3)));
+
+        chat.set_search("o");
+        assert_eq!(
+            chat.search_selected(),
+            Some(id(2)),
+            "a new search starts over"
+        );
+        chat.search_step(1);
+        assert_eq!(chat.search_selected(), Some(id(3)));
+        chat.set_search("zz");
+        assert_eq!(chat.search_selected(), None);
+    }
+
+    fn palette_labels(chat: &Chat) -> Vec<String> {
+        chat.palette_entries()
+            .into_iter()
+            .map(|entry| entry.label)
+            .collect()
+    }
+
+    #[test]
+    fn the_palette_lists_other_chats_then_commands() {
+        let mut chat = three_chats();
+        chat.open(ConversationId::new(1));
+        assert!(chat.palette_entries().is_empty(), "closed");
+
+        chat.toggle_palette();
+        assert_eq!(chat.overlay(), Some(Overlay::Palette));
+        assert_eq!(&palette_labels(&chat)[..3], ["Bob", "Carol", "New chat"]);
+        assert_eq!(chat.picker_selected(), Some(0));
+
+        chat.set_picker_query("car");
+        assert_eq!(palette_labels(&chat), ["Carol"]);
+        chat.toggle_palette();
+        assert_eq!(chat.overlay(), None);
+    }
+
+    #[test]
+    fn choosing_in_the_palette_closes_it() {
+        let mut chat = three_chats();
+        chat.open(ConversationId::new(1));
+        chat.toggle_palette();
+        chat.picker_step(1);
+        assert_eq!(
+            chat.choose_palette(None),
+            Some(PaletteAction::Open(ConversationId::new(3)))
+        );
+        assert_eq!(chat.overlay(), None);
+        assert_eq!(chat.choose_palette(None), None, "closed");
+
+        chat.toggle_palette();
+        chat.set_picker_query("quit");
+        chat.picker_step(3);
+        assert_eq!(chat.picker_selected(), Some(0), "stops at the end");
+        assert_eq!(chat.choose_palette(None), Some(PaletteAction::Quit));
+    }
+
+    #[test]
+    fn overlays_replace_each_other() {
+        let mut chat = three_chats();
+        chat.toggle_palette();
+        chat.set_picker_query("x");
+        chat.start_new_chat();
+        assert!(chat.new_chat_open());
+        assert!(chat.palette_entries().is_empty());
+        assert_eq!(chat.picker_selected(), Some(0));
+        chat.open_overlay(Overlay::Settings);
+        assert_eq!(chat.picker_selected(), None);
+        assert!(chat.choose_new_chat(None).is_none());
+        chat.close_overlay();
+        assert_eq!(chat.overlay(), None);
     }
 }

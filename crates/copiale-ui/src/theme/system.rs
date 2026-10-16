@@ -1,8 +1,10 @@
 //! System appearance and fonts.
 
-use gpui_kit::{App, SharedString, Window, WindowAppearance};
+use copiale_core::config::ThemeMode;
+use gpui_kit::{App, Global, SharedString, Window, WindowAppearance};
 
 use super::{Theme, apply};
+use crate::settings::Settings;
 
 /// The system's color scheme preference.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -29,11 +31,51 @@ impl Theme {
             Scheme::Light => Self::light(),
         }
     }
+
+    /// The built-in theme for the `appearance.theme` setting.
+    pub fn for_mode(mode: ThemeMode, scheme: Scheme) -> Self {
+        match mode {
+            ThemeMode::System => Self::for_scheme(scheme),
+            ThemeMode::Dark => Self::dark(),
+            ThemeMode::Light => Self::light(),
+        }
+    }
 }
 
-/// Applies the built-in theme for `scheme`.
+/// The system's scheme as last reported, and what was applied for it.
+struct Followed {
+    scheme: Scheme,
+    applied: Option<(ThemeMode, Scheme)>,
+}
+
+impl Global for Followed {}
+
+/// Notes the system's scheme and applies the theme for it, unless the
+/// settings override it.
 pub fn follow(scheme: Scheme, cx: &mut App) {
-    apply(&Theme::for_scheme(scheme), cx);
+    cx.set_global(Followed {
+        scheme,
+        applied: None,
+    });
+    refresh(cx);
+}
+
+/// Applies the theme for the settings and the system's scheme, if changed.
+fn refresh(cx: &mut App) {
+    let Some(followed) = cx.try_global::<Followed>() else {
+        return;
+    };
+    let wanted = (Settings::get(cx).appearance.theme, followed.scheme);
+    if followed.applied == Some(wanted) {
+        return;
+    }
+    apply(&Theme::for_mode(wanted.0, wanted.1), cx);
+    cx.global_mut::<Followed>().applied = Some(wanted);
+}
+
+/// Reapplies the theme when the settings change it.
+pub(crate) fn watch_settings(cx: &mut App) {
+    cx.observe_global::<Settings>(refresh).detach();
 }
 
 /// Follows the system color scheme. On Linux, reads it from the desktop

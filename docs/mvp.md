@@ -100,10 +100,16 @@ Scope, UI design, architecture and work items for the first usable release.
 
 ### Interaction
 
-- Keyboard-first; mouse fully supported.
+- Keyboard-first; mouse fully supported. `Tab` moves focus in forms, with
+  a visible focus ring.
 - Kinetic scrolling in the log: momentum, rubber band and bounce at the ends
   (native on macOS; off with reduced motion).
-- `Ctrl/⌘+K` command palette: switch chat, new chat, settings, theme, quit.
+- `Ctrl/⌘+K` command palette, over the window like the contact picker:
+  fuzzy search over other chats (most recent first, at most 5) and commands
+  with their keys: new chat, settings, theme (`system`, `dark`, `light`;
+  saved to `config.toml`), quit. `Ctrl/⌘+K` again, `Esc` or a click outside
+  closes it. One overlay shows at a time.
+- In search, `↑`/`↓` move the highlight and `Enter` opens the chat.
 - Other default bindings:
 
   | Key | Action |
@@ -111,7 +117,7 @@ Scope, UI design, architecture and work items for the first usable release.
   | `Ctrl/⌘+N` | New chat |
   | `Ctrl/⌘+F` | Search chats |
   | `Alt+↑/↓` | Previous/next chat |
-  | `Ctrl/⌘+,` | Settings |
+  | `Ctrl/⌘+,` | Settings (until #24: points to `config.toml`) |
   | `Esc` | Close overlay; in compact mode, hide window |
   | `Ctrl/⌘+Q` | Quit |
 

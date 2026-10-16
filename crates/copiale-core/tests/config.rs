@@ -3,7 +3,10 @@
 use std::sync::mpsc;
 use std::time::Duration;
 
-use copiale_core::config::{Config, ConfigFile, Density, Loaded, Setting, ThemeMode};
+use copiale_core::config::{
+    Clock, Config, ConfigFile, Density, Loaded, MessageStyle, NotificationContent, Setting,
+    ThemeMode, TimestampVisibility,
+};
 
 /// Generous: file watching on a loaded machine can be slow.
 const WAIT: Duration = Duration::from_secs(5);
@@ -31,6 +34,36 @@ fn write_creates_file_and_reads_back() {
     assert_eq!(loaded.warnings, vec![]);
     assert_eq!(loaded.config.appearance.theme, ThemeMode::Dark);
     assert_eq!(loaded.config.typography.size, 16);
+}
+
+#[test]
+fn set_matches_writing_and_reloading() {
+    let (_dir, file) = config_file();
+    let settings = [
+        Setting::Theme(ThemeMode::Light),
+        Setting::UiFont(Some("Inter".into())),
+        Setting::MonoFont(Some(String::new())),
+        Setting::BodyFont(None),
+        Setting::FontSize(18),
+        Setting::LineHeight(1.6),
+        Setting::Density(Density::Compact),
+        Setting::MessageStyle(MessageStyle::Bubbles),
+        Setting::Timestamps(TimestampVisibility::Hover),
+        Setting::Clock(Clock::H12),
+        Setting::Avatars(true),
+        Setting::Opacity(0.8),
+        Setting::Blur(true),
+        Setting::NotificationContent(NotificationContent::Message),
+    ];
+
+    file.write(&settings).unwrap();
+
+    let mut expected = Config::default();
+    for setting in &settings {
+        expected.set(setting);
+    }
+    assert_eq!(file.load().config, expected);
+    assert_ne!(expected, Config::default());
 }
 
 #[test]
