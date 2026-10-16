@@ -1357,6 +1357,7 @@ dependencies = [
  "fontconfig",
  "futures",
  "gpui-kit",
+ "notify-rust",
  "qrcode",
  "serde",
  "toml 1.1.8+spec-1.1.0",

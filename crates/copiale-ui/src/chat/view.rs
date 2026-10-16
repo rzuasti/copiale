@@ -24,11 +24,14 @@ use gpui_kit::{
 };
 
 use super::model::{Chat, Compose, Connection, Effects, LogChange, Row, member_list, title};
+use super::notices::Notices;
 use super::text::message_markdown;
 use super::time::Clock;
 use crate::CoreSink;
 use crate::drawer::drawer;
 use crate::kinetic::{self, Kinetic, kinetic};
+use crate::notifier::Notifier;
+use crate::settings::Settings;
 use crate::theme::ActivePalette as _;
 
 /// Load the previous page when the top visible row is this close to the
@@ -108,6 +111,8 @@ const MAX_SENDER_CHARS: usize = 24;
 pub struct ChatView {
     core: Rc<dyn CoreSink>,
     chat: Chat,
+    notices: Notices,
+    notifier: Rc<dyn Notifier>,
     log: ListState,
     kinetic: Kinetic,
     /// Holds focus while no input does, so shortcuts work.
@@ -138,7 +143,12 @@ pub struct ChatView {
 
 impl ChatView {
     /// Asks the core for the chat list.
-    pub fn new(core: Rc<dyn CoreSink>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        core: Rc<dyn CoreSink>,
+        notifier: Rc<dyn Notifier>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
         let composer = cx.new(|cx| {
             TextareaState::new(window, cx)
@@ -150,6 +160,12 @@ impl ChatView {
         let subscriptions = vec![
             cx.subscribe_in(&search, window, Self::on_search_event),
             cx.subscribe_in(&new_chat, window, Self::on_new_chat_event),
+            cx.observe_global::<Settings>(|view, cx| {
+                let content = Settings::get(cx).notifications.content;
+                for action in view.notices.set_content(content) {
+                    view.notifier.apply(action);
+                }
+            }),
             cx.subscribe_in(&composer, window, Self::on_composer_event),
             cx.observe_window_activation(window, |view, window, _| {
                 if window.is_window_active()
@@ -165,6 +181,8 @@ impl ChatView {
         Self {
             core,
             chat: Chat::new(Clock::system()),
+            notices: Notices::new(Settings::get(cx).notifications.content),
+            notifier,
             log: ListState::new(0, ListAlignment::Top, px(1000.)),
             kinetic: Kinetic::default(),
             focus,
@@ -205,6 +223,13 @@ impl ChatView {
         self.run(effects, cx);
         if let Some(id) = self.chat.take_requested_open() {
             self.open(id, window, cx);
+        }
+        let focused = window
+            .is_window_active()
+            .then(|| self.chat.open_id())
+            .flatten();
+        for action in self.notices.apply(event, focused) {
+            self.notifier.apply(action);
         }
         if let Event::Conversations(_) = event
             && let Some(effects) = self.chat.open_latest(window.is_window_active())

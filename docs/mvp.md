@@ -139,6 +139,19 @@ Scope, UI design, architecture and work items for the first usable release.
 - Users bind `--toggle` to a key in their compositor/WM or OS.
 - Notification click opens the window on that chat.
 
+### Notifications
+
+- `notifications.content`: `off`, `name` (default: the chat's name and
+  "New message", or "New message from alice" in groups) or `message` (the
+  text, or its placeholder). Changes apply live.
+- One per chat, updated as messages arrive ("3 new messages"), closed once
+  the chat is read or the message is deleted or disappears.
+- None for the chat open in the focused window, for reactions and system
+  lines, or for messages already read.
+- Messages queued while offline notify once, after the queue drains:
+  "5 new messages in 2 chats".
+- Bodies are escaped: freedesktop servers may read them as markup.
+
 ### Window chrome
 
 - Custom minimal titlebar on macOS, Windows and GNOME-style desktops.
@@ -264,7 +277,10 @@ crates/
 
 - Config file watching: `notify`.
 - Single-instance IPC: Unix socket / named pipe (`interprocess`).
-- Notifications: `notify-rust` (Linux/macOS), WinRT toasts (Windows).
+- Notifications: `notify-rust` on its own thread: the freedesktop D-Bus
+  service (Linux), the notification center (macOS), WinRT toasts
+  (Windows). Replacing and closing work on Linux; macOS and Windows wait
+  for their checks (#28).
 - Logging (`copiale_core::logging`): `tracing` to stderr only, never to
   disk.
   - `COPIALE_LOG` sets the filter; default `info` for Copiale, `warn` for

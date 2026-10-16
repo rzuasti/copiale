@@ -4,8 +4,10 @@ pub mod chat;
 mod drawer;
 mod fuzzy;
 mod kinetic;
+pub mod notifier;
 pub mod onboarding;
 mod qr;
+pub mod settings;
 mod shell;
 pub mod theme;
 
@@ -13,10 +15,12 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 pub use copiale_core::APP_ID;
+use copiale_core::config::ConfigFile;
 use copiale_core::{Command, CoreHandle, Events};
 use gpui_kit::{
     App, AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size,
 };
+use notifier::{DesktopNotifier, NoNotifier, Notifier};
 pub use qr::QrMatrix;
 pub use shell::Shell;
 
@@ -72,12 +76,26 @@ pub fn run(core: CoreHandle, events: Events) {
             })
             .detach();
 
+            match ConfigFile::platform() {
+                Some(file) => settings::load(file, cx),
+                None => tracing::warn!("no config directory; using default settings"),
+            }
+            let (notifier, clicks): (Rc<dyn Notifier>, _) = match DesktopNotifier::new() {
+                Ok((notifier, clicks)) => (Rc::new(notifier), Some(clicks)),
+                Err(error) => {
+                    tracing::warn!(%error, "notifications unavailable");
+                    (Rc::new(NoNotifier), None)
+                }
+            };
             let sink: Rc<dyn CoreSink> = core;
             gpui_kit::open_window(main_window_options(cx), cx, |window, cx| {
                 theme::init(window, cx);
                 cx.new(|cx| {
-                    let mut shell = Shell::new(sink, window, cx);
+                    let mut shell = Shell::new(sink, notifier, window, cx);
                     shell.listen(events, window, cx);
+                    if let Some(clicks) = clicks {
+                        shell.listen_to_notifications(clicks, window, cx);
+                    }
                     shell
                 })
             })

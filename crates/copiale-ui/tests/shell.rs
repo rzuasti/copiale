@@ -4,13 +4,16 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
 
+use copiale_core::config::{Config, NotificationContent};
 use copiale_core::{
     Attachment, BackendError, Command, Contact, Content, ConversationId, ConversationSummary,
     Direction, Event, Expiry, GroupMasterKey, GroupUpdate, Member, Message, MessageBody, MessageId,
     MessageStatus, Peer, Quote, ServiceId, StorageFailure, Timestamp, Unsupported,
 };
-use copiale_ui::chat::Compose;
+use copiale_ui::chat::{Compose, Notice, NoticeAction, NoticeKey};
+use copiale_ui::notifier::Notifier;
 use copiale_ui::onboarding::Screen;
+use copiale_ui::settings::Settings;
 use copiale_ui::theme::{self, ActivePalette as _, Appearance, Scheme, Theme};
 use copiale_ui::{APP_ID, CoreSink, Shell, main_window_options};
 use gpui_kit::component::ActiveTheme as _;
@@ -38,22 +41,40 @@ impl Recorder {
     }
 }
 
+#[derive(Default)]
+struct Notifications(RefCell<Vec<NoticeAction>>);
+
+impl Notifier for Notifications {
+    fn apply(&self, action: NoticeAction) {
+        self.0.borrow_mut().push(action);
+    }
+}
+
+impl Notifications {
+    fn take(&self) -> Vec<NoticeAction> {
+        std::mem::take(&mut self.0.borrow_mut())
+    }
+}
+
 struct Ui {
     window: AnyWindowHandle,
     shell: Entity<Shell>,
     core: Rc<Recorder>,
+    notifications: Rc<Notifications>,
 }
 
 impl Ui {
     fn open(cx: &mut TestAppContext) -> Self {
         cx.update(copiale_ui::init);
         let core = Rc::new(Recorder::default());
+        let notifications = Rc::new(Notifications::default());
         let sink: Rc<dyn CoreSink> = core.clone();
+        let notifier: Rc<dyn Notifier> = notifications.clone();
         let (window, shell) = cx
             .update(|cx| {
                 gpui_kit::open_window(main_window_options(cx), cx, |window, cx| {
                     theme::init_from_window(window, cx);
-                    cx.new(|cx| Shell::new(sink, window, cx))
+                    cx.new(|cx| Shell::new(sink, notifier, window, cx))
                 })
             })
             .expect("open main window");
@@ -61,6 +82,7 @@ impl Ui {
             window,
             shell,
             core,
+            notifications,
         };
         ui.frame(cx);
         ui
@@ -1238,4 +1260,58 @@ fn new_chat_reuses_existing_chats_and_closes_on_escape(cx: &mut TestAppContext) 
         ui.core.take().as_slice(),
         [Command::LoadMessages { conversation, .. }] if *conversation == ConversationId::new(2)
     ));
+}
+
+fn bob_writes(ui: &Ui, id: i64, cx: &mut TestAppContext) {
+    let message = Message {
+        conversation: ConversationId::new(2),
+        sender: Some(peer(2)),
+        read: false,
+        ..message(id, Direction::Incoming, None)
+    };
+    ui.event(Event::MessageAdded(message), cx);
+    ui.event(Event::ConversationUpdated(summary(2, "Bob", 1)), cx);
+}
+
+#[gpui_kit::test]
+fn messages_in_unfocused_chats_notify_and_clicks_open_them(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+
+    bob_writes(&ui, 20, cx);
+    assert_eq!(
+        ui.notifications.take(),
+        [NoticeAction::Show(Notice {
+            key: NoticeKey::Chat(ConversationId::new(2)),
+            title: "Bob".into(),
+            body: "New message".into(),
+        })]
+    );
+
+    cx.update_window(ui.window, |_, window, cx| {
+        ui.shell.update(cx, |shell, cx| {
+            shell.notification_clicked(NoticeKey::Chat(ConversationId::new(2)), window, cx)
+        })
+    })
+    .unwrap();
+    assert_eq!(open_id(&ui, cx), Some(ConversationId::new(2)));
+}
+
+#[gpui_kit::test]
+fn notifications_follow_the_settings(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    bob_writes(&ui, 20, cx);
+    ui.notifications.take();
+
+    let mut config = Config::default();
+    config.notifications.content = NotificationContent::Off;
+    cx.update(|cx| cx.set_global(Settings(config)));
+    assert_eq!(
+        ui.notifications.take(),
+        [
+            NoticeAction::Close(NoticeKey::Chat(ConversationId::new(2))),
+            NoticeAction::Close(NoticeKey::Backlog),
+        ]
+    );
+    bob_writes(&ui, 21, cx);
+    assert!(ui.notifications.take().is_empty());
 }

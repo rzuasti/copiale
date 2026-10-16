@@ -1,6 +1,8 @@
 use std::rc::Rc;
 
 use copiale_core::{Event, Events};
+use futures::StreamExt as _;
+use futures::channel::mpsc::UnboundedReceiver;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::{Disableable as _, v_flex};
@@ -10,7 +12,8 @@ use gpui_kit::{
 };
 
 use crate::CoreSink;
-use crate::chat::ChatView;
+use crate::chat::{ChatView, NoticeKey};
+use crate::notifier::Notifier;
 use crate::onboarding::{Onboarding, Screen, describe};
 use crate::qr::{QrMatrix, qr_code};
 use crate::theme::ActivePalette as _;
@@ -19,6 +22,7 @@ use crate::theme::ActivePalette as _;
 /// the chats.
 pub struct Shell {
     core: Rc<dyn CoreSink>,
+    notifier: Rc<dyn Notifier>,
     onboarding: Onboarding,
     chat: Option<Entity<ChatView>>,
     passphrase: Entity<InputState>,
@@ -28,10 +32,16 @@ pub struct Shell {
     qr: Option<(String, Option<QrMatrix>)>,
     _subscriptions: Vec<Subscription>,
     _events: Option<Task<()>>,
+    _clicks: Option<Task<()>>,
 }
 
 impl Shell {
-    pub fn new(core: Rc<dyn CoreSink>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        core: Rc<dyn CoreSink>,
+        notifier: Rc<dyn Notifier>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let passphrase = cx.new(|cx| {
             InputState::new(window, cx)
                 .masked(true)
@@ -61,6 +71,7 @@ impl Shell {
         ];
         Self {
             core,
+            notifier,
             onboarding: Onboarding::default(),
             chat: None,
             passphrase,
@@ -69,6 +80,7 @@ impl Shell {
             qr: None,
             _subscriptions: subscriptions,
             _events: None,
+            _clicks: None,
         }
     }
 
@@ -84,6 +96,37 @@ impl Shell {
                 }
             }
         }));
+    }
+
+    /// Raises the window on clicked notifications, on their chat.
+    pub fn listen_to_notifications(
+        &mut self,
+        mut clicks: UnboundedReceiver<NoticeKey>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self._clicks = Some(cx.spawn_in(window, async move |this, cx| {
+            while let Some(key) = clicks.next().await {
+                let applied = this.update_in(cx, |shell, window, cx| {
+                    shell.notification_clicked(key, window, cx)
+                });
+                if applied.is_err() {
+                    break;
+                }
+            }
+        }));
+    }
+
+    pub fn notification_clicked(
+        &mut self,
+        key: NoticeKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.activate_window();
+        if let (NoticeKey::Chat(id), Some(chat)) = (key, &self.chat) {
+            chat.update(cx, |chat, cx| chat.open(id, window, cx));
+        }
     }
 
     pub fn on_event(&mut self, event: &Event, window: &mut Window, cx: &mut Context<Self>) {
@@ -108,10 +151,10 @@ impl Shell {
                 self.qr = Some((url.clone(), QrMatrix::encode(url)));
             }
             Screen::Ready => {
-                let core = self.core.clone();
+                let (core, notifier) = (self.core.clone(), self.notifier.clone());
                 let chat = self
                     .chat
-                    .get_or_insert_with(|| cx.new(|cx| ChatView::new(core, window, cx)))
+                    .get_or_insert_with(|| cx.new(|cx| ChatView::new(core, notifier, window, cx)))
                     .clone();
                 chat.update(cx, |chat, cx| chat.on_event(event, window, cx));
             }

@@ -342,13 +342,8 @@ impl Chat {
     /// An incoming message's author as the open conversation knows them.
     fn author_name(&self, author: ServiceId) -> String {
         match self.open_conversation() {
-            Some(
-                summary @ ConversationSummary {
-                    peer: Peer::Contact(_),
-                    ..
-                },
-            ) => title(summary),
-            _ => self.member_name(author),
+            Some(summary) => sender_name(summary, author),
+            None => unknown(author),
         }
     }
 
@@ -1007,6 +1002,20 @@ pub fn title(summary: &ConversationSummary) -> String {
         Peer::Contact(peer) => unknown(peer),
         Peer::Group(_) => "Unknown group".into(),
     })
+}
+
+/// An incoming message's author as `summary` knows them: the contact, or
+/// the group member.
+pub fn sender_name(summary: &ConversationSummary, author: ServiceId) -> String {
+    match summary.peer {
+        Peer::Contact(_) => title(summary),
+        Peer::Group(_) => summary
+            .members
+            .iter()
+            .find(|member| member.id == author)
+            .and_then(|member| member.name.clone())
+            .unwrap_or_else(|| unknown(author)),
+    }
 }
 
 /// A group's members as the header lists them: the first few names and a

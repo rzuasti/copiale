@@ -28,6 +28,7 @@ gpui-kit = "=0.7.3"
 keyring = "4.2"
 log = "0.4"
 notify = "8"
+notify-rust = "4.18"
 # Not on crates.io; upgrade deliberately.
 presage = { git = "https://github.com/whisperfish/presage", rev = "94b3978f5456469cfd4d9f72351a5eff93715f81" }
 presage-store-sqlite = { git = "https://github.com/whisperfish/presage", rev = "94b3978f5456469cfd4d9f72351a5eff93715f81" }
