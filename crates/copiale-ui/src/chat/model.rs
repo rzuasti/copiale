@@ -292,6 +292,16 @@ impl Chat {
         })
     }
 
+    /// Listed chats with unread messages, other than the open one.
+    pub fn unread_elsewhere(&self) -> usize {
+        self.conversations
+            .iter()
+            .filter(|summary| {
+                summary.unread > 0 && self.listed(summary) && Some(summary.id) != self.open_id()
+            })
+            .count()
+    }
+
     /// Chats without messages are listed only while open.
     fn listed(&self, summary: &ConversationSummary) -> bool {
         summary.last_activity.is_some() || self.open_id() == Some(summary.id)
@@ -2264,5 +2274,20 @@ mod tests {
         assert!(chat.choose_new_chat(None).is_none());
         chat.close_overlay();
         assert_eq!(chat.overlay(), None);
+    }
+
+    #[test]
+    fn counts_unread_chats_other_than_the_open_one() {
+        let mut chat = three_chats();
+        assert_eq!(chat.unread_elsewhere(), 0);
+        for (id, unread) in [(1, 2), (2, 1)] {
+            chat.apply(
+                &Event::ConversationUpdated(summary(id, NOW, unread, None)),
+                true,
+            );
+        }
+        assert_eq!(chat.unread_elsewhere(), 2);
+        chat.open(ConversationId::new(1));
+        assert_eq!(chat.unread_elsewhere(), 1);
     }
 }

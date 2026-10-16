@@ -109,4 +109,5 @@ M0 (foundations) and M1 (walking skeleton, #7–#11) done. M2: group text
 indicators (#14), incoming edits, deletes and quoted replies (#15), sending
 them (#16), disappearing message timers (#17), new 1:1 chats from contacts
 (#18), and notifications (#19) done: M2 complete. M3: command palette and
-keyboard navigation (#20) done. Next: adaptive compact layout (#21).
+keyboard navigation (#20) and adaptive compact layout (#21) done. Next:
+single instance, background running, `--toggle`/`--quit` (#22).

@@ -26,6 +26,7 @@ use gpui_kit::{
     canvas, div, font, list, point, px, relative, rems,
 };
 
+use super::layout::Layout;
 use super::model::{
     Chat, Compose, Connection, Effects, LogChange, Overlay, Row, member_list, title,
 };
@@ -55,6 +56,10 @@ const LOG_PADDING: Pixels = px(8.);
 const SEARCH_STRIP: Pixels = px(12.);
 /// How long search takes to slide in or out.
 const SEARCH_SLIDE: Duration = Duration::from_millis(260);
+
+const SIDEBAR_WIDTH: Pixels = px(260.);
+/// How long the chat list takes to slide in or out between layouts.
+const SIDEBAR_SLIDE: Duration = Duration::from_millis(220);
 
 const CONTEXT: &str = "ChatView";
 
@@ -152,6 +157,9 @@ pub struct ChatView {
     palette: Entity<InputState>,
     /// Holds focus while an overlay without an input is open.
     overlay_focus: FocusHandle,
+    layout: Layout,
+    /// A frame has been drawn, so layout changes animate.
+    drawn: bool,
     /// Redraws the reconnect countdown.
     countdown: Option<Task<()>>,
     /// Redraws when a typing indicator expires.
@@ -197,6 +205,7 @@ impl ChatView {
                 }
             }),
             cx.subscribe_in(&composer, window, Self::on_composer_event),
+            cx.observe_window_bounds(window, |view, window, cx| view.resized(window, cx)),
             cx.observe_window_activation(window, |view, window, _| {
                 if window.is_window_active()
                     && let Some(command) = view.chat.activated()
@@ -223,6 +232,8 @@ impl ChatView {
             new_chat,
             palette,
             overlay_focus: cx.focus_handle(),
+            layout: layout_for(window),
+            drawn: false,
             countdown: None,
             typing_expiry: None,
             timers: None,
@@ -248,6 +259,31 @@ impl ChatView {
 
     pub fn log(&self) -> &ListState {
         &self.log
+    }
+
+    pub fn layout(&self) -> Layout {
+        self.layout
+    }
+
+    /// Switches layout at the breakpoint; going compact drops the hidden
+    /// search.
+    fn resized(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let layout = layout_for(window);
+        if layout == self.layout {
+            return;
+        }
+        self.layout = layout;
+        if !layout.shows_chat_list() {
+            let focused = self.search.read(cx).focus_handle(cx).is_focused(window);
+            self.search
+                .update(cx, |search, cx| search.set_value("", window, cx));
+            self.chat.set_search("");
+            self.search_hovered = false;
+            if focused {
+                self.restore_focus(window, cx);
+            }
+        }
+        cx.notify();
     }
 
     pub fn on_event(&mut self, event: &Event, window: &mut Window, cx: &mut Context<Self>) {
@@ -535,6 +571,13 @@ impl ChatView {
     fn start_new_chat(&mut self, _: &NewChat, window: &mut Window, cx: &mut Context<Self>) {
         self.core.send(self.chat.start_new_chat());
         Self::ready_query(&self.new_chat, window, cx);
+        cx.notify();
+    }
+
+    /// Opens the palette, empty.
+    fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.chat.open_overlay(Overlay::Palette);
+        Self::ready_query(&self.palette, window, cx);
         cx.notify();
     }
 
@@ -851,7 +894,11 @@ impl ChatView {
             )
     }
 
+    /// Focuses search; the palette stands in while the chat list is hidden.
     fn focus_search(&mut self, _: &FocusSearch, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.layout.shows_chat_list() {
+            return self.open_palette(window, cx);
+        }
         self.search
             .update(cx, |search, cx| search.focus(window, cx));
     }
@@ -962,7 +1009,7 @@ impl ChatView {
         v_flex()
             .id("sidebar")
             .relative()
-            .w(px(260.))
+            .w(SIDEBAR_WIDTH)
             .h_full()
             .flex_shrink_0()
             .bg(cx.palette().sidebar)
@@ -1049,12 +1096,17 @@ impl ChatView {
             .into_any_element()
     }
 
-    fn render_status(&self, cx: &mut Context<Self>) -> AnyElement {
-        let (dot, color) = match self.chat.connection() {
+    /// The connection's dot and its color.
+    fn status_dot(&self, cx: &App) -> (&'static str, Hsla) {
+        match self.chat.connection() {
             Connection::Connecting | Connection::Syncing => ("○", cx.palette().text_muted),
             Connection::Online => ("●", cx.palette().success),
             Connection::Offline { .. } => ("●", cx.palette().danger),
-        };
+        }
+    }
+
+    fn render_status(&self, cx: &mut Context<Self>) -> AnyElement {
+        let (dot, color) = self.status_dot(cx);
         let text = self.chat.connection_label(self.chat.clock().now());
         let offline = matches!(self.chat.connection(), Connection::Offline { .. });
         h_flex()
@@ -1077,12 +1129,18 @@ impl ChatView {
             .into_any_element()
     }
 
-    fn render_conversation_pane(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_conversation_pane(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let compact = !self.layout.shows_chat_list();
         let Some(summary) = self.chat.open_conversation() else {
-            let text = if self.chat.has_conversations() {
-                "Select a chat"
+            let text: SharedString = if !self.chat.has_conversations() {
+                "Messages you receive will appear here".into()
+            } else if compact {
+                match key_hint(&TogglePalette, window) {
+                    Some(key) => format!("{key} to pick a chat").into(),
+                    None => "Pick a chat from the palette".into(),
+                }
             } else {
-                "Messages you receive will appear here"
+                "Select a chat".into()
             };
             return div()
                 .size_full()
@@ -1118,7 +1176,12 @@ impl ChatView {
                     .text_color(cx.palette().text_muted)
                     .child(members)
                     .test_support()
-            }));
+            }))
+            .when(compact, |header| {
+                header
+                    .child(div().flex_1())
+                    .children(self.render_compact_status(cx))
+            });
 
         if self.log.logical_scroll_top().item_ix < LOAD_OLDER_WITHIN {
             let command = self.chat.load_older();
@@ -1193,6 +1256,91 @@ impl ChatView {
                     .child(Textarea::new(&self.composer)),
             )
             .into_any_element()
+    }
+
+    /// In compact mode, the header stands in for the chat list: unread
+    /// chats elsewhere, and the connection unless online.
+    fn render_compact_status(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let palette = cx.palette();
+        let mut items = Vec::new();
+        if !matches!(self.chat.connection(), Connection::Online) {
+            let (dot, color) = self.status_dot(cx);
+            let offline = matches!(self.chat.connection(), Connection::Offline { .. });
+            items.push(
+                h_flex()
+                    .id("header-connection")
+                    .flex_none()
+                    .ml_3()
+                    .gap_1()
+                    .text_xs()
+                    .text_color(palette.text_muted)
+                    .child(div().text_color(color).child(dot))
+                    .child(self.chat.connection_label(self.chat.clock().now()))
+                    .when(offline, |this| {
+                        this.cursor_pointer().on_click(
+                            cx.listener(|view, _, _, _| view.core.send(Command::Reconnect)),
+                        )
+                    })
+                    .test_support()
+                    .into_any_element(),
+            );
+        }
+        let unread = self.chat.unread_elsewhere();
+        if unread > 0 {
+            items.push(
+                div()
+                    .id("unread-elsewhere")
+                    .flex_none()
+                    .ml_3()
+                    .text_xs()
+                    .text_color(palette.accent)
+                    .cursor_pointer()
+                    .child(format!("● {unread}"))
+                    .on_click(cx.listener(|view, _, window, cx| view.open_palette(window, cx)))
+                    .test_support()
+                    .into_any_element(),
+            );
+        }
+        items
+    }
+
+    /// The chat list, sliding out to the left as the window narrows.
+    fn render_sidebar_slot(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        // The first frame shows the layout as is.
+        let slide = if self.drawn {
+            SIDEBAR_SLIDE
+        } else {
+            Duration::ZERO
+        };
+        self.drawn = true;
+        let presence = Presence::new("sidebar-slide", self.layout.shows_chat_list())
+            .transition(Transition::new(slide).easing(drawer_easing()))
+            .sample(window, cx);
+        if !presence.should_render() {
+            return None;
+        }
+        let shown = SIDEBAR_WIDTH * presence.progress;
+        Some(
+            div()
+                .id("sidebar-slot")
+                .flex_none()
+                .h_full()
+                .w(shown)
+                .overflow_hidden()
+                .child(
+                    div()
+                        .h_full()
+                        .w(SIDEBAR_WIDTH)
+                        .ml(shown - SIDEBAR_WIDTH)
+                        .child(self.render_sidebar(window, cx)),
+                )
+                .test_support()
+                .into_any_element(),
+        )
     }
 
     fn hover_row(&mut self, id: MessageId, hovered: bool, cx: &mut Context<Self>) {
@@ -1738,6 +1886,10 @@ fn key_hint(action: &dyn Action, window: &Window) -> Option<SharedString> {
     Some(Kbd::format(key.as_keystroke()).into())
 }
 
+fn layout_for(window: &Window) -> Layout {
+    Layout::for_width(f32::from(window.viewport_size().width))
+}
+
 /// Fast start, long gentle settle, like iOS sheets.
 fn drawer_easing() -> Easing {
     Easing::cubic_bezier(0.32, 0.72, 0., 1.).expect("valid curve")
@@ -1758,6 +1910,7 @@ impl Render for ChatView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_actions();
         let overlay = self.render_overlay(window, cx);
+        let sidebar = self.render_sidebar_slot(window, cx);
         h_flex()
             .key_context(CONTEXT)
             .track_focus(&self.focus)
@@ -1774,13 +1927,13 @@ impl Render for ChatView {
             .items_stretch()
             .bg(cx.palette().background)
             .text_color(cx.palette().text)
-            .child(self.render_sidebar(window, cx))
+            .children(sidebar)
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .h_full()
-                    .child(self.render_conversation_pane(cx)),
+                    .child(self.render_conversation_pane(window, cx)),
             )
             .children(overlay)
     }

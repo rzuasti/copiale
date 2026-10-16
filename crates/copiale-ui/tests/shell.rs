@@ -10,7 +10,7 @@ use copiale_core::{
     Direction, Event, Expiry, GroupMasterKey, GroupUpdate, Member, Message, MessageBody, MessageId,
     MessageStatus, Peer, Quote, ServiceId, StorageFailure, Timestamp, Unsupported,
 };
-use copiale_ui::chat::{Compose, Notice, NoticeAction, NoticeKey, Overlay};
+use copiale_ui::chat::{COMPACT_BELOW, Compose, Layout, Notice, NoticeAction, NoticeKey, Overlay};
 use copiale_ui::notifier::Notifier;
 use copiale_ui::onboarding::Screen;
 use copiale_ui::settings::Settings;
@@ -20,7 +20,7 @@ use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
     AnyWindowHandle, App, AppContext as _, Entity, Focusable as _, Hsla, InputEvent as _,
-    MouseMoveEvent, Pixels, Point, Rgba, ScrollDelta, TestAppContext, point, px,
+    MouseMoveEvent, Pixels, Point, Rgba, ScrollDelta, TestAppContext, point, px, size,
 };
 use uuid::Uuid;
 
@@ -1519,4 +1519,188 @@ fn tab_moves_focus_from_the_input_to_the_button(cx: &mut TestAppContext) {
         matches!(commands.as_slice(), [Command::Link { device_name }] if device_name == "Copiale on host"),
         "{commands:?}"
     );
+}
+
+fn resize(ui: &Ui, width: f32, cx: &mut TestAppContext) {
+    cx.simulate_window_resize(ui.window, size(px(width), px(720.)));
+    ui.frame(cx);
+}
+
+fn layout(ui: &Ui, cx: &mut TestAppContext) -> Layout {
+    cx.update(|cx| ui.shell.read(cx).chat().unwrap().read(cx).layout())
+}
+
+#[gpui_kit::test]
+fn narrow_windows_hide_the_chat_list(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.open_alice(cx);
+    assert_eq!(layout(&ui, cx), Layout::Full);
+
+    resize(&ui, COMPACT_BELOW - 1., cx);
+    assert_eq!(layout(&ui, cx), Layout::Compact);
+    ui.settle(cx);
+    assert!(!ui.shows("sidebar", cx));
+    assert!(ui.shows("log", cx));
+
+    resize(&ui, COMPACT_BELOW, cx);
+    assert_eq!(layout(&ui, cx), Layout::Full);
+    ui.settle(cx);
+    assert!(ui.shows("sidebar", cx));
+}
+
+#[gpui_kit::test]
+fn the_chat_list_slides_out(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.open_alice(cx);
+    let width = |cx: &mut TestAppContext| {
+        cx.update_window(ui.window, |_, window, _| {
+            window
+                .try_find("sidebar-slot")
+                .map_or(px(0.), |slot| slot.bounds().size.width)
+        })
+        .unwrap()
+    };
+    assert_eq!(width(cx), px(260.), "no slide at start");
+
+    resize(&ui, 500., cx);
+    let mut widths = Vec::new();
+    for _ in 0..20 {
+        cx.executor().advance_clock(Duration::from_millis(16));
+        ui.frame(cx);
+        widths.push(width(cx));
+    }
+    assert!(widths[0] > px(0.) && widths[0] < px(260.), "{widths:?}");
+    assert_eq!(*widths.last().unwrap(), px(0.), "{widths:?}");
+    assert!(
+        widths.windows(2).all(|pair| pair[0] >= pair[1]),
+        "{widths:?}"
+    );
+}
+
+fn long_messages(ui: &Ui, cx: &mut TestAppContext) {
+    ui.event(
+        Event::Messages {
+            conversation: ConversationId::new(1),
+            before: None,
+            messages: (1..=60)
+                .map(|id| Message {
+                    content: Content::text(format!("{id} {}", "words that wrap ".repeat(12))),
+                    ..message(id, Direction::Incoming, None)
+                })
+                .collect(),
+        },
+        cx,
+    );
+    for _ in 0..5 {
+        ui.frame(cx);
+    }
+}
+
+#[gpui_kit::test]
+fn the_log_keeps_its_place_across_layouts(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.click(("conversation", 1u64), cx);
+    long_messages(&ui, cx);
+    let log_bottom = |cx: &mut TestAppContext| {
+        cx.update_window(ui.window, |_, window, _| {
+            window.find("log").bounds().bottom()
+        })
+        .unwrap()
+    };
+    let newest_bottom = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            let chat = ui.shell.read(cx).chat().unwrap().read(cx);
+            chat.log().bounds_for_item(59).map(|bounds| bounds.bottom())
+        })
+    };
+
+    // At the end, the newest message stays at the bottom throughout.
+    let mut gaps = vec![log_bottom(cx) - newest_bottom(cx).unwrap()];
+    resize(&ui, 500., cx);
+    for _ in 0..20 {
+        cx.executor().advance_clock(Duration::from_millis(16));
+        ui.frame(cx);
+        gaps.push(log_bottom(cx) - newest_bottom(cx).expect("newest in view"));
+    }
+    assert!(
+        gaps.iter().all(|gap| *gap == gaps[0]),
+        "newest message moved: {gaps:?}"
+    );
+
+    // Scrolled well up, the top message stays the top one.
+    cx.update_window(ui.window, |_, window, cx| {
+        window.scroll("log", ScrollDelta::Lines(point(0., 150.)), cx);
+    })
+    .unwrap();
+    ui.settle(cx);
+    let following = cx.update(|cx| {
+        let chat = ui.shell.read(cx).chat().unwrap().read(cx);
+        chat.log().is_following_tail()
+    });
+    assert!(!following);
+    let top = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            let chat = ui.shell.read(cx).chat().unwrap().read(cx);
+            chat.log().logical_scroll_top().item_ix
+        })
+    };
+    let before = top(cx);
+    resize(&ui, 1000., cx);
+    for _ in 0..20 {
+        cx.executor().advance_clock(Duration::from_millis(16));
+        ui.frame(cx);
+        assert_eq!(top(cx), before);
+    }
+}
+
+#[gpui_kit::test]
+fn compact_mode_switches_chats_through_the_palette(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.open_alice(cx);
+    resize(&ui, 500., cx);
+
+    ui.press("ctrl-f", cx);
+    assert_eq!(overlay(&ui, cx), Some(Overlay::Palette));
+    ui.press("enter", cx);
+    assert_eq!(open_id(&ui, cx), Some(ConversationId::new(2)));
+    assert!(composer_focused(&ui, cx));
+
+    ui.press("alt-up", cx);
+    assert_eq!(open_id(&ui, cx), Some(ConversationId::new(1)));
+}
+
+#[gpui_kit::test]
+fn compact_header_shows_unread_chats_and_the_connection(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.open_alice(cx);
+    assert!(!ui.shows("header-connection", cx), "full: in the sidebar");
+    resize(&ui, 500., cx);
+
+    assert!(ui.shows("header-connection", cx), "connecting");
+    ui.event(Event::Connected, cx);
+    ui.event(Event::Synced, cx);
+    assert!(!ui.shows("header-connection", cx), "online");
+
+    assert!(!ui.shows("unread-elsewhere", cx));
+    ui.event(Event::ConversationUpdated(summary(2, "Bob", 1)), cx);
+    assert!(ui.shows("unread-elsewhere", cx));
+    ui.click("unread-elsewhere", cx);
+    assert_eq!(overlay(&ui, cx), Some(Overlay::Palette));
+}
+
+#[gpui_kit::test]
+fn going_compact_drops_the_search(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.open_alice(cx);
+    ui.press("ctrl-f", cx);
+    ui.type_text("bo", cx);
+    ui.frame(cx);
+
+    resize(&ui, 500., cx);
+    let count = cx.update(|cx| {
+        let chat = ui.shell.read(cx).chat().unwrap().read(cx);
+        chat.chat().conversations().count()
+    });
+    assert_eq!(count, 2);
+    assert!(composer_focused(&ui, cx));
 }

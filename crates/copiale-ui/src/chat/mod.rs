@@ -1,6 +1,7 @@
 //! The main window once linked: chat list, conversation log, composer.
 
 mod content;
+mod layout;
 mod model;
 mod new_chat;
 mod notices;
@@ -9,6 +10,7 @@ mod text;
 mod time;
 mod view;
 
+pub use layout::{COMPACT_BELOW, Layout};
 pub use model::{
     Actions, Chat, Compose, Connection, Effects, LogChange, Overlay, PAGE, Row, member_list, title,
 };

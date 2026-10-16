@@ -52,8 +52,11 @@ Scope, UI design, architecture and work items for the first usable release.
     settings button at the bottom. Search is hidden until the pointer reaches
     the sidebar's top edge or `Ctrl/⌘+F`.
   - Right: conversation header, message log, composer.
-- Compact (below a width breakpoint): chat list hidden; the header shows the
-  current chat; switch chats through the palette.
+- Compact (below 640 px): chat list hidden; the header shows the current
+  chat, a count of other chats with unread messages and the connection
+  unless online; switch chats through the palette (`Ctrl/⌘+F` opens it) or
+  `Alt+↑/↓`. The chat list slides out and back while resizing; the log
+  keeps its place (the end, or the top message).
 - Settings, new chat and linking open as overlays, not separate windows.
 
 ```
@@ -118,7 +121,7 @@ Scope, UI design, architecture and work items for the first usable release.
   | `Ctrl/⌘+F` | Search chats |
   | `Alt+↑/↓` | Previous/next chat |
   | `Ctrl/⌘+,` | Settings (until #24: points to `config.toml`) |
-  | `Esc` | Close overlay; in compact mode, hide window |
+  | `Esc` | Close overlay; in compact mode, hide window (#22) |
   | `Ctrl/⌘+Q` | Quit |
 
 - `↑` in an empty composer edits the last own message.
