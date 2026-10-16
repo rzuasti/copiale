@@ -94,7 +94,7 @@ impl Database {
         &self,
         conversation: ConversationId,
         sent_at: Timestamp,
-        body: &MessageBody,
+        content: &Content,
     ) -> Result<Option<Message>, StorageError> {
         let mut tx = self.app.begin().await.map_err(database_error)?;
         let exists: Option<i64> = sqlx::query_scalar("SELECT id FROM conversations WHERE id = ?")
@@ -106,13 +106,7 @@ impl Database {
             return Ok(None);
         };
         let status = Some(MessageStatus::Pending);
-        let content = Content::Text {
-            body: body.clone(),
-            attachments: Vec::new(),
-            quote: None,
-        };
-        let message =
-            insert_message(&mut tx, conversation, None, status, sent_at, &content).await?;
+        let message = insert_message(&mut tx, conversation, None, status, sent_at, content).await?;
         tx.commit().await.map_err(database_error)?;
         Ok(message)
     }
@@ -328,7 +322,7 @@ impl Database {
         rows.into_iter().rev().map(message).collect()
     }
 
-    pub(super) async fn message(&self, id: MessageId) -> Result<Option<Message>, StorageError> {
+    pub(crate) async fn message(&self, id: MessageId) -> Result<Option<Message>, StorageError> {
         let mut conn = self.app.acquire().await.map_err(database_error)?;
         load_message(&mut conn, id).await
     }
@@ -825,7 +819,7 @@ mod tests {
         db.add_pending(
             conversation,
             Timestamp::from_millis(sent_at),
-            &MessageBody::new("out"),
+            &Content::text("out"),
         )
         .await
         .unwrap()
@@ -1135,7 +1129,7 @@ mod tests {
             .add_pending(
                 ConversationId::new(42),
                 Timestamp::from_millis(1),
-                &MessageBody::new("x"),
+                &Content::text("x"),
             )
             .await
             .unwrap();

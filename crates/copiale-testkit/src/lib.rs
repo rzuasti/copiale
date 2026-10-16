@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex};
 
 use copiale_core::storage::{Database, SecretError, SecretStore};
 use copiale_core::{
-    BackendError, Destination, GroupInfo, GroupMasterKey, Incoming, Linker, MessageBody, ServiceId,
-    SignalBackend, Timestamp,
+    BackendError, Destination, GroupInfo, GroupMasterKey, Incoming, Linker, MessageBody, Outgoing,
+    ServiceId, SignalBackend, Timestamp,
 };
 use futures::future::LocalBoxFuture;
 use futures::stream::LocalBoxStream;
@@ -44,12 +44,20 @@ pub fn group_key(n: u8) -> GroupMasterKey {
     GroupMasterKey::new([n; 32])
 }
 
-/// A text message the backend was asked to send.
+/// A message, or change to one, the backend was asked to send.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SentText {
     pub destination: Destination,
-    pub body: MessageBody,
+    pub outgoing: Outgoing,
     pub timestamp: Timestamp,
+}
+
+/// Plain text, as sent.
+pub fn text(body: &str) -> Outgoing {
+    Outgoing::Text {
+        body: MessageBody::new(body),
+        quote: None,
+    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -78,7 +86,10 @@ struct State {
     read_receipts: Vec<(ServiceId, Vec<Timestamp>)>,
     read_syncs: Vec<Vec<(ServiceId, Timestamp)>>,
     typing: Vec<(Destination, bool)>,
+    deleted_for_me: Vec<DeletedForMe>,
 }
+
+type DeletedForMe = (Destination, Vec<(Option<ServiceId>, Timestamp)>);
 
 /// [`SignalBackend`] driven by a [`FakeNetwork`]. Each `receive` opens a
 /// new connection, replacing any previous one.
@@ -117,10 +128,10 @@ impl SignalBackend for FakeBackend {
 
     /// Counts as started at once; completes when sends aren't paused and
     /// the network is up.
-    fn send_text(
+    fn send(
         &mut self,
         destination: Destination,
-        body: MessageBody,
+        outgoing: Outgoing,
         timestamp: Timestamp,
     ) -> LocalBoxFuture<'static, Result<(), BackendError>> {
         let failure = {
@@ -140,7 +151,7 @@ impl SignalBackend for FakeBackend {
             }
             state.lock().unwrap().sent.push(SentText {
                 destination,
-                body,
+                outgoing,
                 timestamp,
             });
             Ok(())
@@ -190,6 +201,19 @@ impl SignalBackend for FakeBackend {
         read: Vec<(ServiceId, Timestamp)>,
     ) -> LocalBoxFuture<'static, Result<(), BackendError>> {
         self.state.lock().unwrap().read_syncs.push(read);
+        async { Ok(()) }.boxed_local()
+    }
+
+    fn sync_deleted_for_me(
+        &mut self,
+        destination: Destination,
+        messages: Vec<(Option<ServiceId>, Timestamp)>,
+    ) -> LocalBoxFuture<'static, Result<(), BackendError>> {
+        self.state
+            .lock()
+            .unwrap()
+            .deleted_for_me
+            .push((destination, messages));
         async { Ok(()) }.boxed_local()
     }
 
@@ -371,6 +395,11 @@ impl FakeNetwork {
     /// Reads synced to the account's other devices so far.
     pub fn read_syncs(&self) -> Vec<Vec<(ServiceId, Timestamp)>> {
         self.state.lock().unwrap().read_syncs.clone()
+    }
+
+    /// Deletes for this account synced to its other devices so far.
+    pub fn deleted_for_me(&self) -> Vec<DeletedForMe> {
+        self.state.lock().unwrap().deleted_for_me.clone()
     }
 
     /// Typing indicators sent so far.

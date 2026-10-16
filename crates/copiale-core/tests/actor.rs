@@ -10,12 +10,12 @@ use copiale_core::{
     BackendError, Change, ChatRef, Command, Content, ConversationId, ConversationSummary,
     CoreHandle, CoreOptions, Destination, Direction, Event, Events, GroupInfo, GroupRef,
     GroupUpdate, Incoming, IncomingMessage, Member, Message, MessageBody, MessageChange,
-    MessagePreview, MessageRef, MessageStatus, Peer, Quote, ReceiptKind, SentMessage,
+    MessagePreview, MessageRef, MessageStatus, Outgoing, Peer, Quote, ReceiptKind, SentMessage,
     StorageFailure, Timestamp,
 };
 use copiale_testkit::{
     FAKE_LINK_URL, FakeNetwork, FakePhone, MemorySecretStore, OWN_ID, SentText, fake_backend,
-    fake_linker, group_key, service_id,
+    fake_linker, group_key, service_id, text,
 };
 use tempfile::TempDir;
 
@@ -337,6 +337,7 @@ fn send_text(running: &Running, conversation: ConversationId, body: &str) {
         Command::SendText {
             conversation,
             body: MessageBody::new(body),
+            reply_to: None,
         },
     );
 }
@@ -423,7 +424,7 @@ async fn sent_text_goes_from_pending_to_sent() {
         running.network.sent(),
         [SentText {
             destination: Destination::Contact(service_id(2)),
-            body: MessageBody::new("hi there"),
+            outgoing: text("hi there"),
             timestamp: pending.sent_at,
         }]
     );
@@ -531,7 +532,10 @@ async fn sends_go_out_one_at_a_time_in_order() {
         .network
         .sent()
         .into_iter()
-        .map(|sent| sent.body.as_str().to_string())
+        .map(|sent| match sent.outgoing {
+            Outgoing::Text { body, .. } => body.as_str().to_string(),
+            other => panic!("expected text, got {other:?}"),
+        })
         .collect();
     assert_eq!(bodies, ["first", "second", "third"]);
     stop(running).await;
@@ -672,7 +676,7 @@ async fn send_cut_off_by_a_dead_connection_is_resent() {
         running.network.sent(),
         [SentText {
             destination: Destination::Contact(service_id(2)),
-            body: MessageBody::new("stuck"),
+            outgoing: text("stuck"),
             timestamp: pending.sent_at,
         }]
     );
@@ -1115,6 +1119,7 @@ async fn commands_for_other_states_are_ignored() {
         Command::SendText {
             conversation: ConversationId::new(1),
             body: MessageBody::new("too early"),
+            reply_to: None,
         },
     );
     send(
@@ -1292,7 +1297,7 @@ async fn text_sent_to_a_group_goes_to_the_group() {
         running.network.sent(),
         [SentText {
             destination: Destination::Group(group_ref(1, 3)),
-            body: MessageBody::new("hello group"),
+            outgoing: text("hello group"),
             timestamp: pending.sent_at,
         }]
     );
@@ -1766,6 +1771,202 @@ async fn deletes_for_me_remove_messages_and_conversations() {
     assert_eq!(
         next_event(&mut running.events).await,
         Event::ConversationRemoved(theirs.conversation)
+    );
+    stop(running).await;
+}
+
+// Own-message actions
+
+/// A text of ours, sent; returns it as sent.
+async fn sent_text(running: &mut Running, chat: ConversationId, body: &str) -> Message {
+    send_text(running, chat, body);
+    pending_added(&mut running.events).await;
+    message_updated(&mut running.events).await
+}
+
+#[tokio::test]
+async fn replies_quote_the_message() {
+    let (_dir, mut running) = ready().await;
+    running.network.deliver(incoming(1, 100, "ship it?"));
+    let question = message_added(&mut running.events).await;
+    conversation_updated(&mut running.events).await;
+
+    send(
+        &running,
+        Command::SendText {
+            conversation: question.conversation,
+            body: MessageBody::new("yes"),
+            reply_to: Some(question.id),
+        },
+    );
+
+    let reply = pending_added(&mut running.events).await;
+    let quote = Quote {
+        author: Some(service_id(1)),
+        sent_at: Timestamp::from_millis(100),
+        text: "ship it?".into(),
+        attachment: None,
+    };
+    assert_eq!(
+        reply.content,
+        Content::Text {
+            body: MessageBody::new("yes"),
+            attachments: Vec::new(),
+            quote: Some(quote.clone()),
+        }
+    );
+    message_updated(&mut running.events).await;
+    assert_eq!(
+        running.network.sent()[0].outgoing,
+        Outgoing::Text {
+            body: MessageBody::new("yes"),
+            quote: Some(quote),
+        }
+    );
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn own_messages_can_be_edited_and_deleted_for_everyone() {
+    let (_dir, mut running) = ready().await;
+    let chat = open_chat(&mut running, 2).await;
+    let original = sent_text(&mut running, chat, "teh").await;
+
+    send(
+        &running,
+        Command::Edit {
+            id: original.id,
+            body: MessageBody::new("the"),
+        },
+    );
+    let edited = message_updated(&mut running.events).await;
+    assert_eq!(edited.content, Content::text("the"));
+    assert!(edited.edited);
+    conversation_updated(&mut running.events).await;
+
+    send(
+        &running,
+        Command::Delete {
+            id: original.id,
+            everyone: true,
+        },
+    );
+    let deleted = message_updated(&mut running.events).await;
+    assert_eq!(deleted.content, Content::Deleted);
+    conversation_updated(&mut running.events).await;
+    sync(&mut running).await;
+
+    let sent: Vec<_> = running
+        .network
+        .sent()
+        .into_iter()
+        .map(|sent| sent.outgoing)
+        .collect();
+    assert_eq!(
+        sent,
+        [
+            text("teh"),
+            Outgoing::Edit {
+                target: original.sent_at,
+                body: MessageBody::new("the"),
+                quote: None,
+            },
+            Outgoing::Delete {
+                target: original.sent_at,
+            },
+        ]
+    );
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn only_recent_own_sent_messages_change_for_everyone() {
+    let (_dir, mut running) = ready().await;
+    running.network.deliver(incoming(1, 100, "theirs"));
+    let theirs = message_added(&mut running.events).await;
+    conversation_updated(&mut running.events).await;
+    // Sent from the phone long ago.
+    running.network.deliver(Incoming::Sent(SentMessage {
+        destination: Destination::Contact(service_id(1)),
+        timestamp: Timestamp::from_millis(1_000),
+        content: Content::text("ancient"),
+    }));
+    let old = message_added(&mut running.events).await;
+    conversation_updated(&mut running.events).await;
+
+    for id in [theirs.id, old.id] {
+        send(
+            &running,
+            Command::Edit {
+                id,
+                body: MessageBody::new("changed"),
+            },
+        );
+        send(&running, Command::Delete { id, everyone: true });
+    }
+    sync(&mut running).await;
+
+    assert!(running.network.sent().is_empty());
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn deleting_for_me_removes_and_syncs() {
+    let (_dir, mut running) = ready().await;
+    running.network.deliver(incoming(1, 100, "theirs"));
+    let theirs = message_added(&mut running.events).await;
+    conversation_updated(&mut running.events).await;
+
+    send(
+        &running,
+        Command::Delete {
+            id: theirs.id,
+            everyone: false,
+        },
+    );
+
+    assert_eq!(
+        next_event(&mut running.events).await,
+        Event::MessageRemoved {
+            conversation: theirs.conversation,
+            id: theirs.id,
+        }
+    );
+    conversation_updated(&mut running.events).await;
+    assert_eq!(
+        running.network.deleted_for_me(),
+        [(
+            Destination::Contact(service_id(1)),
+            vec![(Some(service_id(1)), Timestamp::from_millis(100))]
+        )]
+    );
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn failed_changes_are_reported() {
+    let (_dir, mut running) = ready().await;
+    let chat = open_chat(&mut running, 2).await;
+    let original = sent_text(&mut running, chat, "teh").await;
+    let error = BackendError::new("rejected");
+    running.network.fail_next_send(error.clone());
+
+    send(
+        &running,
+        Command::Edit {
+            id: original.id,
+            body: MessageBody::new("the"),
+        },
+    );
+
+    message_updated(&mut running.events).await;
+    conversation_updated(&mut running.events).await;
+    assert_eq!(
+        next_event(&mut running.events).await,
+        Event::ChangeFailed {
+            id: original.id,
+            error,
+        }
     );
     stop(running).await;
 }

@@ -16,13 +16,13 @@ use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, FocusHandle, Focusable as _, FollowMode,
-    HighlightStyle, InteractiveElement as _, IntoElement, KeyBinding, ListAlignment, ListState,
-    MouseMoveEvent, ParentElement as _, Pixels, Rems, Render, SharedString,
+    HighlightStyle, Hsla, InteractiveElement as _, IntoElement, KeyBinding, ListAlignment,
+    ListState, MouseMoveEvent, ParentElement as _, Pixels, Rems, Render, SharedString,
     StatefulInteractiveElement as _, Styled as _, StyledText, Subscription, Task,
     TestSupportExt as _, TextRun, Window, actions, canvas, div, font, list, point, px, rems,
 };
 
-use super::model::{Chat, Connection, Effects, LogChange, Row, member_list, title};
+use super::model::{Chat, Compose, Connection, Effects, LogChange, Row, member_list, title};
 use super::text::message_markdown;
 use super::time::Clock;
 use crate::CoreSink;
@@ -48,11 +48,51 @@ const SEARCH_SLIDE: Duration = Duration::from_millis(260);
 
 const CONTEXT: &str = "ChatView";
 
-actions!(chat, [FocusSearch]);
+actions!(
+    chat,
+    [
+        FocusSearch,
+        EditLast,
+        SelectLast,
+        SelectPrevious,
+        SelectNext,
+        ReplySelected,
+        EditSelected,
+        DeleteSelected,
+        DeleteForEveryone,
+        DeleteForMe,
+        Cancel,
+    ]
+);
 
-/// Registers the chat key bindings.
+/// Key context around the composer; which one depends on whether a message
+/// is selected or being deleted.
+const COMPOSING: &str = "Composing";
+const SELECTING: &str = "Selecting";
+const CONFIRMING: &str = "Confirming";
+
+/// Registers the chat key bindings. Composer bindings act on the input
+/// itself, ahead of its own, and pass keys on when they don't apply.
 pub fn init(cx: &mut App) {
-    cx.bind_keys([KeyBinding::new("secondary-f", FocusSearch, Some(CONTEXT))]);
+    let composing = Some("Composing > Input");
+    let selecting = Some("Selecting > Input");
+    let confirming = Some("Confirming > Input");
+    cx.bind_keys([
+        KeyBinding::new("secondary-f", FocusSearch, Some(CONTEXT)),
+        KeyBinding::new("up", EditLast, composing),
+        KeyBinding::new("shift-up", SelectLast, composing),
+        KeyBinding::new("escape", Cancel, composing),
+        KeyBinding::new("up", SelectPrevious, selecting),
+        KeyBinding::new("down", SelectNext, selecting),
+        KeyBinding::new("r", ReplySelected, selecting),
+        KeyBinding::new("e", EditSelected, selecting),
+        KeyBinding::new("delete", DeleteSelected, selecting),
+        KeyBinding::new("backspace", DeleteSelected, selecting),
+        KeyBinding::new("escape", Cancel, selecting),
+        KeyBinding::new("e", DeleteForEveryone, confirming),
+        KeyBinding::new("m", DeleteForMe, confirming),
+        KeyBinding::new("escape", Cancel, confirming),
+    ]);
 }
 const MAX_SENDER_CHARS: usize = 24;
 
@@ -74,6 +114,10 @@ pub struct ChatView {
     typing_expiry: Option<Task<()>>,
     /// The log ends with a typing line.
     typing_row: bool,
+    /// The row under the pointer.
+    hovered: Option<MessageId>,
+    /// Rows showing their actions, last frame.
+    with_actions: Vec<MessageId>,
     /// Tells the core we stopped typing after a pause.
     typing_idle: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
@@ -116,6 +160,8 @@ impl ChatView {
             countdown: None,
             typing_expiry: None,
             typing_row: false,
+            hovered: None,
+            with_actions: Vec::new(),
             typing_idle: None,
             _subscriptions: subscriptions,
         }
@@ -140,6 +186,12 @@ impl ChatView {
     pub fn on_event(&mut self, event: &Event, window: &mut Window, cx: &mut Context<Self>) {
         let effects = self.chat.apply(event, window.is_window_active());
         self.run(effects, cx);
+        if let Event::Conversations(_) = event
+            && let Some(effects) = self.chat.open_latest(window.is_window_active())
+        {
+            self.run(effects, cx);
+            self.ready_composer(window, cx);
+        }
         match event {
             Event::Disconnected { .. } => self.start_countdown(cx),
             Event::Typing { .. } | Event::MessageAdded(_) => self.expire_typing(cx),
@@ -208,6 +260,11 @@ impl ChatView {
         }
         let effects = self.chat.open(id);
         self.run(effects, cx);
+        self.ready_composer(window, cx);
+    }
+
+    /// Clears the composer for the open conversation and focuses it.
+    fn ready_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let placeholder = self
             .chat
             .open_conversation()
@@ -353,6 +410,9 @@ impl ChatView {
     ) {
         if let InputEvent::Change = event {
             let text = composer.read(cx).value();
+            if !text.trim().is_empty() && self.chat.selected().is_some() {
+                self.chat.cancel();
+            }
             self.typing(&text, cx);
         }
         if let InputEvent::PressEnter { shift: false, .. } = event {
@@ -658,19 +718,222 @@ impl ChatView {
                     .test_support(),
             )
             .child(
-                div()
+                v_flex()
                     .px_4()
                     .py_2()
+                    .gap_1()
                     .border_t_1()
                     .border_color(cx.palette().border)
+                    .key_context(self.composer_context())
+                    .on_action(cx.listener(Self::edit_last))
+                    .on_action(cx.listener(Self::select_last))
+                    .on_action(cx.listener(Self::select_previous))
+                    .on_action(cx.listener(Self::select_next))
+                    .on_action(cx.listener(Self::reply_selected))
+                    .on_action(cx.listener(Self::edit_selected))
+                    .on_action(cx.listener(Self::delete_selected))
+                    .on_action(cx.listener(Self::delete_for_everyone))
+                    .on_action(cx.listener(Self::delete_for_me))
+                    .on_action(cx.listener(Self::cancel))
+                    .children(self.chat.compose_banner().map(|banner| {
+                        h_flex()
+                            .id("compose")
+                            .gap_2()
+                            .font_family(cx.theme().mono_font_family.clone())
+                            .text_size(PREFIX_SIZE)
+                            .text_color(cx.palette().text_muted)
+                            .child(div().flex_1().min_w_0().truncate().child(banner))
+                            .child(
+                                div()
+                                    .id("cancel-compose")
+                                    .cursor_pointer()
+                                    .text_color(cx.palette().action)
+                                    .child("esc")
+                                    .on_click(cx.listener(|view, _, window, cx| {
+                                        view.cancel(&Cancel, window, cx)
+                                    }))
+                                    .test_support(),
+                            )
+                            .test_support()
+                    }))
                     .child(Textarea::new(&self.composer)),
             )
             .into_any_element()
     }
 
+    fn hover_row(&mut self, id: MessageId, hovered: bool, cx: &mut Context<Self>) {
+        if hovered {
+            self.hovered = Some(id);
+        } else if self.hovered == Some(id) {
+            self.hovered = None;
+        } else {
+            return;
+        }
+        cx.notify();
+    }
+
+    /// Remeasures rows whose actions appeared or went, since they change
+    /// how the text wraps.
+    fn sync_actions(&mut self) {
+        let shown: Vec<_> = [
+            self.hovered,
+            self.chat.selected(),
+            self.chat.confirming_delete(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let changed = shown
+            .iter()
+            .filter(|id| !self.with_actions.contains(id))
+            .chain(self.with_actions.iter().filter(|id| !shown.contains(id)));
+        for id in changed {
+            if let Some(ix) = self.chat.row_of(*id) {
+                self.log.remeasure_items(ix..ix + 1);
+            }
+        }
+        self.with_actions = shown;
+    }
+
+    fn composer_context(&self) -> &'static str {
+        if self.chat.confirming_delete().is_some() {
+            CONFIRMING
+        } else if self.chat.selected().is_some() {
+            SELECTING
+        } else {
+            COMPOSING
+        }
+    }
+
+    fn composer_empty(&self, cx: &App) -> bool {
+        self.composer.read(cx).value().trim().is_empty()
+    }
+
+    /// Loads a message's text for editing.
+    fn load_edit(&mut self, text: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(text) = text else {
+            return;
+        };
+        self.composer.update(cx, |composer, cx| {
+            composer.set_value(text, window, cx);
+            composer.focus(window, cx);
+        });
+        cx.notify();
+    }
+
+    fn reveal(&mut self, row: Option<usize>, cx: &mut Context<Self>) {
+        if let Some(row) = row {
+            self.log.scroll_to_reveal_item(row);
+        }
+        cx.notify();
+    }
+
+    fn edit_last(&mut self, _: &EditLast, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.composer_empty(cx) || self.chat.compose() != Compose::New {
+            return cx.propagate();
+        }
+        match self.chat.edit_last() {
+            Some(text) => self.load_edit(Some(text), window, cx),
+            None => cx.propagate(),
+        }
+    }
+
+    fn select_last(&mut self, _: &SelectLast, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.composer_empty(cx) {
+            return cx.propagate();
+        }
+        let row = self.chat.select_last();
+        self.reveal(row, cx);
+    }
+
+    fn select_previous(&mut self, _: &SelectPrevious, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(row) = self.chat.select_step(-1) {
+            self.reveal(Some(row), cx);
+        }
+    }
+
+    fn select_next(&mut self, _: &SelectNext, _: &mut Window, cx: &mut Context<Self>) {
+        match self.chat.select_step(1) {
+            Some(row) => self.reveal(Some(row), cx),
+            // Past the last message: back to the composer.
+            None => {
+                self.chat.cancel();
+                cx.notify();
+            }
+        }
+    }
+
+    fn reply_selected(&mut self, _: &ReplySelected, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = self.chat.selected() {
+            self.reply_to(id, window, cx);
+        }
+    }
+
+    fn edit_selected(&mut self, _: &EditSelected, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = self.chat.selected() {
+            self.edit_message(id, window, cx);
+        }
+    }
+
+    fn delete_selected(&mut self, _: &DeleteSelected, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = self.chat.selected() {
+            self.chat.confirm_delete(id);
+            cx.notify();
+        }
+    }
+
+    fn delete_for_everyone(
+        &mut self,
+        _: &DeleteForEveryone,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let command = self.chat.delete(true);
+        self.send(command);
+        cx.notify();
+    }
+
+    fn delete_for_me(&mut self, _: &DeleteForMe, _: &mut Window, cx: &mut Context<Self>) {
+        let command = self.chat.delete(false);
+        self.send(command);
+        cx.notify();
+    }
+
+    fn cancel(&mut self, _: &Cancel, window: &mut Window, cx: &mut Context<Self>) {
+        let editing = matches!(self.chat.compose(), Compose::Edit(_));
+        if !self.chat.cancel() {
+            return cx.propagate();
+        }
+        if editing && self.chat.compose() == Compose::New {
+            self.composer
+                .update(cx, |composer, cx| composer.set_value("", window, cx));
+        }
+        cx.notify();
+    }
+
+    fn reply_to(&mut self, id: MessageId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(open) = self.chat.open_id() else {
+            return;
+        };
+        if self.chat.start_reply(open, id) {
+            self.composer
+                .update(cx, |composer, cx| composer.focus(window, cx));
+            cx.notify();
+        }
+    }
+
+    fn edit_message(&mut self, id: MessageId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(open) = self.chat.open_id() else {
+            return;
+        };
+        let text = self.chat.start_edit(open, id);
+        self.load_edit(text, window, cx);
+    }
+
     fn render_row(&self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if let Some(row) = self.chat.row(ix) {
-            return render_log_row(row, window, cx);
+            let hovered = self.hovered == Some(row.message.id);
+            return render_log_row(row, hovered, window, cx);
         }
         match self.chat.typing_label() {
             Some(label) if self.typing_row => div()
@@ -691,7 +954,12 @@ impl ChatView {
 
 /// Log style: `sender @ time > text`; follow-ups in a group indent to the
 /// first message's text.
-fn render_log_row(row: Row<'_>, window: &mut Window, cx: &mut Context<ChatView>) -> AnyElement {
+fn render_log_row(
+    row: Row<'_>,
+    hovered: bool,
+    window: &mut Window,
+    cx: &mut Context<ChatView>,
+) -> AnyElement {
     let palette = cx.palette();
     let mono = cx.theme().mono_font_family.clone();
     let muted = palette.text_muted;
@@ -766,7 +1034,8 @@ fn render_log_row(row: Row<'_>, window: &mut Window, cx: &mut Context<ChatView>)
             .text_xs()
             .text_color(palette.danger)
             .cursor_pointer()
-            .child("not sent · retry")
+            .child("not sent ·")
+            .child(div().text_color(palette.action).child("retry"))
             .when_some(error, |this, error| {
                 this.tooltip(move |window, cx| {
                     gpui_kit::component::tooltip::Tooltip::new(error.clone()).build(window, cx)
@@ -813,16 +1082,36 @@ fn render_log_row(row: Row<'_>, window: &mut Window, cx: &mut Context<ChatView>)
         })
         .collect();
 
+    let change_failed = row.change_failed.then(|| {
+        div()
+            .font_family(mono.clone())
+            .text_xs()
+            .text_color(palette.danger)
+            .child("change not sent")
+    });
+    let actions = (hovered || row.selected || row.confirming_delete)
+        .then(|| row_actions(&row, muted, mono.clone(), cx));
+    let palette = cx.palette();
+
     v_flex()
         .w_full()
         .children(day)
         .child(
             h_flex()
+                .id(("row", id.get() as u64))
+                .on_hover(
+                    cx.listener(move |view, hovered: &bool, _, cx| {
+                        view.hover_row(id, *hovered, cx)
+                    }),
+                )
                 .w_full()
                 .px_4()
                 .items_start()
                 .gap_2()
                 .when(row.leads, |this| this.pt_1())
+                .when(hovered || row.selected || row.confirming_delete, |this| {
+                    this.bg(palette.surface)
+                })
                 .children(prefix)
                 .children(indent)
                 .child(
@@ -837,7 +1126,8 @@ fn render_log_row(row: Row<'_>, window: &mut Window, cx: &mut Context<ChatView>)
                                 message_markdown(body.as_str()),
                             )
                             .selectable(true)
-                        })),
+                        }))
+                        .children(actions),
                 )
                 .children(message.edited.then(|| {
                     div()
@@ -853,8 +1143,106 @@ fn render_log_row(row: Row<'_>, window: &mut Window, cx: &mut Context<ChatView>)
                         .text_color(color)
                         .child(status)
                 }))
-                .children(failure),
+                .children(failure)
+                .children(change_failed)
+                .test_support(),
         )
+        .into_any_element()
+}
+
+/// Reply, edit and delete, or how to delete, with key hints when selected:
+/// a line under the text of hovered and selected rows only.
+fn row_actions(
+    row: &Row<'_>,
+    muted: Hsla,
+    mono: SharedString,
+    cx: &mut Context<ChatView>,
+) -> AnyElement {
+    let id = row.message.id;
+    let n = id.get() as u64;
+    let color = cx.palette().action;
+    let action = |name: &'static str, label: &'static str| {
+        div()
+            .id((name, n))
+            .text_color(color)
+            .cursor_pointer()
+            .hover(|style| style.underline())
+            .child(label)
+            .test_support()
+    };
+    let keys = row.selected;
+    let mut items: Vec<AnyElement> = Vec::new();
+    if row.confirming_delete {
+        if row.actions.delete_for_everyone {
+            items.push(
+                action(
+                    "for-everyone",
+                    if keys {
+                        "e for everyone"
+                    } else {
+                        "for everyone"
+                    },
+                )
+                .on_click(cx.listener(|view, _, window, cx| {
+                    view.delete_for_everyone(&DeleteForEveryone, window, cx)
+                }))
+                .into_any_element(),
+            );
+        }
+        items.push(
+            action("for-me", if keys { "m for me" } else { "for me" })
+                .on_click(
+                    cx.listener(|view, _, window, cx| view.delete_for_me(&DeleteForMe, window, cx)),
+                )
+                .into_any_element(),
+        );
+        items.push(
+            action("cancel-delete", if keys { "esc cancel" } else { "cancel" })
+                .on_click(cx.listener(|view, _, window, cx| view.cancel(&Cancel, window, cx)))
+                .into_any_element(),
+        );
+    } else {
+        if row.actions.reply {
+            items.push(
+                action("reply", if keys { "r reply" } else { "reply" })
+                    .on_click(cx.listener(move |view, _, window, cx| view.reply_to(id, window, cx)))
+                    .into_any_element(),
+            );
+        }
+        if row.actions.edit {
+            items.push(
+                action("edit", if keys { "e edit" } else { "edit" })
+                    .on_click(
+                        cx.listener(move |view, _, window, cx| view.edit_message(id, window, cx)),
+                    )
+                    .into_any_element(),
+            );
+        }
+        items.push(
+            action("delete", if keys { "del delete" } else { "delete" })
+                .on_click(cx.listener(move |view, _, _, cx| {
+                    view.chat.confirm_delete(id);
+                    cx.notify();
+                }))
+                .into_any_element(),
+        );
+    }
+    let mut separated = Vec::new();
+    for (ix, item) in items.into_iter().enumerate() {
+        if ix > 0 {
+            separated.push(div().child("·").into_any_element());
+        }
+        separated.push(item);
+    }
+    h_flex()
+        .id(("actions", n))
+        .flex_none()
+        .gap_1()
+        .font_family(mono)
+        .text_xs()
+        .text_color(muted)
+        .children(separated)
+        .test_support()
         .into_any_element()
 }
 
@@ -876,6 +1264,7 @@ fn truncate(text: &str, max: usize) -> Cow<'_, str> {
 
 impl Render for ChatView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_actions();
         h_flex()
             .key_context(CONTEXT)
             .track_focus(&self.focus)

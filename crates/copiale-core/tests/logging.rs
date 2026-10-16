@@ -80,6 +80,26 @@ fn default_filter_hides_zbus_warnings() {
 }
 
 #[test]
+fn presage_empty_store_warnings_are_dropped() {
+    let out = logged(DEFAULT_FILTER, false, || {
+        tracing::warn!(
+            target: "presage::manager::registered",
+            ts = 5u64,
+            "could not find message to delete in thread"
+        );
+        tracing::warn!(
+            target: "presage::manager::registered",
+            "Message referenced by delete-for-self message not found; ignoring."
+        );
+        tracing::warn!(target: "presage::manager::registered", "presage-other");
+    });
+
+    assert!(!out.contains("could not find"));
+    assert!(!out.contains("delete-for-self"));
+    assert!(out.contains("presage-other"));
+}
+
+#[test]
 fn dependencies_stay_capped_at_warn_even_with_trace_filter() {
     let out = logged("trace", false, || {
         tracing::debug!(target: "copiale_core::actor", "core-debug");
@@ -174,6 +194,7 @@ fn identifiers_and_secrets_are_redacted_in_logs() {
     let command = Command::SendText {
         conversation: ConversationId::new(1),
         body: body.clone(),
+        reply_to: None,
     };
 
     let out = logged("trace", false, || {
@@ -209,12 +230,12 @@ fn dependency_output_is_scrubbed() {
             target: "presage::manager::registered",
             thread = "Thread(contact=0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0)",
             ts = 1_700_000_000_123u64,
-            "could not find message to delete in thread"
+            "could not fetch group for thread"
         );
         tracing::warn!(target: "libsignal_service::models", "bad number +14155550123");
     });
 
-    assert!(out.contains("could not find message to delete"));
+    assert!(out.contains("could not fetch group"));
     assert!(out.contains("…e1f0"));
     assert!(out.contains("1700000000123"), "timestamps survive: {out}");
     assert!(out.contains("+…23"));

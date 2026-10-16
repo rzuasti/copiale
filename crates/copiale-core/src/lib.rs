@@ -16,14 +16,14 @@ pub mod storage;
 pub const APP_ID: &str = "page.codeberg.korba.Copiale";
 
 pub use actor::{
-    Command, CoreHandle, CoreOptions, CoreStopped, Event, Events, StorageFailure, TYPING_TIMEOUT,
-    spawn, spawn_with_options,
+    Command, CoreHandle, CoreOptions, CoreStopped, DELETE_WINDOW, EDIT_WINDOW, Event, Events,
+    StorageFailure, TYPING_TIMEOUT, spawn, spawn_with_options,
 };
 pub use backend::{BackendError, Incoming, Linker, SignalBackend};
 pub use model::{
     AccountSettings, Attachment, Change, ChatRef, Content, ConversationId, ConversationSummary,
     Destination, Direction, GroupId, GroupInfo, GroupMasterKey, GroupRef, GroupUpdate,
     IncomingMessage, Member, Message, MessageBody, MessageChange, MessageId, MessagePreview,
-    MessageRef, MessageStatus, Peer, PhoneNumber, Quote, ReceiptKind, SentMessage, ServiceId,
-    Timestamp, Unsupported,
+    MessageRef, MessageStatus, Outgoing, Peer, PhoneNumber, Quote, ReceiptKind, SentMessage,
+    ServiceId, Timestamp, Unsupported,
 };

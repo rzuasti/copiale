@@ -5,8 +5,8 @@ use futures::stream::LocalBoxStream;
 use tokio::sync::oneshot;
 
 use crate::model::{
-    ChatRef, Destination, GroupId, GroupInfo, GroupMasterKey, IncomingMessage, MessageBody,
-    MessageChange, MessageRef, ReceiptKind, SentMessage, ServiceId, Timestamp,
+    ChatRef, Destination, GroupId, GroupInfo, GroupMasterKey, IncomingMessage, MessageChange,
+    MessageRef, Outgoing, ReceiptKind, SentMessage, ServiceId, Timestamp,
 };
 use crate::storage::Database;
 
@@ -93,16 +93,26 @@ pub trait SignalBackend {
         &mut self,
     ) -> LocalBoxFuture<'static, Result<LocalBoxStream<'static, Incoming>, BackendError>>;
 
-    /// Sends a text message to one account or a group, with a copy to this
-    /// account's other devices.
+    /// Sends a message, or a change to one of ours, to one account or a
+    /// group, with a copy to this account's other devices. Quotes of our
+    /// messages have no author.
     ///
     /// The future doesn't borrow the backend, so the core can keep serving
     /// while it runs.
-    fn send_text(
+    fn send(
         &mut self,
         destination: Destination,
-        body: MessageBody,
+        outgoing: Outgoing,
         timestamp: Timestamp,
+    ) -> LocalBoxFuture<'static, Result<(), BackendError>>;
+
+    /// Tells this account's other devices we deleted these messages, by
+    /// author (`None` for ours) and sent time, for ourselves only. Doesn't
+    /// borrow the backend.
+    fn sync_deleted_for_me(
+        &mut self,
+        destination: Destination,
+        messages: Vec<(Option<ServiceId>, Timestamp)>,
     ) -> LocalBoxFuture<'static, Result<(), BackendError>>;
 
     /// A group's state as last fetched, with member names from contacts and

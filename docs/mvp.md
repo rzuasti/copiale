@@ -112,6 +112,14 @@ Scope, UI design, architecture and work items for the first usable release.
   | `Ctrl/⌘+Q` | Quit |
 
 - `↑` in an empty composer edits the last own message.
+- `Shift+↑` in an empty composer selects the last message; `↑`/`↓` move,
+  `r` replies, `e` edits (own), `Del` deletes, `Esc` returns to the composer.
+- Hovering a message shows `reply · edit · delete` on a line under it; delete
+  asks `for everyone · for me · cancel` there. Actions use the theme's
+  `action` color, kept for things to click; labels like `edited` stay muted. Edits and deletes for everyone only for
+  own messages, within 24 hours.
+- Replies and edits show a line above the composer (`↳ replying to alice: …`,
+  `editing your message`); `Esc` cancels.
 
 ### Quick mode and background
 

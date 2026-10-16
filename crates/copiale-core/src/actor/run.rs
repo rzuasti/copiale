@@ -14,11 +14,12 @@ use tokio::time::Instant;
 use super::groups::{Groups, Update};
 use super::outbox::{Outbox, Outcome};
 use super::probe::{Check, Probe};
-use super::{Command, CoreOptions, Event, StorageFailure};
+use super::{Command, CoreOptions, DELETE_WINDOW, EDIT_WINDOW, Event, StorageFailure};
 use crate::backend::{BackendError, Incoming, Linker, SignalBackend};
 use crate::model::{
-    AccountSettings, Change, ChatRef, Content, ConversationId, Destination, GroupRef, MessageBody,
-    MessageId, MessageRef, MessageStatus, ReceiptKind, ServiceId, Timestamp,
+    AccountSettings, Change, ChatRef, Content, ConversationId, Destination, GroupRef, Message,
+    MessageBody, MessageChange, MessageId, MessageRef, MessageStatus, Outgoing, Quote, ReceiptKind,
+    ServiceId, Timestamp,
 };
 use crate::storage::{Database, KeyLookup, SecretStore, Storage, StorageError};
 
@@ -289,19 +290,26 @@ impl Core {
 
             tokio::select! {
                 command = self.commands.recv() => match command {
-                    Some(Command::SendText { conversation, body }) => {
-                        self.send_text(db, &mut outbox, &mut backend, conversation, body).await;
+                    Some(Command::SendText { conversation, body, reply_to }) => {
+                        self.send_text(db, &mut outbox, &mut backend, conversation, body, reply_to).await;
                         // Recipients stop showing us typing when the message arrives.
                         typing_sent.remove(&conversation);
                     }
                     Some(Command::RetrySend(id)) => match db.retry_send(id).await {
                         Ok(Some((destination, message))) => {
                             self.emit(Event::MessageUpdated(message.clone()));
-                            outbox.push(destination, &message, &mut backend);
+                            let outgoing = text_of(&message.content);
+                            outbox.push(message.id, destination, outgoing, message.sent_at, &mut backend);
                         }
                         Ok(None) => tracing::debug!(message = id.get(), "nothing to retry"),
                         Err(error) => self.database_error(error),
                     },
+                    Some(Command::Edit { id, body }) => {
+                        self.edit(db, &mut outbox, &mut backend, id, body).await;
+                    }
+                    Some(Command::Delete { id, everyone }) => {
+                        self.delete(db, &mut outbox, &mut backend, id, everyone).await;
+                    }
                     Some(Command::Reconnect) if incoming.is_none() && connecting.is_none() => {
                         retry_at = Some(Instant::now());
                     }
@@ -475,12 +483,21 @@ impl Core {
                     }
                 },
                 outcome = outbox.finished() => match outcome {
-                    Outcome::Sent(id) => {
+                    Outcome::Sent { id, change: false } => {
                         self.send_finished(db, id, Ok(())).await;
                         outbox.start_next(&mut backend);
                     }
-                    Outcome::Failed(id, error) => {
+                    Outcome::Sent { id, change: true } => {
+                        tracing::debug!(message = id.get(), "change sent");
+                        outbox.start_next(&mut backend);
+                    }
+                    Outcome::Failed { id, change: false, error } => {
                         self.send_finished(db, id, Err(error)).await;
+                        outbox.start_next(&mut backend);
+                    }
+                    Outcome::Failed { id, change: true, error } => {
+                        tracing::warn!(message = id.get(), %error, "sending a change failed");
+                        self.emit(Event::ChangeFailed { id, error });
                         outbox.start_next(&mut backend);
                     }
                     Outcome::Interrupted(error) => {
@@ -591,11 +608,25 @@ impl Core {
         backend: &mut B,
         conversation: ConversationId,
         body: MessageBody,
+        reply_to: Option<MessageId>,
     ) {
         if body.as_str().trim().is_empty() {
             tracing::debug!("empty message not sent");
             return;
         }
+        let quote = match reply_to {
+            Some(id) => match db.message(id).await {
+                Ok(Some(quoted)) if quoted.conversation == conversation => quote_of(&quoted),
+                Ok(_) => None,
+                Err(error) => return self.database_error(error),
+            },
+            None => None,
+        };
+        let content = Content::Text {
+            body,
+            attachments: Vec::new(),
+            quote,
+        };
         let destination = match db.destination(conversation).await {
             Ok(Some(destination)) => destination,
             Ok(None) => {
@@ -608,7 +639,7 @@ impl Core {
         // its own.
         let mut sent_at = Timestamp::now();
         let message = loop {
-            match db.add_pending(conversation, sent_at, &body).await {
+            match db.add_pending(conversation, sent_at, &content).await {
                 Ok(Some(message)) => break message,
                 Ok(None) => sent_at = Timestamp::from_millis(sent_at.as_millis() + 1),
                 Err(error) => return self.database_error(error),
@@ -616,7 +647,167 @@ impl Core {
         };
         self.emit(Event::MessageAdded(message.clone()));
         self.send_conversation(db, conversation).await;
-        outbox.push(destination, &message, backend);
+        let outgoing = text_of(&message.content);
+        outbox.push(message.id, destination, outgoing, message.sent_at, backend);
+    }
+
+    /// Our sent message `id`, if it may be changed for everyone within
+    /// `window`, with where it went.
+    async fn own_sent(
+        &self,
+        db: &Database,
+        id: MessageId,
+        window: Duration,
+    ) -> Option<(Message, Destination)> {
+        let message = match db.message(id).await {
+            Ok(Some(message)) => message,
+            Ok(None) => return None,
+            Err(error) => {
+                self.database_error(error);
+                return None;
+            }
+        };
+        let sent = matches!(
+            message.status,
+            Some(MessageStatus::Sent | MessageStatus::Delivered | MessageStatus::Read)
+        );
+        let age = Timestamp::now()
+            .as_millis()
+            .saturating_sub(message.sent_at.as_millis());
+        if message.sender.is_some() || !sent || u128::from(age) > window.as_millis() {
+            tracing::debug!(message = id.get(), "message can't be changed");
+            return None;
+        }
+        match db.destination(message.conversation).await {
+            Ok(Some(destination)) => Some((message, destination)),
+            Ok(None) => None,
+            Err(error) => {
+                self.database_error(error);
+                None
+            }
+        }
+    }
+
+    /// Replaces our message's text here, then for everyone.
+    async fn edit<B: SignalBackend>(
+        &self,
+        db: &Database,
+        outbox: &mut Outbox,
+        backend: &mut B,
+        id: MessageId,
+        body: MessageBody,
+    ) {
+        if body.as_str().trim().is_empty() {
+            return;
+        }
+        let Some((message, destination)) = self.own_sent(db, id, EDIT_WINDOW).await else {
+            return;
+        };
+        let Content::Text {
+            attachments, quote, ..
+        } = &message.content
+        else {
+            return;
+        };
+        if !attachments.is_empty() {
+            tracing::debug!(
+                message = id.get(),
+                "messages with attachments aren't edited"
+            );
+            return;
+        }
+        let at = Timestamp::now();
+        let change = MessageChange {
+            destination,
+            author: None,
+            target: message.sent_at,
+            change: Change::Edit {
+                content: Content::Text {
+                    body: body.clone(),
+                    attachments: Vec::new(),
+                    quote: quote.clone(),
+                },
+                at,
+            },
+        };
+        if !self.apply_own_change(db, &change).await {
+            return;
+        }
+        let outgoing = Outgoing::Edit {
+            target: message.sent_at,
+            body,
+            quote: quote.clone(),
+        };
+        outbox.push(id, destination, outgoing, at, backend);
+    }
+
+    /// Deletes a message: ours for everyone, or any just for this account.
+    async fn delete<B: SignalBackend>(
+        &self,
+        db: &Database,
+        outbox: &mut Outbox,
+        backend: &mut B,
+        id: MessageId,
+        everyone: bool,
+    ) {
+        if everyone {
+            let Some((message, destination)) = self.own_sent(db, id, DELETE_WINDOW).await else {
+                return;
+            };
+            let change = MessageChange {
+                destination,
+                author: None,
+                target: message.sent_at,
+                change: Change::Delete,
+            };
+            if self.apply_own_change(db, &change).await {
+                let outgoing = Outgoing::Delete {
+                    target: message.sent_at,
+                };
+                outbox.push(id, destination, outgoing, Timestamp::now(), backend);
+            }
+            return;
+        }
+        let (message, destination) = match db.message(id).await {
+            Ok(Some(message)) => match db.destination(message.conversation).await {
+                Ok(Some(destination)) => (message, destination),
+                Ok(None) => return,
+                Err(error) => return self.database_error(error),
+            },
+            Ok(None) => return,
+            Err(error) => return self.database_error(error),
+        };
+        let chat = match destination {
+            Destination::Contact(peer) => ChatRef::Contact(peer),
+            Destination::Group(group) => ChatRef::Group(group.key.id()),
+        };
+        let deleted = MessageRef {
+            chat,
+            author: message.sender,
+            sent_at: message.sent_at,
+        };
+        self.delete_for_me(db, &[deleted], &[]).await;
+        spawn_logged(
+            "syncing a delete",
+            backend.sync_deleted_for_me(destination, vec![(message.sender, message.sent_at)]),
+        );
+    }
+
+    /// Applies our edit or delete here; `false` if it didn't apply.
+    async fn apply_own_change(&self, db: &Database, change: &MessageChange) -> bool {
+        match db.apply_change(change).await {
+            Ok(Some(message)) => {
+                let conversation = message.conversation;
+                self.emit(Event::MessageUpdated(message));
+                self.send_conversation(db, conversation).await;
+                true
+            }
+            Ok(None) => false,
+            Err(error) => {
+                self.database_error(error);
+                false
+            }
+        }
     }
 
     async fn send_finished(&self, db: &Database, id: MessageId, result: Result<(), BackendError>) {
@@ -698,6 +889,37 @@ fn failure(error: StorageError) -> StorageFailure {
         StorageError::WrongKey => StorageFailure::WrongKey,
         other => StorageFailure::Other(other.to_string()),
     }
+}
+
+/// A text message as sent: its body and quote.
+fn text_of(content: &Content) -> Outgoing {
+    match content {
+        Content::Text { body, quote, .. } => Outgoing::Text {
+            body: body.clone(),
+            quote: quote.clone(),
+        },
+        _ => Outgoing::Text {
+            body: MessageBody::new(""),
+            quote: None,
+        },
+    }
+}
+
+/// How a reply quotes `message`.
+fn quote_of(message: &Message) -> Option<Quote> {
+    let (text, attachment) = match &message.content {
+        Content::Text {
+            body, attachments, ..
+        } => (body.as_str().to_string(), attachments.first().cloned()),
+        Content::Deleted => return None,
+        _ => (String::new(), None),
+    };
+    Some(Quote {
+        author: message.sender,
+        sent_at: message.sent_at,
+        text,
+        attachment,
+    })
 }
 
 /// How long an edit or delete waits for its message.

@@ -46,7 +46,17 @@ pub enum Command {
     SendText {
         conversation: ConversationId,
         body: MessageBody,
+        /// The message it replies to, quoted.
+        reply_to: Option<MessageId>,
     },
+    /// Replaces the text of our message, within [`EDIT_WINDOW`] of sending
+    /// it: [`Event::MessageUpdated`] at once, then sent in the background,
+    /// or [`Event::ChangeFailed`].
+    Edit { id: MessageId, body: MessageBody },
+    /// Deletes a message: ours for everyone, within [`DELETE_WINDOW`] of
+    /// sending it ([`Event::MessageUpdated`]), or any just for this account
+    /// and its other devices ([`Event::MessageRemoved`]).
+    Delete { id: MessageId, everyone: bool },
     /// Sends a failed message again: [`Event::MessageUpdated`] as pending,
     /// then as for [`Command::SendText`].
     RetrySend(MessageId),
@@ -136,6 +146,12 @@ pub enum Event {
         member: ServiceId,
         typing: bool,
     },
+    /// Sending an edit or delete of message `id` failed; recipients may
+    /// still see it as it was.
+    ChangeFailed {
+        id: MessageId,
+        error: BackendError,
+    },
     /// Sending failed; `message` is now marked failed.
     SendFailed {
         message: Message,
@@ -150,6 +166,11 @@ pub enum Event {
     /// Last event: the core has stopped and closed storage.
     Stopped,
 }
+
+/// How long after sending our message it may be edited, as in Signal.
+pub const EDIT_WINDOW: Duration = Duration::from_secs(24 * 3600);
+/// How long after sending our message it may be deleted for everyone.
+pub const DELETE_WINDOW: Duration = Duration::from_secs(24 * 3600);
 
 /// How long a typing indicator lasts without being renewed.
 pub const TYPING_TIMEOUT: Duration = Duration::from_secs(15);

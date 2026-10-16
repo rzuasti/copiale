@@ -9,6 +9,7 @@ use copiale_core::{
     Event, GroupMasterKey, GroupUpdate, Member, Message, MessageBody, MessageId, MessageStatus,
     Peer, Quote, ServiceId, StorageFailure, Timestamp, Unsupported,
 };
+use copiale_ui::chat::Compose;
 use copiale_ui::onboarding::Screen;
 use copiale_ui::theme::{self, ActivePalette as _, Appearance, Scheme, Theme};
 use copiale_ui::{APP_ID, CoreSink, Shell, main_window_options};
@@ -123,14 +124,22 @@ impl Ui {
         }
     }
 
-    fn top(&self, id: &'static str, cx: &mut TestAppContext) -> Pixels {
+    fn top(&self, id: impl Into<gpui_kit::ElementId>, cx: &mut TestAppContext) -> Pixels {
+        let id = id.into();
         cx.update_window(self.window, |_, window, _| window.find(id).bounds().top())
             .unwrap()
     }
 
-    fn shows(&self, id: &'static str, cx: &mut TestAppContext) -> bool {
+    fn shows(&self, id: impl Into<gpui_kit::ElementId>, cx: &mut TestAppContext) -> bool {
+        let id = id.into();
         cx.update_window(self.window, |_, window, _| window.try_find(id).is_some())
             .unwrap()
+    }
+
+    fn hover(&self, id: impl Into<gpui_kit::ElementId>, cx: &mut TestAppContext) {
+        let id = id.into();
+        cx.update_window(self.window, |_, window, cx| window.hover(id, cx))
+            .unwrap();
     }
 
     fn screen(&self, cx: &mut TestAppContext) -> Screen {
@@ -149,6 +158,11 @@ impl Ui {
             Event::Conversations(vec![summary(1, "Alice", 1), summary(2, "Bob", 0)]),
             cx,
         );
+        // The latest chat opens; read once the window is active.
+        assert!(matches!(
+            ui.core.take().as_slice(),
+            [Command::LoadMessages { conversation, .. }] if *conversation == ConversationId::new(1)
+        ));
         ui
     }
 
@@ -346,6 +360,8 @@ fn retry_after_storage_failure(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn opening_a_chat_loads_it_and_marks_it_read(cx: &mut TestAppContext) {
     let ui = Ui::ready(cx);
+    ui.click(("conversation", 2u64), cx);
+    ui.core.take();
 
     ui.click(("conversation", 1u64), cx);
 
@@ -383,7 +399,7 @@ fn composer_sends_to_the_open_chat(cx: &mut TestAppContext) {
     assert!(
         matches!(
             commands.as_slice(),
-            [Command::SendText { conversation, body }]
+            [Command::SendText { conversation, body, reply_to: None }]
                 if *conversation == ConversationId::new(1) && body.as_str() == "hello\nthere"
         ),
         "{commands:?}"
@@ -964,4 +980,158 @@ fn deleting_the_last_message_eases_the_rest_down(cx: &mut TestAppContext) {
             .row_count()
     });
     assert_eq!(rows, 79);
+}
+
+/// Alice's chat with a recent message from her and one of ours.
+fn chat_with_recent(ui: &Ui, cx: &mut TestAppContext) {
+    ui.click(("conversation", 1u64), cx);
+    ui.core.take();
+    let now = Timestamp::now().as_millis();
+    let recent = |id: i64, direction, ago: u64| Message {
+        sent_at: Timestamp::from_millis(now - ago),
+        received_at: Timestamp::from_millis(now - ago),
+        sender: (direction == Direction::Incoming).then(|| peer(1)),
+        ..message(
+            id,
+            direction,
+            (direction == Direction::Outgoing).then_some(MessageStatus::Sent),
+        )
+    };
+    ui.event(
+        Event::Messages {
+            conversation: ConversationId::new(1),
+            before: None,
+            messages: vec![
+                recent(10, Direction::Incoming, 60_000),
+                recent(11, Direction::Outgoing, 30_000),
+            ],
+        },
+        cx,
+    );
+}
+
+fn chat_state(ui: &Ui, cx: &mut TestAppContext) -> (String, Compose, Option<MessageId>) {
+    cx.update(|cx| {
+        let view = ui.shell.read(cx).chat().unwrap().read(cx);
+        let text = view.composer().read(cx).value().to_string();
+        (text, view.chat().compose(), view.chat().selected())
+    })
+}
+
+#[gpui_kit::test]
+fn keyboard_edits_replies_and_deletes(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    chat_with_recent(&ui, cx);
+
+    // ↑ in an empty composer edits our last message; Esc lets go.
+    ui.press("up", cx);
+    assert_eq!(
+        chat_state(&ui, cx),
+        (
+            "*message* 11".into(),
+            Compose::Edit(MessageId::new(11)),
+            None
+        )
+    );
+    ui.press("escape", cx);
+    assert_eq!(chat_state(&ui, cx), (String::new(), Compose::New, None));
+
+    // Shift+↑ selects, ↑ moves, r replies without typing an "r".
+    ui.press("shift-up", cx);
+    ui.press("up", cx);
+    assert_eq!(chat_state(&ui, cx).2, Some(MessageId::new(10)));
+    assert!(ui.shows(("actions", 10u64), cx));
+    ui.press("r", cx);
+    assert_eq!(
+        chat_state(&ui, cx),
+        (String::new(), Compose::Reply(MessageId::new(10)), None)
+    );
+    assert!(ui.shows("compose", cx));
+    ui.type_text("yes", cx);
+    ui.press("enter", cx);
+    let reply = ui
+        .core
+        .take()
+        .into_iter()
+        .find(|command| matches!(command, Command::SendText { .. }));
+    assert!(
+        matches!(
+            reply,
+            Some(Command::SendText { reply_to: Some(id), ref body, .. })
+                if id == MessageId::new(10) && body.as_str() == "yes"
+        ),
+        "{reply:?}"
+    );
+
+    // Deleting asks first: e for everyone.
+    ui.press("shift-up", cx);
+    ui.press("backspace", cx);
+    assert!(ui.shows(("for-everyone", 11u64), cx));
+    ui.press("e", cx);
+    let deletes: Vec<_> = ui
+        .core
+        .take()
+        .into_iter()
+        .filter(|command| matches!(command, Command::Delete { .. }))
+        .collect();
+    assert!(
+        matches!(
+            deletes.as_slice(),
+            [Command::Delete { id, everyone: true }] if *id == MessageId::new(11)
+        ),
+        "{deletes:?}"
+    );
+    assert_eq!(chat_state(&ui, cx), (String::new(), Compose::New, None));
+}
+
+#[gpui_kit::test]
+fn row_actions_work_with_the_mouse(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    chat_with_recent(&ui, cx);
+    // No room is kept for actions until a row is hovered.
+    assert!(!ui.shows(("actions", 10u64), cx));
+    assert!(!ui.shows(("actions", 11u64), cx));
+
+    ui.hover(("row", 10u64), cx);
+    assert!(ui.shows(("actions", 10u64), cx));
+    assert!(!ui.shows(("actions", 11u64), cx));
+    // On a line of their own, under the text.
+    assert!(ui.top(("actions", 10u64), cx) > ui.top(("row", 10u64), cx) + px(10.));
+    ui.hover(("row", 11u64), cx);
+    assert!(!ui.shows(("actions", 10u64), cx), "gone with the pointer");
+    ui.hover(("row", 10u64), cx);
+    ui.click(("reply", 10u64), cx);
+    assert_eq!(chat_state(&ui, cx).1, Compose::Reply(MessageId::new(10)));
+    ui.click("cancel-compose", cx);
+    assert_eq!(chat_state(&ui, cx).1, Compose::New);
+
+    ui.hover(("row", 11u64), cx);
+    ui.click(("edit", 11u64), cx);
+    assert_eq!(chat_state(&ui, cx).0, "*message* 11");
+    ui.press("escape", cx);
+
+    ui.hover(("row", 10u64), cx);
+    ui.click(("delete", 10u64), cx);
+    assert!(!ui.shows(("for-everyone", 10u64), cx), "not ours");
+    ui.click(("for-me", 10u64), cx);
+    assert!(matches!(
+        ui.core.take().as_slice(),
+        [.., Command::Delete { id, everyone: false }] if *id == MessageId::new(10)
+    ));
+}
+
+#[gpui_kit::test]
+fn the_latest_chat_opens_at_start(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+
+    let (open, focused) = cx
+        .update_window(ui.window, |_, window, cx| {
+            let view = ui.shell.read(cx).chat().unwrap().read(cx);
+            let focused = view.composer().focus_handle(cx).is_focused(window);
+            (view.chat().open_id(), focused)
+        })
+        .unwrap();
+
+    assert_eq!(open, Some(ConversationId::new(1)));
+    assert!(focused);
 }

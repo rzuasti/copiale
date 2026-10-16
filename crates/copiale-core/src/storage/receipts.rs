@@ -222,8 +222,7 @@ mod tests {
 
     use super::*;
     use crate::model::{
-        Content, Destination, GroupInfo, GroupMasterKey, GroupRef, Member, MessageBody,
-        MessageStatus,
+        Content, Destination, GroupInfo, GroupMasterKey, GroupRef, Member, MessageStatus,
     };
     use crate::storage::DatabaseKey;
 
@@ -339,7 +338,7 @@ mod tests {
             .open_conversation(&Destination::Contact(peer(1)))
             .await
             .unwrap();
-        db.add_pending(conversation, at(100), &MessageBody::new("x"))
+        db.add_pending(conversation, at(100), &Content::text("x"))
             .await
             .unwrap();
 

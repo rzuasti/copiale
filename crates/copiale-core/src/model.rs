@@ -262,6 +262,23 @@ pub struct MessageRef {
     pub sent_at: Timestamp,
 }
 
+/// What the backend sends: a message, or a change to one of ours.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Outgoing {
+    Text {
+        body: MessageBody,
+        quote: Option<Quote>,
+    },
+    /// New text for our message sent at `target`.
+    Edit {
+        target: Timestamp,
+        body: MessageBody,
+        quote: Option<Quote>,
+    },
+    /// Deletes our message sent at `target` for everyone.
+    Delete { target: Timestamp },
+}
+
 /// A change to an earlier message by its author.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MessageChange {

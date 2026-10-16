@@ -56,6 +56,8 @@ pub struct Palette {
     #[serde(deserialize_with = "color")]
     pub accent_text: Hsla,
     #[serde(deserialize_with = "color")]
+    pub action: Hsla,
+    #[serde(deserialize_with = "color")]
     pub success: Hsla,
     #[serde(deserialize_with = "color")]
     pub danger: Hsla,
@@ -218,7 +220,7 @@ fn parse(text: &str) -> Result<Hsla, String> {
 mod tests {
     use super::*;
 
-    fn tokens(palette: &Palette) -> [(&'static str, Hsla); 13] {
+    fn tokens(palette: &Palette) -> [(&'static str, Hsla); 14] {
         [
             ("background", palette.background),
             ("sidebar", palette.sidebar),
@@ -229,6 +231,7 @@ mod tests {
             ("text_muted", palette.text_muted),
             ("accent", palette.accent),
             ("accent_text", palette.accent_text),
+            ("action", palette.action),
             ("success", palette.success),
             ("danger", palette.danger),
             ("link", palette.link),
@@ -272,6 +275,8 @@ mod tests {
                 (c.accent_text, c.accent, 4.5),
                 (c.accent_text, c.danger, 4.5),
                 (c.link, c.background, 4.5),
+                (c.action, c.background, 4.5),
+                (c.action, c.surface, 4.5),
                 (c.danger, c.background, 4.5),
             ] {
                 let ratio = contrast(fg, bg);

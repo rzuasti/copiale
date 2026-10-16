@@ -2,12 +2,13 @@
 //! events, and the commands user actions produce. No GPUI; the views
 //! render it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use copiale_core::{
-    BackendError, Command, ConversationId, ConversationSummary, Direction, Event, Message,
-    MessageBody, MessageId, MessageStatus, Peer, ServiceId, TYPING_TIMEOUT, Timestamp,
+    BackendError, Command, Content, ConversationId, ConversationSummary, DELETE_WINDOW, Direction,
+    EDIT_WINDOW, Event, Message, MessageBody, MessageId, MessageStatus, Peer, ServiceId,
+    TYPING_TIMEOUT, Timestamp,
 };
 
 use super::content::{placeholders, quote_line, system_lines};
@@ -77,6 +78,31 @@ pub struct Row<'a> {
     pub day: Option<String>,
     /// Why sending failed, if it failed this session.
     pub error: Option<&'a BackendError>,
+    /// What can be done to the message.
+    pub actions: Actions,
+    /// Selected from the keyboard.
+    pub selected: bool,
+    /// Asking how to delete it.
+    pub confirming_delete: bool,
+    /// An edit or delete of it didn't reach everyone.
+    pub change_failed: bool,
+}
+
+/// What can be done to a message; deleting for this account always can.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Actions {
+    pub reply: bool,
+    pub edit: bool,
+    pub delete_for_everyone: bool,
+}
+
+/// What the composer sends.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Compose {
+    #[default]
+    New,
+    Reply(MessageId),
+    Edit(MessageId),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -97,6 +123,8 @@ pub struct Chat {
     connection: Connection,
     /// Who is typing where, until when.
     typing: Vec<Typing>,
+    /// A conversation has been opened since starting.
+    opened: bool,
 }
 
 #[derive(Debug)]
@@ -120,6 +148,12 @@ struct Log {
     has_older: bool,
     loading_older: bool,
     errors: HashMap<MessageId, BackendError>,
+    compose: Compose,
+    /// Selected from the keyboard.
+    selected: Option<MessageId>,
+    /// Asking how to delete it.
+    confirming: Option<MessageId>,
+    change_failed: HashSet<MessageId>,
 }
 
 impl Log {
@@ -161,6 +195,7 @@ impl Chat {
             open: None,
             connection: Connection::Connecting,
             typing: Vec::new(),
+            opened: false,
         }
     }
 
@@ -267,6 +302,10 @@ impl Chat {
             system,
             day: new_day.then(|| self.clock.day_label(day)),
             error: log.errors.get(&message.id),
+            actions: self.actions(message),
+            selected: log.selected == Some(message.id),
+            confirming_delete: log.confirming == Some(message.id),
+            change_failed: log.change_failed.contains(&message.id),
         })
     }
 
@@ -356,6 +395,14 @@ impl Chat {
             Event::SendFailed { message, error } => {
                 return self.updated(message, Some(error.clone()));
             }
+            Event::ChangeFailed { id, .. } => {
+                if let Some(ix) = self.open.as_mut().and_then(|log| {
+                    log.change_failed.insert(*id);
+                    log.messages.iter().position(|m| m.id == *id)
+                }) {
+                    return Effects::log(LogChange::Changed(ix));
+                }
+            }
             Event::Connected => self.connection = Connection::Syncing,
             Event::Synced => self.connection = Connection::Online,
             Event::Disconnected { retry_in, .. } => {
@@ -371,6 +418,22 @@ impl Chat {
         Effects::default()
     }
 
+    /// Opens the most recently active conversation, once, if none has been
+    /// opened yet; marks it read only if `active`.
+    pub fn open_latest(&mut self, active: bool) -> Option<Effects> {
+        if self.opened {
+            return None;
+        }
+        let latest = self.conversations.first()?.id;
+        let mut effects = self.open(latest);
+        if !active {
+            effects
+                .commands
+                .retain(|command| !matches!(command, Command::MarkRead(_)));
+        }
+        Some(effects)
+    }
+
     /// Shows a conversation, loads its newest messages and marks it read.
     pub fn open(&mut self, id: ConversationId) -> Effects {
         if self.open_id() == Some(id) {
@@ -380,6 +443,7 @@ impl Chat {
             return Effects::default();
         };
         let unread = summary.unread > 0;
+        self.opened = true;
         self.open = Some(Log {
             id,
             messages: Vec::new(),
@@ -388,6 +452,10 @@ impl Chat {
             has_older: false,
             loading_older: false,
             errors: HashMap::new(),
+            compose: Compose::New,
+            selected: None,
+            confirming: None,
+            change_failed: HashSet::new(),
         });
         let mut commands = vec![Command::LoadMessages {
             conversation: id,
@@ -465,16 +533,212 @@ impl Chat {
         })
     }
 
-    pub fn submit(&self, text: &str) -> Option<Command> {
-        let log = self.open.as_ref()?;
+    /// The command for the composer's text: a message, reply or edit.
+    /// Ends a reply or edit.
+    pub fn submit(&mut self, text: &str) -> Option<Command> {
+        let log = self.open.as_mut()?;
         let text = text.trim();
         if text.is_empty() {
             return None;
         }
-        Some(Command::SendText {
-            conversation: log.id,
-            body: MessageBody::new(text),
+        let body = MessageBody::new(text);
+        Some(match std::mem::take(&mut log.compose) {
+            Compose::New => Command::SendText {
+                conversation: log.id,
+                body,
+                reply_to: None,
+            },
+            Compose::Reply(id) => Command::SendText {
+                conversation: log.id,
+                body,
+                reply_to: Some(id),
+            },
+            Compose::Edit(id) => Command::Edit { id, body },
         })
+    }
+
+    /// What can be done to `message` now.
+    pub fn actions(&self, message: &Message) -> Actions {
+        let now = self.clock.now().as_millis();
+        let within = |window: Duration| {
+            u128::from(now.saturating_sub(message.sent_at.as_millis())) < window.as_millis()
+        };
+        let own_sent = message.sender.is_none()
+            && message.direction == Direction::Outgoing
+            && matches!(
+                message.status,
+                Some(MessageStatus::Sent | MessageStatus::Delivered | MessageStatus::Read)
+            );
+        let shown = !message.content.is_system() && message.content != Content::Deleted;
+        let plain_text = matches!(
+            &message.content,
+            Content::Text { attachments, .. } if attachments.is_empty()
+        );
+        Actions {
+            reply: shown,
+            edit: own_sent && plain_text && within(EDIT_WINDOW),
+            delete_for_everyone: own_sent && shown && within(DELETE_WINDOW),
+        }
+    }
+
+    pub fn compose(&self) -> Compose {
+        self.open
+            .as_ref()
+            .map(|log| log.compose)
+            .unwrap_or_default()
+    }
+
+    /// What the composer is doing, as a line above it.
+    pub fn compose_banner(&self) -> Option<String> {
+        let log = self.open.as_ref()?;
+        match log.compose {
+            Compose::New => None,
+            Compose::Edit(_) => Some("editing your message".into()),
+            Compose::Reply(id) => {
+                let message = log.messages.iter().find(|m| m.id == id)?;
+                let name = match message.sender {
+                    Some(author) => self.author_name(author),
+                    None => "yourself".into(),
+                };
+                let text = match &message.content {
+                    Content::Text { body, .. } => body
+                        .as_str()
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                    _ => String::new(),
+                };
+                Some(format!("↳ replying to {name}: {text}"))
+            }
+        }
+    }
+
+    /// Replies to a message; `false` if it can't be replied to.
+    pub fn start_reply(&mut self, id: ConversationId, message: MessageId) -> bool {
+        let can = self
+            .message(id, message)
+            .is_some_and(|m| self.actions(m).reply);
+        if let Some(log) = self.open.as_mut().filter(|_| can) {
+            log.compose = Compose::Reply(message);
+            log.selected = None;
+        }
+        can
+    }
+
+    /// Edits a message; returns its text for the composer, or `None` if it
+    /// can't be edited.
+    pub fn start_edit(&mut self, id: ConversationId, message: MessageId) -> Option<String> {
+        let found = self.message(id, message)?;
+        if !self.actions(found).edit {
+            return None;
+        }
+        let text = found.content.body().map(|body| body.as_str().to_string())?;
+        let log = self.open.as_mut()?;
+        log.compose = Compose::Edit(message);
+        log.selected = None;
+        Some(text)
+    }
+
+    /// Edits our last editable message, for `↑` in an empty composer.
+    pub fn edit_last(&mut self) -> Option<String> {
+        let log = self.open.as_ref()?;
+        let (id, last) = log
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.sender.is_none() && m.direction == Direction::Outgoing)
+            .map(|m| (log.id, m.id))?;
+        self.start_edit(id, last)
+    }
+
+    /// Ends a reply, edit, selection or delete question; `false` if there
+    /// was none.
+    pub fn cancel(&mut self) -> bool {
+        let Some(log) = self.open.as_mut() else {
+            return false;
+        };
+        if log.confirming.take().is_some() || log.selected.take().is_some() {
+            return true;
+        }
+        std::mem::take(&mut log.compose) != Compose::New
+    }
+
+    /// Selects the last message that can be acted on; returns its row.
+    pub fn select_last(&mut self) -> Option<usize> {
+        let log = self.open.as_ref()?;
+        let ix = (0..log.messages.len())
+            .rev()
+            .find(|&ix| !log.messages[ix].content.is_system())?;
+        self.select_row(ix)
+    }
+
+    /// Moves the selection by `step` rows, skipping system lines; returns
+    /// the selected row.
+    pub fn select_step(&mut self, step: isize) -> Option<usize> {
+        let log = self.open.as_ref()?;
+        let current = log
+            .selected
+            .and_then(|id| log.messages.iter().position(|m| m.id == id))?;
+        let mut ix = current;
+        loop {
+            ix = ix
+                .checked_add_signed(step)
+                .filter(|ix| *ix < log.messages.len())?;
+            if !log.messages[ix].content.is_system() {
+                return self.select_row(ix);
+            }
+        }
+    }
+
+    fn select_row(&mut self, ix: usize) -> Option<usize> {
+        let log = self.open.as_mut()?;
+        log.selected = Some(log.messages.get(ix)?.id);
+        log.confirming = None;
+        Some(ix)
+    }
+
+    pub fn selected(&self) -> Option<MessageId> {
+        self.open.as_ref()?.selected
+    }
+
+    /// Whether a delete question is open.
+    pub fn confirming_delete(&self) -> Option<MessageId> {
+        self.open.as_ref()?.confirming
+    }
+
+    /// Asks how to delete a message.
+    pub fn confirm_delete(&mut self, message: MessageId) {
+        if let Some(log) = self.open.as_mut() {
+            log.confirming = Some(message);
+        }
+    }
+
+    /// Deletes the message being asked about.
+    pub fn delete(&mut self, everyone: bool) -> Option<Command> {
+        let open = self.open_id()?;
+        let id = self.open.as_mut()?.confirming.take()?;
+        if everyone
+            && !self
+                .message(open, id)
+                .is_some_and(|m| self.actions(m).delete_for_everyone)
+        {
+            return None;
+        }
+        if let Some(log) = self.open.as_mut() {
+            log.selected = None;
+        }
+        Some(Command::Delete { id, everyone })
+    }
+
+    /// The row of a message in the open conversation.
+    pub fn row_of(&self, message: MessageId) -> Option<usize> {
+        let log = self.open.as_ref()?;
+        log.messages.iter().position(|m| m.id == message)
+    }
+
+    fn message(&self, conversation: ConversationId, id: MessageId) -> Option<&Message> {
+        let log = self.open.as_ref().filter(|log| log.id == conversation)?;
+        log.messages.iter().find(|m| m.id == id)
     }
 
     pub fn retry(&self, id: MessageId) -> Option<Command> {
@@ -1013,7 +1277,12 @@ mod tests {
         chat.open(ConversationId::new(1));
 
         assert!(chat.submit(" \n ").is_none());
-        let Some(Command::SendText { conversation, body }) = chat.submit("  hi\nthere \n") else {
+        let Some(Command::SendText {
+            conversation,
+            body,
+            reply_to: None,
+        }) = chat.submit("  hi\nthere \n")
+        else {
             panic!("expected SendText");
         };
         assert_eq!(conversation, ConversationId::new(1));
@@ -1302,5 +1571,174 @@ mod tests {
         assert_eq!(removed.log, [LogChange::Reset(0)]);
         assert_eq!(chat.open_id(), None);
         assert_eq!(titles(&chat), ["Unknown (0002)"]);
+    }
+
+    fn mine(id: i64, sent_at: u64) -> Message {
+        Message {
+            sender: None,
+            ..message(id, Direction::Outgoing, sent_at)
+        }
+    }
+
+    #[test]
+    fn actions_follow_ownership_status_and_age() {
+        let chat = chat();
+        let recent = NOW - MINUTE;
+        let actions = |message: &Message| chat.actions(message);
+        assert_eq!(
+            actions(&mine(1, recent)),
+            Actions {
+                reply: true,
+                edit: true,
+                delete_for_everyone: true,
+            }
+        );
+        assert_eq!(
+            actions(&incoming(2, recent)),
+            Actions {
+                reply: true,
+                edit: false,
+                delete_for_everyone: false,
+            }
+        );
+        let pending = Message {
+            status: Some(MessageStatus::Pending),
+            ..mine(3, recent)
+        };
+        assert!(!actions(&pending).edit && !actions(&pending).delete_for_everyone);
+        let old = mine(4, NOW - 25 * 60 * MINUTE);
+        assert!(!actions(&old).edit && !actions(&old).delete_for_everyone);
+        let deleted = Message {
+            content: Content::Deleted,
+            ..mine(5, recent)
+        };
+        assert_eq!(actions(&deleted), Actions::default());
+        let image = Message {
+            content: Content::Text {
+                body: MessageBody::new("look"),
+                attachments: vec![Attachment::Image],
+                quote: None,
+            },
+            ..mine(6, recent)
+        };
+        assert!(!actions(&image).edit && actions(&image).delete_for_everyone);
+    }
+
+    #[test]
+    fn replies_and_edits_change_what_submit_sends() {
+        let recent = NOW - 2 * MINUTE;
+        let mut chat = opened(vec![incoming(1, recent), mine(2, recent + MINUTE)]);
+        let open = ConversationId::new(1);
+
+        assert!(chat.start_reply(open, MessageId::new(1)));
+        assert_eq!(chat.compose(), Compose::Reply(MessageId::new(1)));
+        assert_eq!(
+            chat.compose_banner().as_deref(),
+            Some("↳ replying to Alice: message 1")
+        );
+        let Some(Command::SendText {
+            reply_to: Some(id), ..
+        }) = chat.submit("yes")
+        else {
+            panic!("expected a reply");
+        };
+        assert_eq!(id, MessageId::new(1));
+        assert_eq!(chat.compose(), Compose::New);
+
+        assert_eq!(chat.edit_last().as_deref(), Some("message 2"));
+        assert_eq!(
+            chat.compose_banner().as_deref(),
+            Some("editing your message")
+        );
+        let Some(Command::Edit { id, body }) = chat.submit("fixed") else {
+            panic!("expected an edit");
+        };
+        assert_eq!((id, body), (MessageId::new(2), MessageBody::new("fixed")));
+        assert_eq!(chat.start_edit(open, MessageId::new(1)), None, "not ours");
+
+        chat.start_reply(open, MessageId::new(2));
+        assert!(chat.cancel());
+        assert_eq!(chat.compose(), Compose::New);
+        assert!(!chat.cancel());
+    }
+
+    #[test]
+    fn selection_skips_system_lines_and_deletes_ask_first() {
+        let recent = NOW - 4 * MINUTE;
+        let update = Message {
+            content: Content::TimerChanged(None),
+            ..incoming(2, recent + MINUTE)
+        };
+        let mut chat = opened(vec![
+            incoming(1, recent),
+            update,
+            mine(3, recent + 2 * MINUTE),
+        ]);
+
+        assert_eq!(chat.select_last(), Some(2));
+        assert_eq!(chat.select_step(-1), Some(0), "skips the system line");
+        assert_eq!(chat.select_step(-1), None);
+        assert!(chat.row(0).unwrap().selected);
+        assert_eq!(chat.select_step(1), Some(2));
+
+        chat.confirm_delete(MessageId::new(3));
+        assert!(chat.row(2).unwrap().confirming_delete);
+        let Some(Command::Delete { id, everyone: true }) = chat.delete(true) else {
+            panic!("expected a delete for everyone");
+        };
+        assert_eq!(id, MessageId::new(3));
+        assert_eq!(chat.selected(), None);
+
+        chat.confirm_delete(MessageId::new(1));
+        assert!(chat.delete(true).is_none(), "not ours");
+        chat.confirm_delete(MessageId::new(1));
+        assert!(matches!(
+            chat.delete(false),
+            Some(Command::Delete {
+                everyone: false,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn failed_changes_show_on_their_row() {
+        let mut chat = opened(vec![mine(1, NOW - MINUTE)]);
+        let effects = chat.apply(
+            &Event::ChangeFailed {
+                id: MessageId::new(1),
+                error: BackendError::new("rejected"),
+            },
+            true,
+        );
+        assert_eq!(effects.log, [LogChange::Changed(0)]);
+        assert!(chat.row(0).unwrap().change_failed);
+    }
+
+    #[test]
+    fn the_latest_conversation_opens_once_at_start() {
+        let mut chat = with_conversations();
+        let effects = chat.open_latest(false).unwrap();
+        assert_eq!(chat.open_id(), Some(ConversationId::new(1)));
+        assert!(
+            !effects
+                .commands
+                .iter()
+                .any(|command| matches!(command, Command::MarkRead(_))),
+            "not read until the window is active"
+        );
+        assert!(chat.open_latest(true).is_none(), "only once");
+
+        let mut chat = with_conversations();
+        let effects = chat.open_latest(true).unwrap();
+        assert!(
+            effects
+                .commands
+                .iter()
+                .any(|command| matches!(command, Command::MarkRead(_)))
+        );
+        assert!(chat.open_latest(true).is_none());
+        let mut empty = super::tests::chat();
+        assert!(empty.open_latest(true).is_none(), "no conversations");
     }
 }

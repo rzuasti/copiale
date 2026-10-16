@@ -1,4 +1,5 @@
-//! Outgoing messages, sent in the background one at a time while connected.
+//! Outgoing messages and changes to them, sent in the background one at a
+//! time while connected.
 //!
 //! One at a time keeps them in order and stops concurrent sends from racing
 //! on shared session state.
@@ -10,34 +11,50 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 use crate::backend::{BackendError, SignalBackend};
-use crate::model::{Destination, Message, MessageBody, MessageId, Timestamp};
+use crate::model::{Destination, MessageId, Outgoing, Timestamp};
 
 pub(super) struct Outbox {
-    queue: VecDeque<Outgoing>,
+    queue: VecDeque<Job>,
     sending: Option<Sending>,
     connected: bool,
     /// How long a message may wait before it fails.
     timeout: Duration,
 }
 
-struct Outgoing {
+struct Job {
+    /// The stored message sent, or changed.
     id: MessageId,
     destination: Destination,
-    body: MessageBody,
+    outgoing: Outgoing,
+    /// The send's own timestamp.
     sent_at: Timestamp,
     deadline: Instant,
 }
 
+impl Job {
+    fn change(&self) -> bool {
+        !matches!(self.outgoing, Outgoing::Text { .. })
+    }
+}
+
 struct Sending {
-    outgoing: Outgoing,
+    outgoing: Job,
     task: JoinHandle<Result<(), BackendError>>,
 }
 
-/// How a queued message left the outbox, or why sending stopped.
+/// How a queued send left the outbox, or why sending stopped. `change` is
+/// set for edits and deletes, rather than new messages.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum Outcome {
-    Sent(MessageId),
-    Failed(MessageId, BackendError),
+    Sent {
+        id: MessageId,
+        change: bool,
+    },
+    Failed {
+        id: MessageId,
+        change: bool,
+        error: BackendError,
+    },
     /// The connection failed mid-send: the message is queued again and
     /// sending waits for [`Outbox::connected`].
     Interrupted(BackendError),
@@ -53,23 +70,21 @@ impl Outbox {
         }
     }
 
-    /// Queues a stored message and starts sending if idle. Must run inside
-    /// a `LocalSet`.
+    /// Queues a send for stored message `id`, sent at `sent_at`, and starts
+    /// sending if idle. Must run inside a `LocalSet`.
     pub(super) fn push<B: SignalBackend>(
         &mut self,
+        id: MessageId,
         destination: Destination,
-        message: &Message,
+        outgoing: Outgoing,
+        sent_at: Timestamp,
         backend: &mut B,
     ) {
-        self.queue.push_back(Outgoing {
-            id: message.id,
+        self.queue.push_back(Job {
+            id,
             destination,
-            body: message
-                .content
-                .body()
-                .cloned()
-                .unwrap_or_else(|| MessageBody::new("")),
-            sent_at: message.sent_at,
+            outgoing,
+            sent_at,
             deadline: Instant::now() + self.timeout,
         });
         self.start_next(backend);
@@ -107,21 +122,26 @@ impl Outbox {
         tokio::select! {
             result = async { task?.await.ok() }, if busy => {
                 let sending = self.sending.take().expect("sending");
+                let (id, change) = (sending.outgoing.id, sending.outgoing.change());
                 match result {
-                    Some(Ok(())) => Outcome::Sent(sending.outgoing.id),
+                    Some(Ok(())) => Outcome::Sent { id, change },
                     Some(Err(error)) if error.is_network() => {
                         self.connected = false;
                         self.queue.push_front(sending.outgoing);
                         Outcome::Interrupted(error)
                     }
-                    Some(Err(error)) => Outcome::Failed(sending.outgoing.id, error),
+                    Some(Err(error)) => Outcome::Failed { id, change, error },
                     // Only a panic fails the join; the panic hook has logged it.
-                    None => Outcome::Failed(sending.outgoing.id, BackendError::new("sending crashed")),
+                    None => Outcome::Failed { id, change, error: BackendError::new("sending crashed") },
                 }
             }
             () = sleep_until(deadline) => {
-                let id = self.expire(deadline.expect("deadline"));
-                Outcome::Failed(id, BackendError::new("timed out"))
+                let job = self.expire(deadline.expect("deadline"));
+                Outcome::Failed {
+                    id: job.id,
+                    change: job.change(),
+                    error: BackendError::new("timed out"),
+                }
             }
         }
     }
@@ -134,28 +154,28 @@ impl Outbox {
         let Some(next) = self.queue.pop_front() else {
             return;
         };
-        let send = backend.send_text(next.destination, next.body.clone(), next.sent_at);
+        let send = backend.send(next.destination, next.outgoing.clone(), next.sent_at);
         self.sending = Some(Sending {
             outgoing: next,
             task: tokio::task::spawn_local(send),
         });
     }
 
-    /// Drops the message due at `deadline`.
-    fn expire(&mut self, deadline: Instant) -> MessageId {
+    /// Drops the send due at `deadline`.
+    fn expire(&mut self, deadline: Instant) -> Job {
         if let Some(sending) = self
             .sending
             .take_if(|sending| sending.outgoing.deadline == deadline)
         {
             sending.task.abort();
-            return sending.outgoing.id;
+            return sending.outgoing;
         }
         let index = self
             .queue
             .iter()
             .position(|outgoing| outgoing.deadline == deadline)
             .expect("deadline from the queue");
-        self.queue.remove(index).expect("index in range").id
+        self.queue.remove(index).expect("index in range")
     }
 }
 

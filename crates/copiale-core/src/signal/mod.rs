@@ -33,7 +33,7 @@ use tokio::task::JoinHandle;
 use crate::backend::{BackendError, Incoming, Linker, SignalBackend};
 use crate::model::{
     self, Attachment, Change, ChatRef, Destination, GroupId, GroupInfo, GroupMasterKey, GroupRef,
-    GroupUpdate, IncomingMessage, Member, MessageBody, MessageChange, MessageRef, Quote,
+    GroupUpdate, IncomingMessage, Member, MessageBody, MessageChange, MessageRef, Outgoing, Quote,
     ReceiptKind, SentMessage, ServiceId, Timestamp, Unsupported,
 };
 use crate::storage::Database;
@@ -153,45 +153,118 @@ impl SignalBackend for PresageBackend {
 
     /// Sends on a clone of the manager; libsignal-service adds the sync
     /// copy for the other devices.
-    fn send_text(
+    fn send(
         &mut self,
         destination: Destination,
-        body: MessageBody,
+        outgoing: Outgoing,
         timestamp: Timestamp,
     ) -> LocalBoxFuture<'static, Result<(), BackendError>> {
         let mut manager = self.manager.clone();
-        let message = DataMessage {
-            body: Some(body.as_str().into()),
-            timestamp: Some(timestamp.as_millis()),
-            ..Default::default()
-        };
+        let me = manager.registration_data().service_ids.aci;
+        let at = timestamp.as_millis();
         async move {
-            match destination {
-                Destination::Contact(recipient) => {
-                    manager
-                        .send_message(Aci::from(recipient.uuid()), message, timestamp.as_millis())
-                        .await
-                }
+            let group_v2 = match destination {
                 Destination::Group(group) => {
                     // presage's copy may be newer than the core's.
                     let revision = match manager.store().group(*group.key.as_bytes()).await {
                         Ok(Some(stored)) => stored.revision.max(group.revision),
                         _ => group.revision,
                     };
-                    let message = DataMessage {
-                        group_v2: Some(GroupContextV2 {
-                            master_key: Some(group.key.as_bytes().to_vec()),
-                            revision: Some(revision),
-                            ..Default::default()
-                        }),
-                        ..message
-                    };
+                    Some(GroupContextV2 {
+                        master_key: Some(group.key.as_bytes().to_vec()),
+                        revision: Some(revision),
+                        ..Default::default()
+                    })
+                }
+                Destination::Contact(_) => None,
+            };
+            let text = |body: MessageBody, quote: Option<Quote>| DataMessage {
+                body: Some(body.as_str().into()),
+                timestamp: Some(at),
+                quote: quote.map(|quote| proto_quote(quote, me)),
+                group_v2: group_v2.clone(),
+                ..Default::default()
+            };
+            let content: ContentBody = match outgoing {
+                Outgoing::Text { body, quote } => text(body, quote).into(),
+                Outgoing::Edit {
+                    target,
+                    body,
+                    quote,
+                } => EditMessage {
+                    target_sent_timestamp: Some(target.as_millis()),
+                    data_message: Some(text(body, quote)),
+                }
+                .into(),
+                Outgoing::Delete { target } => DataMessage {
+                    delete: Some(data_message::Delete {
+                        target_sent_timestamp: Some(target.as_millis()),
+                    }),
+                    timestamp: Some(at),
+                    group_v2: group_v2.clone(),
+                    ..Default::default()
+                }
+                .into(),
+            };
+            match destination {
+                Destination::Contact(recipient) => {
                     manager
-                        .send_message_to_group(group.key.as_bytes(), message, timestamp.as_millis())
+                        .send_message(Aci::from(recipient.uuid()), content, at)
+                        .await
+                }
+                Destination::Group(group) => {
+                    manager
+                        .send_message_to_group(group.key.as_bytes(), content, at)
                         .await
                 }
             }
             .map_err(presage_error)
+        }
+        .boxed_local()
+    }
+
+    fn sync_deleted_for_me(
+        &mut self,
+        destination: Destination,
+        messages: Vec<(Option<ServiceId>, Timestamp)>,
+    ) -> LocalBoxFuture<'static, Result<(), BackendError>> {
+        let mut manager = self.manager.clone();
+        let me = manager.registration_data().service_ids.aci;
+        let conversation = ConversationIdentifier {
+            identifier: Some(match destination {
+                Destination::Contact(peer) => {
+                    conversation_identifier::Identifier::ThreadServiceId(peer.uuid().to_string())
+                }
+                Destination::Group(group) => conversation_identifier::Identifier::ThreadGroupId(
+                    group.key.id().as_bytes().to_vec(),
+                ),
+            }),
+        };
+        let messages = messages
+            .into_iter()
+            .map(|(author, sent_at)| AddressableMessage {
+                author: Some(addressable_message::Author::AuthorServiceId(
+                    author.map_or(me, |author| author.uuid()).to_string(),
+                )),
+                sent_timestamp: Some(sent_at.as_millis()),
+            })
+            .collect();
+        let sync = SyncMessage {
+            content: Some(SyncContent::DeleteForMe(sync_message::DeleteForMe {
+                message_deletes: vec![sync_message::delete_for_me::MessageDeletes {
+                    conversation: Some(conversation),
+                    messages,
+                }],
+                ..Default::default()
+            })),
+            ..SyncMessage::with_padding(&mut rand::rng())
+        };
+        async move {
+            let me = manager.registration_data().service_ids.aci();
+            manager
+                .send_message(me, sync, Timestamp::now().as_millis())
+                .await
+                .map_err(presage_error)
         }
         .boxed_local()
     }
@@ -817,6 +890,17 @@ fn attachment_kind(kind: &str, flags: u32, file_name: Option<&str>) -> Attachmen
         Attachment::File {
             name: file_name.map(Into::into),
         }
+    }
+}
+
+/// How a reply quotes a message; `None` authors are this account.
+fn proto_quote(quote: Quote, me: uuid::Uuid) -> data_message::Quote {
+    data_message::Quote {
+        id: Some(quote.sent_at.as_millis()),
+        author_aci: Some(quote.author.map_or(me, |author| author.uuid()).to_string()),
+        text: (!quote.text.is_empty()).then_some(quote.text),
+        r#type: Some(data_message::quote::Type::Normal.into()),
+        ..Default::default()
     }
 }
 
@@ -1469,6 +1553,28 @@ mod tests {
         assert_eq!(quoted.text, "");
         assert_eq!(quoted.attachment, Some(Attachment::Image));
         assert_eq!(quote(&data_message::Quote::default()), None);
+    }
+
+    #[test]
+    fn sent_quotes_name_their_author() {
+        let quote = |author| Quote {
+            author,
+            sent_at: Timestamp::from_millis(50),
+            text: "ship it?".into(),
+            attachment: None,
+        };
+        let theirs = proto_quote(quote(Some(ServiceId::new(OTHER))), SENDER);
+        assert_eq!(theirs.author_aci, Some(OTHER.to_string()));
+        assert_eq!(theirs.id, Some(50));
+        assert_eq!(theirs.text.as_deref(), Some("ship it?"));
+        let ours = proto_quote(quote(None), SENDER);
+        assert_eq!(
+            ours.author_aci,
+            Some(SENDER.to_string()),
+            "we are the author"
+        );
+        let roundtrip = super::quote(&ours).unwrap();
+        assert_eq!(roundtrip.author, Some(ServiceId::new(SENDER)));
     }
 
     #[test]

@@ -13,10 +13,11 @@
 
 mod scrub;
 
-use tracing::{Level, Subscriber};
+use tracing::field::{Field, Visit};
+use tracing::{Level, Metadata, Subscriber};
 use tracing_subscriber::filter::{EnvFilter, filter_fn};
 use tracing_subscriber::fmt::MakeWriter;
-use tracing_subscriber::layer::SubscriberExt as _;
+use tracing_subscriber::layer::{self, Filter, SubscriberExt as _};
 use tracing_subscriber::util::SubscriberInitExt as _;
 use tracing_subscriber::{Layer as _, Registry};
 
@@ -85,8 +86,48 @@ where
     let layer = tracing_subscriber::fmt::layer()
         .with_writer(scrub::Scrubbing(writer))
         .with_filter(filter)
-        .with_filter(cap);
+        .with_filter(cap)
+        .with_filter(QuietEmptyStore);
     Registry::default().with(layer)
+}
+
+/// presage warnings about messages missing from its store, which keeps none
+/// by design (see `signal::store`).
+const EMPTY_STORE_WARNINGS: &[&str] = &[
+    "could not find message to delete in thread",
+    "Message referenced by delete-for-self message not found",
+    "Could not delete message referenced by delete-for-self message",
+];
+
+/// Drops [`EMPTY_STORE_WARNINGS`].
+struct QuietEmptyStore;
+
+impl<S> Filter<S> for QuietEmptyStore {
+    fn enabled(&self, _: &Metadata<'_>, _: &layer::Context<'_, S>) -> bool {
+        true
+    }
+
+    fn event_enabled(&self, event: &tracing::Event<'_>, _: &layer::Context<'_, S>) -> bool {
+        if !event.metadata().target().starts_with("presage") {
+            return true;
+        }
+        let mut message = MessageText(None);
+        event.record(&mut message);
+        !message
+            .0
+            .is_some_and(|text| EMPTY_STORE_WARNINGS.iter().any(|w| text.starts_with(w)))
+    }
+}
+
+/// An event's message text.
+struct MessageText(Option<String>);
+
+impl Visit for MessageText {
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            self.0 = Some(format!("{value:?}"));
+        }
+    }
 }
 
 fn is_copiale(target: &str) -> bool {
