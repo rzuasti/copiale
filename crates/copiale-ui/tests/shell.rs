@@ -16,13 +16,15 @@ use copiale_ui::onboarding::Screen;
 use copiale_ui::settings::Settings;
 use copiale_ui::theme::{self, ActivePalette as _, Appearance, Scheme, Theme};
 use copiale_ui::tray::{self, Tray, TrayAction, TrayState};
-use copiale_ui::{APP_ID, CoreSink, Quit, Request, Shell, main_window, main_window_options};
+use copiale_ui::{
+    APP_ID, CoreSink, Quit, Request, Shell, main_window, main_window_options, titlebar,
+};
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
-    AnyWindowHandle, App, AppContext as _, Entity, Focusable as _, Hsla, InputEvent as _,
-    MouseMoveEvent, Pixels, Point, Rgba, ScrollDelta, TestAppContext, VisualTestContext, point, px,
-    size,
+    AnyWindowHandle, App, AppContext as _, Context, Entity, Focusable as _, Hsla, InputEvent as _,
+    IntoElement, MouseMoveEvent, Pixels, Point, Render, Rgba, ScrollDelta, TestAppContext,
+    VisualTestContext, Window, WindowDecorations, WindowOptions, point, px, size,
 };
 use uuid::Uuid;
 
@@ -278,8 +280,43 @@ fn message(id: i64, direction: Direction, status: Option<MessageStatus>) -> Mess
 fn main_window_options_set_app_id_and_title(cx: &mut TestAppContext) {
     let options = cx.update(|cx| main_window_options(cx));
     assert_eq!(options.app_id.as_deref(), Some(APP_ID));
-    let title = options.titlebar.and_then(|titlebar| titlebar.title);
-    assert_eq!(title.as_deref(), Some("Copiale"));
+    assert!(options.app_owns_titlebar_drag);
+    assert_eq!(options.window_decorations, Some(WindowDecorations::Server));
+    let titlebar = options.titlebar.unwrap();
+    assert_eq!(titlebar.title.as_deref(), Some("Copiale"));
+    assert!(titlebar.appears_transparent);
+}
+
+#[gpui_kit::test]
+fn server_decorations_leave_out_the_titlebar(cx: &mut TestAppContext) {
+    let ui = Ui::open(cx);
+    assert!(!ui.shows("title-bar", cx));
+}
+
+struct Bar;
+
+impl Render for Bar {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        titlebar::titlebar(cx)
+    }
+}
+
+#[gpui_kit::test]
+fn titlebar_renders(cx: &mut TestAppContext) {
+    let window = cx.update(|cx| {
+        copiale_ui::init(cx);
+        theme::apply(&Theme::dark(), cx);
+        gpui_kit::open_window(WindowOptions::default(), cx, |_, cx| cx.new(|_| Bar))
+            .unwrap()
+            .0
+    });
+    cx.run_until_parked();
+    let found = cx
+        .update_window(window, |_, window, _| {
+            window.try_find("title-bar").is_some()
+        })
+        .unwrap();
+    assert!(found);
 }
 
 #[gpui_kit::test]

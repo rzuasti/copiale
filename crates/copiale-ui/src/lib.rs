@@ -11,6 +11,7 @@ mod qr;
 pub mod settings;
 mod shell;
 pub mod theme;
+pub mod titlebar;
 pub mod tray;
 
 use std::cell::RefCell;
@@ -21,9 +22,10 @@ use copiale_core::config::ConfigFile;
 use copiale_core::{Command, CoreHandle, Events};
 use futures::StreamExt as _;
 use futures::channel::mpsc::UnboundedReceiver;
+use gpui_kit::component::TitleBar;
 use gpui_kit::{
-    App, AppContext as _, Bounds, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions,
-    actions, px, size,
+    App, AppContext as _, Bounds, KeyBinding, TitlebarOptions, WindowBounds, WindowDecorations,
+    WindowOptions, actions, px, size,
 };
 use notifier::{DesktopNotifier, NoNotifier, Notifier};
 pub use qr::QrMatrix;
@@ -153,7 +155,8 @@ pub fn init(cx: &mut App) {
     theme::watch_settings(cx);
 }
 
-/// Options for the main window: centered, titled, tagged with [`APP_ID`].
+/// Options for the main window: centered, titled, tagged with [`APP_ID`],
+/// with room for [`titlebar`].
 pub fn main_window_options(cx: &App) -> WindowOptions {
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
@@ -163,8 +166,10 @@ pub fn main_window_options(cx: &App) -> WindowOptions {
         ))),
         titlebar: Some(TitlebarOptions {
             title: Some("Copiale".into()),
-            ..Default::default()
+            ..TitleBar::title_bar_options()
         }),
+        app_owns_titlebar_drag: true,
+        window_decorations: Some(WindowDecorations::Server),
         app_id: Some(APP_ID.into()),
         ..Default::default()
     }

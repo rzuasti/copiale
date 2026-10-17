@@ -179,8 +179,13 @@ Scope, UI design, architecture and work items for the first usable release.
 
 ### Window chrome
 
-- Custom minimal titlebar on macOS, Windows and GNOME-style desktops.
-- Server-side or no decorations on tiling WMs.
+- Custom minimal titlebar on macOS, Windows and GNOME-style desktops: a thin
+  strip across the window with the app name; drag, double-click and window
+  controls behave natively (traffic lights on macOS, native hit testing on
+  Windows, window menu on right click on Linux).
+- Linux asks for server-side decorations: KDE keeps its own titlebar, tiling
+  WMs draw none. The titlebar shows only when the compositor leaves
+  decorations to the client (GNOME).
 
 ### Settings
 

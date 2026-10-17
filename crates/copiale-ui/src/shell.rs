@@ -16,7 +16,7 @@ use crate::notifier::Notifier;
 use crate::onboarding::{Onboarding, Screen, describe};
 use crate::qr::{QrMatrix, qr_code};
 use crate::theme::ActivePalette as _;
-use crate::{CoreSink, main_window};
+use crate::{CoreSink, main_window, titlebar};
 
 /// Root view of the main window: onboarding until the core is ready, then
 /// the chats. Outlives the window: hiding closes it, and the next one shows
@@ -426,23 +426,28 @@ impl Shell {
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.attach(window, cx);
-        if let (Screen::Ready, Some(chat)) = (self.onboarding.screen(), &self.chat) {
+        let content = if let (Screen::Ready, Some(chat)) = (self.onboarding.screen(), &self.chat) {
             let chat = chat.clone();
             chat.update(cx, |chat, cx| chat.attach(window, cx));
-            return div().size_full().child(chat);
-        }
-        if std::mem::take(&mut self.focus_pending) {
-            self.focus_screen(window, cx);
-        }
-        div()
+            div().size_full().child(chat)
+        } else {
+            if std::mem::take(&mut self.focus_pending) {
+                self.focus_screen(window, cx);
+            }
+            div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .p_4()
+                .bg(cx.palette().background)
+                .text_color(cx.palette().text)
+                .child(self.render_screen(cx))
+        };
+        v_flex()
             .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .p_4()
-            .bg(cx.palette().background)
-            .text_color(cx.palette().text)
-            .child(self.render_screen(cx))
+            .children(titlebar::render(window, cx))
+            .child(div().flex_1().min_h_0().child(content))
     }
 }
 

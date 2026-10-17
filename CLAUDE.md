@@ -110,5 +110,5 @@ indicators (#14), incoming edits, deletes and quoted replies (#15), sending
 them (#16), disappearing message timers (#17), new 1:1 chats from contacts
 (#18), and notifications (#19) done: M2 complete. M3: command palette and
 keyboard navigation (#20), adaptive compact layout (#21), and single
-instance with background running and `--toggle`/`--quit` (#22) done. Next:
-custom titlebar and decorations (#23).
+instance with background running and `--toggle`/`--quit` (#22), and custom
+titlebar and decorations (#23) done. Next: settings UI (#24).
