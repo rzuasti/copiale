@@ -330,8 +330,8 @@ async fn messages_survive_a_restart() {
 #[tokio::test]
 async fn contacts_are_requested_and_refresh_conversations() {
     let (_dir, mut running) = ready().await;
-    // No contacts stored yet, so the core asked for them on start.
-    assert_eq!(running.network.contact_sync_requests(), 1);
+    // Never asked yet, so the core asks once connected.
+    until(&running, |network| network.contact_sync_requests() == 1).await;
 
     running.network.deliver(Incoming::ContactsSynced);
 
@@ -340,6 +340,66 @@ async fn contacts_are_requested_and_refresh_conversations() {
         Event::Conversations(_)
     ));
     expect(&mut running.events, Event::Contacts(Vec::new())).await;
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn offline_start_serves_at_once_and_asks_the_phone_once_connected() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut running = start_with(
+        dir.path(),
+        &MemorySecretStore::default(),
+        true,
+        fast(),
+        FakeNetwork::go_offline,
+    );
+    expect_ready(&mut running.events).await;
+    sync(&mut running).await;
+    assert_eq!(running.network.contact_sync_requests(), 0);
+    assert_eq!(running.network.settings_sync_requests(), 0);
+
+    running.network.go_online();
+    assert_eq!(
+        skip_disconnects(&mut running.events).await,
+        Event::Connected
+    );
+    until(&running, |network| {
+        network.contact_sync_requests() == 1 && network.settings_sync_requests() == 1
+    })
+    .await;
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn contacts_are_asked_for_hourly_while_none_come() {
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = MemorySecretStore::default();
+    let clock = ManualClock::new(Timestamp::from_millis(NOW));
+    let start_at = |offset: Duration| {
+        clock.set(Timestamp::from_millis(NOW + offset.as_millis() as u64));
+        let options = timed(fast(), &clock);
+        start_with(dir.path(), &secrets, true, options, |_| {})
+    };
+    let connected = async |running: &mut Running| {
+        expect_ready(&mut running.events).await;
+        expect(&mut running.events, Event::Connected).await;
+    };
+
+    let mut running = start_at(Duration::ZERO);
+    connected(&mut running).await;
+    until(&running, |network| network.contact_sync_requests() == 1).await;
+    stop(running).await;
+
+    // The phone sent nothing; too soon to ask again.
+    let mut running = start_at(Duration::from_secs(1800));
+    connected(&mut running).await;
+    sync(&mut running).await;
+    assert_eq!(running.network.contact_sync_requests(), 0);
+    stop(running).await;
+
+    let mut running = start_at(Duration::from_secs(3600));
+    connected(&mut running).await;
+    until(&running, |network| network.contact_sync_requests() == 1).await;
     stop(running).await;
 }
 
@@ -1106,7 +1166,7 @@ async fn links_after_the_phone_approves() {
         running.phone.device_name().as_deref(),
         Some("Copiale on test")
     );
-    assert_eq!(running.network.contact_sync_requests(), 1);
+    until(&running, |network| network.contact_sync_requests() == 1).await;
     running.network.deliver(Incoming::QueueEmpty);
     expect(&mut running.events, Event::Synced).await;
     stop(running).await;
@@ -1672,7 +1732,7 @@ async fn settings_are_requested_until_known() {
         }
     );
     expect(&mut running.events, Event::Connected).await;
-    assert_eq!(running.network.settings_sync_requests(), 1);
+    until(&running, |network| network.settings_sync_requests() == 1).await;
     running.network.deliver(Incoming::Settings {
         read_receipts: Some(true),
         typing_indicators: None,

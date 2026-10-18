@@ -106,7 +106,6 @@ impl BackendError {
 ///
 /// Futures need not be `Send`: presage's are not, so the core drives the
 /// backend from a single thread.
-#[allow(async_fn_in_trait)]
 pub trait SignalBackend {
     /// Opens the connection and streams incoming content until it closes.
     ///
@@ -178,12 +177,12 @@ pub trait SignalBackend {
     fn device_name(&self) -> Option<String>;
 
     /// Asks the phone to send its contacts; they arrive as
-    /// [`Incoming::ContactsSynced`].
-    async fn request_contact_sync(&mut self) -> Result<(), BackendError>;
+    /// [`Incoming::ContactsSynced`]. Doesn't borrow the backend.
+    fn request_contact_sync(&mut self) -> LocalBoxFuture<'static, Result<(), BackendError>>;
 
     /// Asks the phone to send the account's settings; they arrive as
-    /// [`Incoming::Settings`].
-    async fn request_settings_sync(&mut self) -> Result<(), BackendError>;
+    /// [`Incoming::Settings`]. Doesn't borrow the backend.
+    fn request_settings_sync(&mut self) -> LocalBoxFuture<'static, Result<(), BackendError>>;
 
     /// Tells `recipient` we read their messages sent at `timestamps`.
     /// Doesn't borrow the backend.

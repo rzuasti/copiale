@@ -127,6 +127,22 @@ impl FakeBackend {
     fn record<R>(&self, change: impl FnOnce(&mut State) -> R) -> R {
         record(&self.state, &self.changes, change)
     }
+
+    /// A request to the phone: `count` once the network is up.
+    fn sync_request(
+        &self,
+        count: impl FnOnce(&mut State) + 'static,
+    ) -> LocalBoxFuture<'static, Result<(), BackendError>> {
+        let state = self.state.clone();
+        let changes = self.changes.clone();
+        let mut link = self.link.subscribe();
+        async move {
+            link.wait_for(|link| !link.offline).await.ok();
+            record(&state, &changes, count);
+            Ok(())
+        }
+        .boxed_local()
+    }
 }
 
 fn record<R>(
@@ -236,9 +252,9 @@ impl SignalBackend for FakeBackend {
         .boxed_local()
     }
 
-    async fn request_contact_sync(&mut self) -> Result<(), BackendError> {
-        self.record(|state| state.contact_sync_requests += 1);
-        Ok(())
+    /// Counted once sent: hangs while the network is down.
+    fn request_contact_sync(&mut self) -> LocalBoxFuture<'static, Result<(), BackendError>> {
+        self.sync_request(|state| state.contact_sync_requests += 1)
     }
 
     fn own_id(&self) -> ServiceId {
@@ -250,9 +266,9 @@ impl SignalBackend for FakeBackend {
         Some(name.unwrap_or_else(|| DEVICE_NAME.into()))
     }
 
-    async fn request_settings_sync(&mut self) -> Result<(), BackendError> {
-        self.record(|state| state.settings_sync_requests += 1);
-        Ok(())
+    /// Counted once sent: hangs while the network is down.
+    fn request_settings_sync(&mut self) -> LocalBoxFuture<'static, Result<(), BackendError>> {
+        self.sync_request(|state| state.settings_sync_requests += 1)
     }
 
     fn send_read_receipts(

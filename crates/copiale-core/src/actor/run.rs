@@ -7,7 +7,7 @@ use std::time::Duration;
 use futures::future::LocalBoxFuture;
 use futures::stream::LocalBoxStream;
 use futures::{FutureExt as _, StreamExt as _};
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::sync::oneshot;
 use tokio::time::Instant;
 
@@ -262,37 +262,21 @@ impl Core {
             Ok(count) => tracing::info!(count, "edits and deletes for unknown messages dropped"),
             Err(error) => self.database_error(error),
         }
-        // Contact names title conversations; ask the phone if there are none,
-        // or daily for changes it didn't push.
-        if linked_now || self.contacts_due(db).await {
-            let request = backend.request_contact_sync();
-            match tokio::time::timeout(self.options.connect_timeout, request).await {
-                Ok(Ok(())) => {
-                    if let Err(error) = db.set_contacts_requested_at(Timestamp::now()).await {
-                        self.database_error(error);
-                    }
-                }
-                Ok(Err(error)) => tracing::warn!(%error, "requesting contacts failed"),
-                Err(_) => tracing::warn!("requesting contacts timed out"),
-            }
-        }
-
-        // Privacy settings: off until the phone says otherwise.
+        // Asked of the phone once connected. Contact names title
+        // conversations; settings stay off until the phone says otherwise.
+        let mut contacts_wanted = linked_now || self.contacts_due(db).await;
+        let mut settings_wanted = false;
         let mut settings = match db.settings().await {
             Ok(Some(settings)) if !linked_now => settings,
             known => {
                 if let Err(error) = known {
                     self.database_error(error);
                 }
-                let request = backend.request_settings_sync();
-                match tokio::time::timeout(self.options.connect_timeout, request).await {
-                    Ok(Ok(())) => {}
-                    Ok(Err(error)) => tracing::warn!(%error, "requesting settings failed"),
-                    Err(_) => tracing::warn!("requesting settings timed out"),
-                }
+                settings_wanted = true;
                 AccountSettings::default()
             }
         };
+        let (contacts_asked_tx, mut contacts_asked) = unbounded_channel();
         let device_name = backend.device_name();
         let account = |settings| {
             Event::Account(Account {
@@ -395,7 +379,10 @@ impl Core {
                     }
                     // Local data goes, so what's still arriving can too.
                     Some(Command::Unlink) => return Served::Unlink,
-                    Some(Command::Shutdown) | None if incoming.is_none() => return Served::Stop,
+                    Some(Command::Shutdown) | None if incoming.is_none() => {
+                        self.contacts_asked_meanwhile(db, &mut contacts_asked).await;
+                        return Served::Stop;
+                    }
                     Some(Command::Shutdown) | None => {
                         stopping = true;
                         backend.stop_receiving();
@@ -411,6 +398,17 @@ impl Core {
                             self.emit(Event::Connected);
                             probe.start();
                             outbox.connected(&mut backend);
+                            if std::mem::take(&mut contacts_wanted) {
+                                let request = timed(self.options.connect_timeout, backend.request_contact_sync());
+                                let asked = contacts_asked_tx.clone();
+                                tokio::task::spawn_local(async move {
+                                    asked.send(request.await).ok();
+                                });
+                            }
+                            if std::mem::take(&mut settings_wanted) {
+                                let request = timed(self.options.connect_timeout, backend.request_settings_sync());
+                                spawn_logged("requesting settings", request);
+                            }
                         }
                         Err(error) if error.is_unauthorized() => {
                             tracing::warn!(%error, "credentials rejected");
@@ -569,6 +567,7 @@ impl Core {
                     },
                     Update::Done(key) => groups.finished(key, &mut backend),
                 },
+                Some(asked) = contacts_asked.recv() => self.contacts_asked(db, asked).await,
                 check = probe.next() => match check {
                     Check::Due => probe.run(&mut backend),
                     Check::Failed(error) => {
@@ -633,6 +632,7 @@ impl Core {
                 incoming = None;
                 drain_by = None;
                 if stopping {
+                    self.contacts_asked_meanwhile(db, &mut contacts_asked).await;
                     return Served::Stop;
                 }
                 probe.stop();
@@ -1077,15 +1077,43 @@ impl Core {
         }
     }
 
-    /// Whether to ask the phone for contacts: none stored, or not asked for
-    /// a day.
-    async fn contacts_due(&self, db: &Database) -> bool {
-        match (db.has_contacts().await, db.contacts_requested_at().await) {
-            (Ok(true), Ok(Some(at))) => {
-                Timestamp::now().as_millis().saturating_sub(at.as_millis()) >= CONTACTS_REFRESH_MS
+    /// Notes when contacts were last asked of the phone.
+    async fn contacts_asked(&self, db: &Database, result: Result<(), BackendError>) {
+        match result {
+            Ok(()) => {
+                if let Err(error) = db.set_contacts_requested_at(self.options.clock.now()).await {
+                    self.database_error(error);
+                }
             }
-            _ => true,
+            Err(error) => tracing::warn!(%error, "requesting contacts failed"),
         }
+    }
+
+    /// Notes requests that finished but weren't handled yet, before
+    /// stopping, so the next start doesn't ask again.
+    async fn contacts_asked_meanwhile(
+        &self,
+        db: &Database,
+        asked: &mut UnboundedReceiver<Result<(), BackendError>>,
+    ) {
+        while let Ok(result) = asked.try_recv() {
+            self.contacts_asked(db, result).await;
+        }
+    }
+
+    /// Whether to ask the phone for contacts: never asked, or not for a
+    /// day, or for an hour while none have come; the phone may ignore
+    /// requests in quick succession.
+    async fn contacts_due(&self, db: &Database) -> bool {
+        let Ok(Some(at)) = db.contacts_requested_at().await else {
+            return true;
+        };
+        let wait = match db.has_contacts().await {
+            Ok(true) => CONTACTS_REFRESH_MS,
+            _ => CONTACTS_RETRY_MS,
+        };
+        let now = self.options.clock.now();
+        now.as_millis().saturating_sub(at.as_millis()) >= wait
     }
 
     async fn send_conversations(&self, db: &Database) {
@@ -1170,6 +1198,9 @@ fn quote_of(message: &Message) -> Option<Quote> {
 /// How often contacts are asked of the phone, besides the syncs it pushes.
 const CONTACTS_REFRESH_MS: u64 = 24 * 3600 * 1000;
 
+/// How soon contacts are asked again while none have come.
+const CONTACTS_RETRY_MS: u64 = 3600 * 1000;
+
 /// How long an edit or delete waits for its message.
 const PENDING_CHANGE_LIFETIME_MS: u64 = 24 * 3600 * 1000;
 
@@ -1212,6 +1243,16 @@ fn send_receipts<B: SignalBackend>(
         }
     }
     spawn_logged("syncing reads", backend.send_read_sync(read));
+}
+
+/// `request`, failing as a network error after `timeout`.
+fn timed(
+    timeout: Duration,
+    request: LocalBoxFuture<'static, Result<(), BackendError>>,
+) -> LocalBoxFuture<'static, Result<(), BackendError>> {
+    tokio::time::timeout(timeout, request)
+        .map(|result| result.unwrap_or_else(|_| Err(BackendError::network("timed out"))))
+        .boxed_local()
 }
 
 /// Runs a background send, logging failure. Must run inside a `LocalSet`.

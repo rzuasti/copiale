@@ -405,22 +405,27 @@ impl SignalBackend for PresageBackend {
             .map(str::to_owned)
     }
 
-    async fn request_contact_sync(&mut self) -> Result<(), BackendError> {
-        self.manager.request_contacts().await.map_err(presage_error)
+    fn request_contact_sync(&mut self) -> LocalBoxFuture<'static, Result<(), BackendError>> {
+        let mut manager = self.manager.clone();
+        async move { manager.request_contacts().await.map_err(presage_error) }.boxed_local()
     }
 
-    async fn request_settings_sync(&mut self) -> Result<(), BackendError> {
+    fn request_settings_sync(&mut self) -> LocalBoxFuture<'static, Result<(), BackendError>> {
+        let mut manager = self.manager.clone();
         let request = SyncMessage {
             content: Some(SyncContent::Request(sync_message::Request {
                 r#type: Some(sync_message::request::Type::Configuration.into()),
             })),
             ..SyncMessage::with_padding(&mut rand::rng())
         };
-        let me = self.manager.registration_data().service_ids.aci();
-        self.manager
-            .send_message(me, request, Timestamp::now().as_millis())
-            .await
-            .map_err(presage_error)
+        async move {
+            let me = manager.registration_data().service_ids.aci();
+            manager
+                .send_message(me, request, Timestamp::now().as_millis())
+                .await
+                .map_err(presage_error)
+        }
+        .boxed_local()
     }
 
     fn send_read_receipts(
