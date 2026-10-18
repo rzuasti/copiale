@@ -78,8 +78,13 @@ Scope, UI design, architecture and work items for the first usable release.
   - **Log** (default): `name @ time > text`, by prominence: text, then name
     (per-contact colors), then time. Consecutive messages from one sender
     are grouped, indented to the first message's text.
-  - **Blocks**: Slack-style name header with grouped messages.
-  - **Bubbles**: left/right bubbles.
+  - **Blocks**: Slack-style name header with grouped messages; the time
+    sits in the header.
+  - **Bubbles**: incoming on the left, ours on the right, with the time and
+    glyphs inside; the sender's name heads each group.
+  - Avatars, when on, show in the chat list only.
+  - Day separators, system lines, quotes and actions look alike in every
+    style; switching keeps the scroll position.
 - Status (`…` pending, `✓` sent, `✓✓` delivered, accent `✓✓` read), edited
   marker and disappearing timer shown as small muted glyphs.
 - Typing: `alice is typing…` as a line after the last message, replaced by
@@ -237,8 +242,7 @@ The settings UI (`Ctrl+,` or the palette) is one keyboard-driven list:
 - Fonts open a fuzzy picker over installed fonts plus "Default"; moving
   previews live, `Enter` saves, `Esc` restores.
 - Every change applies at once and is written to `config.toml`.
-- Privacy and device name are read-only mirrors of the phone's settings;
-  message style shows the current style until blocks and bubbles exist.
+- Privacy and device name are read-only mirrors of the phone's settings.
 - Fonts that aren't installed fall back to the default with a warning.
 
 ## Architecture

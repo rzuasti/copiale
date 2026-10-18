@@ -5,8 +5,8 @@ use std::ops::Range;
 
 use copiale_core::Account;
 use copiale_core::config::{
-    Choice, Clock, Config, Density, NotificationContent, Setting, ThemeMode, TimestampVisibility,
-    Typography, WindowConfig,
+    Choice, Clock, Config, Density, MessageStyle, NotificationContent, Setting, ThemeMode,
+    TimestampVisibility, Typography, WindowConfig,
 };
 
 use crate::fuzzy::fuzzy_match;
@@ -175,7 +175,7 @@ impl Field {
     pub fn read_only(self) -> bool {
         matches!(
             self,
-            Self::MessageStyle | Self::ReadReceipts | Self::TypingIndicators | Self::DeviceName
+            Self::ReadReceipts | Self::TypingIndicators | Self::DeviceName
         )
     }
 
@@ -186,6 +186,7 @@ impl Field {
                 Some("set on your phone")
             }
             Self::Blur => Some("where the compositor allows"),
+            Self::Avatars => Some("in the chat list"),
             _ => None,
         }
     }
@@ -209,11 +210,7 @@ impl Field {
             Self::FontSize => Value::Number(format!("{} px", typography.size)),
             Self::LineHeight => Value::Number(format!("{:.1}", typography.line_height)),
             Self::Density => choice(layout.density),
-            // Blocks and bubbles aren't drawn yet.
-            Self::MessageStyle => Value::Choice {
-                options: vec![layout.message_style.name()],
-                selected: 0,
-            },
+            Self::MessageStyle => choice(layout.message_style),
             Self::Timestamps => choice(layout.timestamps),
             Self::Clock => choice(layout.clock),
             Self::Avatars => Value::Toggle(layout.avatars),
@@ -254,6 +251,7 @@ impl Field {
                     .then_some(Setting::LineHeight(value))?
             }
             Self::Density => Setting::Density(nudge(layout.density, step)?),
+            Self::MessageStyle => Setting::MessageStyle(nudge(layout.message_style, step)?),
             Self::Timestamps => Setting::Timestamps(nudge(layout.timestamps, step)?),
             Self::Clock => Setting::Clock(nudge(layout.clock, step)?),
             Self::Avatars => Setting::Avatars(!layout.avatars),
@@ -269,7 +267,6 @@ impl Field {
             Self::UiFont
             | Self::MonoFont
             | Self::BodyFont
-            | Self::MessageStyle
             | Self::ReadReceipts
             | Self::TypingIndicators
             | Self::DeviceName => return None,
@@ -285,6 +282,9 @@ impl Field {
             Self::BodyFont => Activation::PickFont(FontRole::Body),
             Self::Theme => Activation::Change(Setting::Theme(cycle(config.appearance.theme))),
             Self::Density => Activation::Change(Setting::Density(cycle(config.layout.density))),
+            Self::MessageStyle => {
+                Activation::Change(Setting::MessageStyle(cycle(config.layout.message_style)))
+            }
             Self::Timestamps => {
                 Activation::Change(Setting::Timestamps(cycle(config.layout.timestamps)))
             }
@@ -304,6 +304,7 @@ impl Field {
         Some(match self {
             Self::Theme => Setting::Theme(nth::<ThemeMode>(ix)?),
             Self::Density => Setting::Density(nth::<Density>(ix)?),
+            Self::MessageStyle => Setting::MessageStyle(nth::<MessageStyle>(ix)?),
             Self::Timestamps => Setting::Timestamps(nth::<TimestampVisibility>(ix)?),
             Self::Clock => Setting::Clock(nth::<Clock>(ix)?),
             Self::NotificationContent => {
@@ -502,7 +503,6 @@ impl FontPicker {
 #[cfg(test)]
 mod tests {
     use copiale_core::AccountSettings;
-    use copiale_core::config::MessageStyle;
 
     use super::*;
 
@@ -655,7 +655,6 @@ mod tests {
             Field::ReadReceipts,
             Field::TypingIndicators,
             Field::DeviceName,
-            Field::MessageStyle,
         ] {
             assert!(field.read_only());
             assert_eq!(field.step(&config, 1), None);
@@ -664,15 +663,24 @@ mod tests {
     }
 
     #[test]
-    fn message_style_shows_the_current_one_only() {
+    fn message_styles_step_and_cycle() {
         let mut config = Config::default();
-        config.layout.message_style = MessageStyle::Bubbles;
         assert_eq!(
             Field::MessageStyle.value(&config, None),
             Value::Choice {
-                options: vec!["bubbles"],
+                options: vec!["log", "blocks", "bubbles"],
                 selected: 0,
             }
+        );
+        stepped(&mut config, Field::MessageStyle, 2);
+        assert_eq!(config.layout.message_style, MessageStyle::Bubbles);
+        assert_eq!(
+            Field::MessageStyle.activate(&config),
+            Activation::Change(Setting::MessageStyle(MessageStyle::Log))
+        );
+        assert_eq!(
+            Field::MessageStyle.choose(1),
+            Some(Setting::MessageStyle(MessageStyle::Blocks))
         );
     }
 

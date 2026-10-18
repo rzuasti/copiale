@@ -4,7 +4,9 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
-use copiale_core::config::{Clock, Config, Density, NotificationContent, Setting, ThemeMode};
+use copiale_core::config::{
+    Clock, Config, Density, MessageStyle, NotificationContent, Setting, ThemeMode,
+};
 use copiale_core::{
     Account, AccountSettings, Attachment, BackendError, Command, Contact, Content, ConversationId,
     ConversationSummary, Direction, Event, Expiry, GroupMasterKey, GroupUpdate, Member, Message,
@@ -27,9 +29,9 @@ use copiale_ui::{
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
-    AnyWindowHandle, App, AppContext as _, Context, Entity, Focusable as _, Hsla, InputEvent as _,
-    IntoElement, MouseMoveEvent, Pixels, Point, Render, Rgba, ScrollDelta, TestAppContext,
-    VisualTestContext, Window, WindowDecorations, WindowOptions, point, px, size,
+    AnyWindowHandle, App, AppContext as _, Bounds, Context, Entity, Focusable as _, Hsla,
+    InputEvent as _, IntoElement, MouseMoveEvent, Pixels, Point, Render, Rgba, ScrollDelta,
+    TestAppContext, VisualTestContext, Window, WindowDecorations, WindowOptions, point, px, size,
 };
 use uuid::Uuid;
 
@@ -1604,8 +1606,9 @@ fn font_size_and_opacity_apply_to_the_theme(cx: &mut TestAppContext) {
     assert_eq!(config(cx).window.opacity, 0.9);
     let background = cx.update(|cx| cx.palette().background);
     assert!((background.a - 0.9).abs() < 1e-6, "{background:?}");
-    // Popovers stay opaque.
+    // Popovers stay opaque; scrollbar tracks are clear.
     assert_eq!(cx.update(|cx| cx.theme().popover.a), 1.);
+    assert_eq!(cx.update(|cx| cx.theme().scrollbar.a), 0.);
 }
 
 #[gpui_kit::test]
@@ -1722,6 +1725,140 @@ fn cursor_blinks_reuse_the_drawn_log(cx: &mut TestAppContext) {
     );
     draw(cx);
     assert!(renders(cx) > before);
+
+    // Changes to the chat view redraw it without a refresh.
+    let before = renders(cx);
+    cx.update(|cx| settings::change(Setting::Density(Density::Roomy), cx));
+    draw(cx);
+    assert!(renders(cx) > before);
+    let before = renders(cx);
+    cx.update(|cx| {
+        let chat = ui.shell.read(cx).chat().unwrap().clone();
+        chat.update(cx, |_, cx| cx.notify());
+    });
+    draw(cx);
+    assert!(renders(cx) > before);
+}
+
+fn set_style(ui: &Ui, style: MessageStyle, cx: &mut TestAppContext) {
+    cx.update(|cx| settings::change(Setting::MessageStyle(style), cx));
+    ui.frame(cx);
+}
+
+fn bounds(ui: &Ui, id: impl Into<gpui_kit::ElementId>, cx: &mut TestAppContext) -> Bounds<Pixels> {
+    let id = id.into();
+    cx.update_window(ui.window(), |_, window, _| window.find(id).bounds())
+        .unwrap()
+}
+
+#[gpui_kit::test]
+fn every_message_style_shows_failures_and_actions(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.open_alice(cx);
+    ui.event(
+        Event::MessageAdded(message(
+            11,
+            Direction::Outgoing,
+            Some(MessageStatus::Failed),
+        )),
+        cx,
+    );
+    for style in [
+        MessageStyle::Log,
+        MessageStyle::Blocks,
+        MessageStyle::Bubbles,
+    ] {
+        set_style(&ui, style, cx);
+        assert!(ui.shows(("row", 10u64), cx), "{style:?}");
+        assert!(ui.shows(("retry", 11u64), cx), "{style:?}");
+        assert_eq!(
+            ui.shows(("bubble", 10u64), cx),
+            style == MessageStyle::Bubbles,
+            "{style:?}"
+        );
+        ui.hover(("row", 10u64), cx);
+        ui.frame(cx);
+        assert!(ui.shows(("reply", 10u64), cx), "{style:?}");
+        ui.hover(("row", 11u64), cx);
+        ui.frame(cx);
+    }
+}
+
+#[gpui_kit::test]
+fn blocks_head_groups_and_bubbles_put_ours_on_the_right(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.open_alice(cx);
+    ui.event(
+        Event::MessageAdded(message(11, Direction::Outgoing, Some(MessageStatus::Sent))),
+        cx,
+    );
+    ui.frame(cx);
+    let log_height = bounds(&ui, ("row", 10u64), cx).size.height;
+    set_style(&ui, MessageStyle::Blocks, cx);
+    // The header takes a line of its own.
+    assert!(bounds(&ui, ("row", 10u64), cx).size.height > log_height);
+
+    set_style(&ui, MessageStyle::Bubbles, cx);
+    assert!(ui.shows(("bubble-name", 10u64), cx));
+    assert!(ui.shows(("bubble-name", 11u64), cx));
+    let theirs = bounds(&ui, ("bubble", 10u64), cx);
+    let ours = bounds(&ui, ("bubble", 11u64), cx);
+    let row = bounds(&ui, ("row", 11u64), cx);
+    assert!(ours.left() > theirs.left());
+    assert!(ours.right() > theirs.right());
+    assert!(row.right() - ours.right() < px(32.));
+}
+
+#[gpui_kit::test]
+fn switching_style_keeps_the_scroll_position(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.click(("conversation", 1u64), cx);
+    long_messages(&ui, cx);
+    cx.update_window(ui.window(), |_, window, cx| {
+        window.scroll("log", ScrollDelta::Lines(point(0., 40.)), cx);
+    })
+    .unwrap();
+    ui.settle(cx);
+    let top = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            let chat = ui.shell.read(cx).chat().unwrap().read(cx);
+            chat.log().logical_scroll_top().item_ix
+        })
+    };
+    let before = top(cx);
+    assert!(before > 0);
+    for style in [
+        MessageStyle::Bubbles,
+        MessageStyle::Blocks,
+        MessageStyle::Log,
+    ] {
+        set_style(&ui, style, cx);
+        ui.frame(cx);
+        assert_eq!(top(cx), before, "{style:?}");
+    }
+}
+
+#[gpui_kit::test]
+fn overlays_keep_the_mouse_from_the_window_underneath(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.click(("conversation", 1u64), cx);
+    long_messages(&ui, cx);
+    ui.press("ctrl-,", cx);
+
+    ui.hover(("row", 60u64), cx);
+    ui.frame(cx);
+    assert!(!ui.shows(("reply", 60u64), cx));
+    cx.update_window(ui.window(), |_, window, cx| {
+        window.scroll("log", ScrollDelta::Lines(point(0., 40.)), cx);
+    })
+    .unwrap();
+    ui.settle(cx);
+    let following = cx.update(|cx| {
+        let chat = ui.shell.read(cx).chat().unwrap().read(cx);
+        chat.log().is_following_tail()
+    });
+    assert!(following);
+    assert_eq!(overlay(&ui, cx), Some(Overlay::Settings));
 }
 
 #[gpui_kit::test]

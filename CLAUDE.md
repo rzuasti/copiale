@@ -111,5 +111,5 @@ them (#16), disappearing message timers (#17), new 1:1 chats from contacts
 (#18), and notifications (#19) done: M2 complete. M3: command palette and
 keyboard navigation (#20), adaptive compact layout (#21), and single
 instance with background running and `--toggle`/`--quit` (#22), and custom
-titlebar and decorations (#23), and the settings UI (#24) done. Next:
-blocks and bubbles message styles (#25).
+titlebar and decorations (#23), the settings UI (#24), and blocks and
+bubbles message styles (#25) done. Next: unlink and wipe local data (#26).

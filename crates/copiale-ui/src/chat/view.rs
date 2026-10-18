@@ -7,10 +7,10 @@ use std::ops::Range;
 use std::rc::Rc;
 use std::time::Duration;
 
-use copiale_core::config::{self, Setting, TimestampVisibility};
+use copiale_core::config::{self, MessageStyle, Setting, TimestampVisibility};
 use copiale_core::{
-    Account, Command, ConversationId, ConversationSummary, Event, MessageId, MessageStatus, Peer,
-    Timestamp,
+    Account, Command, ConversationId, ConversationSummary, Direction, Event, MessageId,
+    MessageStatus, Peer, Timestamp,
 };
 use gpui_kit::base::{Easing, Presence, PresencePhase, Transition};
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState, Textarea, TextareaState};
@@ -209,11 +209,19 @@ struct Part {
     render: fn(&mut ChatView, &mut Window, &mut Context<ChatView>) -> AnyElement,
     /// How often it was drawn anew.
     renders: usize,
+    /// Redraws when the chat view changes; notifying it alone leaves cached
+    /// children as they were.
+    observing: Option<Subscription>,
 }
 
 impl Render for Part {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.renders += 1;
+        if self.observing.is_none()
+            && let Some(view) = self.view.upgrade()
+        {
+            self.observing = Some(cx.observe(&view, |_, _, cx| cx.notify()));
+        }
         let render = self.render;
         self.view
             .update(cx, |view, cx| render(view, window, cx))
@@ -266,6 +274,7 @@ impl ChatView {
                 view,
                 render,
                 renders: 0,
+                observing: None,
             })
         };
         let log_part = part(|view, _, cx| view.render_log(cx), cx);
@@ -1078,6 +1087,8 @@ impl ChatView {
                 .items_start()
                 .pt(px(64.))
                 .bg(palette.background.opacity(0.6))
+                // The window underneath gets no hover, clicks or scrolling.
+                .occlude()
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|view, _, window, cx| view.close_overlay(window, cx)),
@@ -2150,9 +2161,9 @@ impl ChatView {
             let hovered = self.hovered == Some(row.message.id);
             let layout = Settings::get(cx).layout;
             let style = LogStyle {
+                message_style: layout.message_style,
                 spacing: Spacing::for_density(layout.density),
                 timestamps: layout.timestamps,
-                avatars: layout.avatars,
                 time: self.chat.clock().time(row.message.sent_at),
             };
             return render_log_row(row, hovered, &style, window, cx);
@@ -2174,17 +2185,17 @@ impl ChatView {
     }
 }
 
-/// How log rows look, from the settings.
+/// How message rows look, from the settings.
 struct LogStyle {
+    message_style: MessageStyle,
     spacing: Spacing,
     timestamps: TimestampVisibility,
-    avatars: bool,
     /// The message's own time, for showing on hover.
     time: String,
 }
 
-/// Log style: `sender @ time > text`; follow-ups in a group indent to the
-/// first message's text.
+/// A message in the configured style, after its day label; system lines
+/// look the same in every style.
 fn render_log_row(
     row: Row<'_>,
     hovered: bool,
@@ -2193,20 +2204,83 @@ fn render_log_row(
     cx: &mut Context<ChatView>,
 ) -> AnyElement {
     let palette = cx.palette();
+    let (muted, border, surface) = (palette.text_muted, palette.border, palette.surface);
     let mono = cx.theme().mono_font_family.clone();
-    let muted = palette.text_muted;
-    let message = row.message;
-    let id = message.id;
-    let failed = message.status == Some(MessageStatus::Failed);
-    let status = match message.status {
-        Some(MessageStatus::Pending) => Some(("…", muted)),
-        Some(MessageStatus::Sent) => Some(("✓", muted)),
-        Some(MessageStatus::Delivered) => Some(("✓✓", muted)),
-        Some(MessageStatus::Read) => Some(("✓✓", palette.accent)),
-        Some(MessageStatus::Failed) | None => None,
-    };
-    let error: Option<SharedString> = row.error.map(|error| error.to_string().into());
+    let day = row.day.clone().map(|day| {
+        h_flex()
+            .px_4()
+            .pt_3()
+            .pb_1()
+            .gap_2()
+            .font_family(mono.clone())
+            .text_xs()
+            .text_color(muted)
+            .child(div().flex_1().h(px(1.)).bg(border))
+            .child(day)
+            .child(div().flex_1().h(px(1.)).bg(border))
+    });
+    if !row.system.is_empty() {
+        let time = &row.prefix.time;
+        return v_flex()
+            .w_full()
+            .children(day)
+            .child(
+                v_flex()
+                    .px_4()
+                    .pt_1()
+                    .font_family(mono)
+                    .text_size(PREFIX_SIZE)
+                    .line_height(window.line_height())
+                    .text_color(muted)
+                    .children(
+                        row.system
+                            .iter()
+                            .map(|line| div().child(format!("-- {line} · {time}"))),
+                    ),
+            )
+            .into_any_element();
+    }
 
+    let shown = hovered || row.selected || row.confirming_delete;
+    let bubbles = style.message_style == MessageStyle::Bubbles;
+    let message = match style.message_style {
+        MessageStyle::Log => log_row(&row, shown, style, window, cx),
+        MessageStyle::Blocks => block_row(&row, shown, style, window, cx),
+        MessageStyle::Bubbles => bubble_row(&row, shown, style, window, cx),
+    };
+    let id = row.message.id;
+    v_flex()
+        .w_full()
+        .children(day)
+        .child(
+            message
+                .id(("row", id.get() as u64))
+                .on_hover(
+                    cx.listener(move |view, hovered: &bool, _, cx| {
+                        view.hover_row(id, *hovered, cx)
+                    }),
+                )
+                .w_full()
+                .px_4()
+                // Bubbles mark the selected bubble instead.
+                .when(shown && !bubbles, |this| this.bg(surface))
+                .test_support(),
+        )
+        .into_any_element()
+}
+
+/// Log style: `sender @ time > text`; follow-ups in a group indent to the
+/// first message's text.
+fn log_row(
+    row: &Row<'_>,
+    shown: bool,
+    style: &LogStyle,
+    window: &mut Window,
+    cx: &mut Context<ChatView>,
+) -> gpui_kit::Div {
+    let palette = cx.palette();
+    let (muted, text) = (palette.text_muted, palette.text);
+    let mono = cx.theme().mono_font_family.clone();
     let sender = truncate(&row.prefix.sender, MAX_SENDER_CHARS);
     let prefix: SharedString = match style.timestamps {
         TimestampVisibility::Always => format!("{sender} @ {} >", row.prefix.time),
@@ -2226,10 +2300,7 @@ fn render_log_row(
         .text_system()
         .shape_line(prefix.clone(), font_size, &[run], None)
         .width;
-    let sender_color = row
-        .prefix
-        .peer
-        .map_or(palette.text_secondary, |peer| palette.nick(peer));
+    let color = sender_color(row, cx);
     let prefix = row.leads.then(|| {
         let sender_end = sender.len();
         div()
@@ -2244,82 +2315,176 @@ fn render_log_row(
             .child(StyledText::new(prefix).with_highlights([(
                 0..sender_end,
                 HighlightStyle {
-                    color: Some(sender_color),
+                    color: Some(color),
                     ..Default::default()
                 },
             )]))
     });
     let indent = (!row.leads).then(|| div().flex_none().w(width));
-    let avatar_size = window.line_height();
-    let avatar = style.avatars.then(|| match row.prefix.peer {
-        Some(_) if row.leads => avatar(&row.prefix.sender, sender_color, avatar_size, cx),
-        _ => div().flex_none().w(avatar_size),
-    });
-    let shown = hovered || row.selected || row.confirming_delete;
-    let hover_time = (style.timestamps == TimestampVisibility::Hover && shown).then(|| {
-        div()
-            .font_family(mono.clone())
-            .text_xs()
-            .text_color(muted)
-            .child(style.time.clone())
-    });
+    let hover_time = style.timestamps == TimestampVisibility::Hover && shown;
+    h_flex()
+        .items_start()
+        .gap_2()
+        .pt(group_gap(row, style.spacing, 1.))
+        .children(prefix)
+        .children(indent)
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .text_color(text)
+                .children(message_text(row, window, cx))
+                .children(shown.then(|| row_actions(row, muted, mono.clone(), cx))),
+        )
+        .children(message_meta(row, hover_time, &style.time, cx))
+        .children(message_failures(row, cx))
+}
 
-    let day = row.day.clone().map(|day| {
+/// Blocks style: the sender and time head each group, messages below.
+fn block_row(
+    row: &Row<'_>,
+    shown: bool,
+    style: &LogStyle,
+    window: &mut Window,
+    cx: &mut Context<ChatView>,
+) -> gpui_kit::Div {
+    let palette = cx.palette();
+    let (muted, text) = (palette.text_muted, palette.text);
+    let mono = cx.theme().mono_font_family.clone();
+    let color = sender_color(row, cx);
+    let header = row.leads.then(|| {
         h_flex()
-            .px_4()
-            .pt_3()
-            .pb_1()
             .gap_2()
-            .font_family(mono.clone())
-            .text_xs()
-            .text_color(muted)
-            .child(div().flex_1().h(px(1.)).bg(palette.border))
-            .child(day)
-            .child(div().flex_1().h(px(1.)).bg(palette.border))
-    });
-    let failure = failed.then(|| {
-        h_flex()
-            .id(("retry", id.get() as u64))
-            .gap_1()
-            .font_family(mono.clone())
-            .text_xs()
-            .text_color(palette.danger)
-            .cursor_pointer()
-            .child("not sent ·")
-            .child(div().text_color(palette.action).child("retry"))
-            .when_some(error, |this, error| {
-                this.tooltip(move |window, cx| {
-                    gpui_kit::component::tooltip::Tooltip::new(error.clone()).build(window, cx)
-                })
+            .items_baseline()
+            .child(
+                div()
+                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                    .text_color(color)
+                    .child(truncate(&row.prefix.sender, MAX_SENDER_CHARS).into_owned()),
+            )
+            .when(style.timestamps == TimestampVisibility::Always, |header| {
+                header.child(
+                    div()
+                        .font_family(mono.clone())
+                        .text_xs()
+                        .text_color(muted)
+                        .child(row.prefix.time.clone()),
+                )
             })
-            .on_click(cx.listener(move |view, _, _, _| view.retry(id)))
+    });
+    let hover_time = style.timestamps == TimestampVisibility::Hover && shown;
+    h_flex()
+        .items_start()
+        .gap_2()
+        .pt(group_gap(row, style.spacing, 2.))
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .text_color(text)
+                .children(header)
+                .children(message_text(row, window, cx))
+                .children(shown.then(|| row_actions(row, muted, mono.clone(), cx))),
+        )
+        .children(message_meta(row, hover_time, &style.time, cx))
+        .children(message_failures(row, cx))
+}
+
+/// Bubbles style: incoming on the left, ours on the right, with the time
+/// and status inside; the sender's name heads each group.
+fn bubble_row(
+    row: &Row<'_>,
+    shown: bool,
+    style: &LogStyle,
+    window: &mut Window,
+    cx: &mut Context<ChatView>,
+) -> gpui_kit::Div {
+    let palette = cx.palette();
+    let (muted, text, accent) = (palette.text_muted, palette.text, palette.accent);
+    let surface = palette.surface;
+    let mono = cx.theme().mono_font_family.clone();
+    let outgoing = row.message.direction == Direction::Outgoing;
+    let color = sender_color(row, cx);
+    let name = row.leads.then(|| {
+        div()
+            .id(("bubble-name", row.message.id.get() as u64))
+            .px_3()
+            .text_xs()
+            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+            .text_color(color)
+            .child(truncate(&row.prefix.sender, MAX_SENDER_CHARS).into_owned())
             .test_support()
     });
+    let time = match style.timestamps {
+        TimestampVisibility::Always => true,
+        TimestampVisibility::Hover => shown,
+        TimestampVisibility::Never => false,
+    };
+    let meta = message_meta(row, time, &style.time, cx);
+    let footer = (!meta.is_empty()).then(|| h_flex().justify_end().gap_1().children(meta));
+    let marked = row.selected || row.confirming_delete;
+    let bubble = v_flex()
+        .id(("bubble", row.message.id.get() as u64))
+        .min_w_0()
+        .px_3()
+        .py(px(6.))
+        .rounded(px(12.))
+        .bg(if outgoing {
+            accent.opacity(0.2)
+        } else {
+            surface
+        })
+        .border_1()
+        .border_color(if marked {
+            accent
+        } else {
+            gpui_kit::transparent_black()
+        })
+        .text_color(text)
+        .children(message_text(row, window, cx))
+        .children(footer)
+        .test_support();
+    h_flex()
+        .items_start()
+        .pt(group_gap(row, style.spacing, 2.))
+        .when(outgoing, |row| row.justify_end())
+        .child(
+            v_flex()
+                .max_w(relative(0.75))
+                .min_w_0()
+                .gap_1()
+                .when(outgoing, |column| column.items_end())
+                .when(!outgoing, |column| column.items_start())
+                .children(name)
+                .child(bubble)
+                .children(message_failures(row, cx))
+                .children(shown.then(|| row_actions(row, muted, mono.clone(), cx))),
+        )
+}
 
-    let line_height = window.line_height();
-    if !row.system.is_empty() {
-        let time = &row.prefix.time;
-        return v_flex()
-            .w_full()
-            .children(day)
-            .child(
-                v_flex()
-                    .px_4()
-                    .pt_1()
-                    .font_family(mono)
-                    .text_size(PREFIX_SIZE)
-                    .line_height(line_height)
-                    .text_color(muted)
-                    .children(
-                        row.system
-                            .iter()
-                            .map(|line| div().child(format!("-- {line} · {time}"))),
-                    ),
-            )
-            .into_any_element();
+/// Space above a message: wider before a new group, by `scale`.
+fn group_gap(row: &Row<'_>, spacing: Spacing, scale: f32) -> Pixels {
+    if row.leads {
+        spacing.group * scale
+    } else {
+        spacing.message
     }
-    let placeholders: Vec<_> = row
-        .quote
+}
+
+fn sender_color(row: &Row<'_>, cx: &App) -> Hsla {
+    let palette = cx.palette();
+    row.prefix
+        .peer
+        .map_or(palette.text_secondary, |peer| palette.nick(peer))
+}
+
+/// The quote and placeholder lines, then the text.
+fn message_text(row: &Row<'_>, window: &Window, cx: &App) -> Vec<AnyElement> {
+    let mono = cx.theme().mono_font_family.clone();
+    let muted = cx.palette().text_muted;
+    let line_height = window.line_height();
+    let id = row.message.id;
+    row.quote
         .iter()
         .chain(&row.placeholders)
         .map(|line| {
@@ -2330,86 +2495,86 @@ fn render_log_row(
                 .text_color(muted)
                 .truncate()
                 .child(line.clone())
+                .into_any_element()
         })
-        .collect();
+        .chain(row.message.content.body().map(|body| {
+            TextView::markdown(("body", id.get() as u64), message_markdown(body.as_str()))
+                .selectable(true)
+                .into_any_element()
+        }))
+        .collect()
+}
 
-    let change_failed = row.change_failed.then(|| {
+/// Small muted glyphs: the time if `time`, edited, timer and status.
+fn message_meta(row: &Row<'_>, time: bool, at: &str, cx: &App) -> Vec<AnyElement> {
+    let palette = cx.palette();
+    let muted = palette.text_muted;
+    let mono = cx.theme().mono_font_family.clone();
+    let status = match row.message.status {
+        Some(MessageStatus::Pending) => Some(("…", muted)),
+        Some(MessageStatus::Sent) => Some(("✓", muted)),
+        Some(MessageStatus::Delivered) => Some(("✓✓", muted)),
+        Some(MessageStatus::Read) => Some(("✓✓", palette.accent)),
+        Some(MessageStatus::Failed) | None => None,
+    };
+    let glyph = |text: SharedString, color: Hsla| {
         div()
+            .flex_none()
             .font_family(mono.clone())
             .text_xs()
-            .text_color(palette.danger)
-            .child("change not sent")
-    });
-    let actions = (hovered || row.selected || row.confirming_delete)
-        .then(|| row_actions(&row, muted, mono.clone(), cx));
-    let palette = cx.palette();
+            .text_color(color)
+            .child(text)
+            .into_any_element()
+    };
+    [
+        time.then(|| glyph(at.to_owned().into(), muted)),
+        row.message.edited.then(|| glyph("edited".into(), muted)),
+        row.timer.clone().map(|timer| glyph(timer.into(), muted)),
+        status.map(|(status, color)| glyph(status.into(), color)),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
 
-    v_flex()
-        .w_full()
-        .children(day)
-        .child(
-            h_flex()
-                .id(("row", id.get() as u64))
-                .on_hover(
-                    cx.listener(move |view, hovered: &bool, _, cx| {
-                        view.hover_row(id, *hovered, cx)
-                    }),
-                )
-                .w_full()
-                .px_4()
-                .items_start()
-                .gap_2()
-                .pt(if row.leads {
-                    style.spacing.group
-                } else {
-                    style.spacing.message
+/// Sending it, or an edit or delete of it, failed.
+fn message_failures(row: &Row<'_>, cx: &mut Context<ChatView>) -> Vec<AnyElement> {
+    let palette = cx.palette();
+    let (danger, action) = (palette.danger, palette.action);
+    let mono = cx.theme().mono_font_family.clone();
+    let id = row.message.id;
+    let error: Option<SharedString> = row.error.map(|error| error.to_string().into());
+    let failed = row.message.status == Some(MessageStatus::Failed);
+    let failure = failed.then(|| {
+        h_flex()
+            .id(("retry", id.get() as u64))
+            .flex_none()
+            .gap_1()
+            .font_family(mono.clone())
+            .text_xs()
+            .text_color(danger)
+            .cursor_pointer()
+            .child("not sent ·")
+            .child(div().text_color(action).child("retry"))
+            .when_some(error, |this, error| {
+                this.tooltip(move |window, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new(error.clone()).build(window, cx)
                 })
-                .when(shown, |this| this.bg(palette.surface))
-                .children(avatar)
-                .children(prefix)
-                .children(indent)
-                .child(
-                    v_flex()
-                        .flex_1()
-                        .min_w_0()
-                        .text_color(palette.text)
-                        .children(placeholders)
-                        .children(message.content.body().map(|body| {
-                            TextView::markdown(
-                                ("body", id.get() as u64),
-                                message_markdown(body.as_str()),
-                            )
-                            .selectable(true)
-                        }))
-                        .children(actions),
-                )
-                .children(hover_time)
-                .children(message.edited.then(|| {
-                    div()
-                        .font_family(mono.clone())
-                        .text_xs()
-                        .text_color(muted)
-                        .child("edited")
-                }))
-                .children(row.timer.clone().map(|timer| {
-                    div()
-                        .font_family(mono.clone())
-                        .text_xs()
-                        .text_color(muted)
-                        .child(timer)
-                }))
-                .children(status.map(|(status, color)| {
-                    div()
-                        .font_family(mono.clone())
-                        .text_xs()
-                        .text_color(color)
-                        .child(status)
-                }))
-                .children(failure)
-                .children(change_failed)
-                .test_support(),
-        )
-        .into_any_element()
+            })
+            .on_click(cx.listener(move |view, _, _, _| view.retry(id)))
+            .test_support()
+            .into_any_element()
+    });
+    let change_failed = row.change_failed.then(|| {
+        div()
+            .flex_none()
+            .font_family(mono)
+            .text_xs()
+            .text_color(danger)
+            .child("change not sent")
+            .into_any_element()
+    });
+    failure.into_iter().chain(change_failed).collect()
 }
 
 /// Reply, edit and delete, or how to delete, with key hints when selected:

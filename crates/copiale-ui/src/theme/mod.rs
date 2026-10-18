@@ -182,7 +182,8 @@ fn component_config(theme: &Theme, palette: &Palette, fonts: &Fonts) -> ThemeCon
         (&mut k.ring, c.accent),
         (&mut k.caret, c.accent),
         (&mut k.drag_border, c.accent),
-        (&mut k.scrollbar, c.background),
+        // Scrollbars overlay the content; only the thumb shows.
+        (&mut k.scrollbar, gpui_kit::transparent_black()),
         (&mut k.scrollbar_thumb, c.border),
         (&mut k.scrollbar_thumb_hover, c.text_muted),
         (&mut k.success, c.success),
