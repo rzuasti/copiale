@@ -586,6 +586,31 @@ fn offline_status_reconnects_on_click(cx: &mut TestAppContext) {
     assert!(matches!(ui.core.take().as_slice(), [Command::Reconnect]));
 }
 
+#[gpui_kit::test]
+fn storage_errors_show_until_dismissed(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.open_alice(cx);
+    assert!(!ui.shows("storage-error", cx));
+
+    ui.event(
+        Event::DatabaseError("database error: disk I/O error".into()),
+        cx,
+    );
+    assert!(ui.shows("storage-error", cx));
+    resize(&ui, 500., cx);
+    assert!(ui.shows("header-storage-error", cx), "compact");
+    ui.click("header-storage-error", cx);
+    assert!(!ui.shows("header-storage-error", cx));
+
+    resize(&ui, 1100., cx);
+    ui.event(
+        Event::DatabaseError("database error: disk I/O error".into()),
+        cx,
+    );
+    ui.click("storage-error", cx);
+    assert!(!ui.shows("storage-error", cx));
+}
+
 /// Bytes, as GPUI Kit and the palette parse colors slightly differently.
 fn rgba(color: Hsla) -> [u8; 4] {
     let Rgba { r, g, b, a } = color.into();

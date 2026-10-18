@@ -40,8 +40,9 @@ pub enum Screen {
 #[derive(Debug)]
 pub struct Onboarding {
     screen: Screen,
-    /// Shown on the next [`Screen::Unlinked`].
-    link_error: Option<String>,
+    /// Shown on the next [`Screen::Unlinked`] or [`Screen::Passphrase`]:
+    /// why linking failed, or local data couldn't be read or written.
+    pending_error: Option<String>,
     /// Last name used or suggested, kept across link attempts.
     device_name: Option<String>,
 }
@@ -50,7 +51,7 @@ impl Default for Onboarding {
     fn default() -> Self {
         Self {
             screen: Screen::Starting,
-            link_error: None,
+            pending_error: None,
             device_name: None,
         }
     }
@@ -66,7 +67,7 @@ impl Onboarding {
             Event::Locked { new_passphrase } => {
                 self.screen = Screen::Passphrase {
                     new: *new_passphrase,
-                    error: None,
+                    error: self.pending_error.take(),
                     busy: false,
                 };
             }
@@ -87,12 +88,16 @@ impl Onboarding {
                 let device_name = self.device_name.get_or_insert_with(|| device_name.clone());
                 self.screen = Screen::Unlinked {
                     device_name: device_name.clone(),
-                    error: self.link_error.take(),
+                    error: self.pending_error.take(),
                     busy: false,
                 };
             }
             Event::LinkUrl(url) => self.screen = Screen::Linking { url: url.clone() },
-            Event::LinkFailed(error) => self.link_error = Some(error.to_string()),
+            Event::LinkFailed(error) => self.pending_error = Some(error.to_string()),
+            // Once ready, the chats show it.
+            Event::DatabaseError(error) if self.screen != Screen::Ready => {
+                self.pending_error = Some(format!("Local data: {error}"));
+            }
             Event::Ready => self.screen = Screen::Ready,
             Event::LinkRevoked => self.screen = Screen::Revoked { busy: false },
             // Trying again worked.
@@ -305,6 +310,40 @@ mod tests {
         let mut model = unlinked();
         model.apply(&Event::Connected);
         assert!(matches!(model.screen(), Screen::Unlinked { .. }));
+    }
+
+    #[test]
+    fn storage_errors_show_on_the_next_screen() {
+        let mut model = at(Event::LinkRevoked);
+        model.wipe();
+        model.apply(&Event::DatabaseError("permission denied".into()));
+        model.apply(&Event::Unlinked {
+            device_name: "Copiale on host".into(),
+        });
+        assert!(matches!(
+            model.screen(),
+            Screen::Unlinked { error: Some(error), .. } if error == "Local data: permission denied"
+        ));
+
+        let mut model = at(Event::DatabaseError("permission denied".into()));
+        model.apply(&Event::Locked {
+            new_passphrase: false,
+        });
+        assert!(matches!(
+            model.screen(),
+            Screen::Passphrase { error: Some(_), .. }
+        ));
+
+        // Once ready, the chats show them instead.
+        let mut model = at(Event::Ready);
+        model.apply(&Event::DatabaseError("disk full".into()));
+        model.apply(&Event::Unlinked {
+            device_name: "Copiale on host".into(),
+        });
+        assert!(matches!(
+            model.screen(),
+            Screen::Unlinked { error: None, .. }
+        ));
     }
 
     #[test]

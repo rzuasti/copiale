@@ -1828,7 +1828,50 @@ impl ChatView {
         }
     }
 
+    /// The last storage failure, if any, above the connection.
     fn render_status(&self, cx: &mut Context<Self>) -> AnyElement {
+        let error = self.chat.storage_error().map(|error| {
+            h_flex()
+                .id("storage-error")
+                .gap_2()
+                .px_3()
+                .py_2()
+                .border_t_1()
+                .border_color(cx.palette().border)
+                .font_family(cx.theme().mono_font_family.clone())
+                .text_xs()
+                .text_color(cx.palette().danger)
+                .cursor_pointer()
+                .child(div().flex_none().child("⚠"))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .child(format!("local data: {error}")),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_color(cx.palette().action)
+                        .child("dismiss"),
+                )
+                .tooltip(storage_error_tooltip(error))
+                .on_click(cx.listener(|view, _, _, cx| view.dismiss_storage_error(cx)))
+                .test_support()
+        });
+        v_flex()
+            .children(error)
+            .child(self.render_connection(cx))
+            .into_any_element()
+    }
+
+    fn dismiss_storage_error(&mut self, cx: &mut Context<Self>) {
+        self.chat.dismiss_storage_error();
+        cx.notify();
+    }
+
+    fn render_connection(&self, cx: &mut Context<Self>) -> AnyElement {
         let (dot, color) = self.status_dot(cx);
         let text = self.chat.connection_label(self.chat.clock().now());
         let offline = matches!(self.chat.connection(), Connection::Offline { .. });
@@ -2016,6 +2059,22 @@ impl ChatView {
                             cx.listener(|view, _, _, _| view.core.send(Command::Reconnect)),
                         )
                     })
+                    .test_support()
+                    .into_any_element(),
+            );
+        }
+        if let Some(error) = self.chat.storage_error() {
+            items.push(
+                div()
+                    .id("header-storage-error")
+                    .flex_none()
+                    .ml_3()
+                    .text_xs()
+                    .text_color(palette.danger)
+                    .cursor_pointer()
+                    .child("⚠")
+                    .tooltip(storage_error_tooltip(error))
+                    .on_click(cx.listener(|view, _, _, cx| view.dismiss_storage_error(cx)))
                     .test_support()
                     .into_any_element(),
             );
@@ -2801,6 +2860,17 @@ fn picker_row(
 }
 
 /// Matched characters in the accent color.
+/// What a storage failure means, for its tooltip.
+fn storage_error_tooltip(
+    error: &str,
+) -> impl Fn(&mut Window, &mut App) -> gpui_kit::AnyView + 'static {
+    let text = SharedString::from(format!(
+        "Copiale couldn't read or save its local data ({error}). Something may not have been \
+         saved. Click to dismiss."
+    ));
+    move |window, cx| gpui_kit::component::tooltip::Tooltip::new(text.clone()).build(window, cx)
+}
+
 fn match_highlights(ranges: Vec<Range<usize>>, cx: &App) -> Vec<(Range<usize>, HighlightStyle)> {
     let highlight = HighlightStyle {
         color: Some(cx.palette().accent),

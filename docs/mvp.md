@@ -57,6 +57,9 @@ Scope, UI design, architecture and work items for the first usable release.
   unless online; switch chats through the palette (`Ctrl/⌘+F` opens it) or
   `Alt+↑/↓`. The chat list slides out and back while resizing; the log
   keeps its place (the end, or the top message).
+- A failure to read or save local data shows in red above the connection
+  (compact: `⚠` in the header) until clicked, as something may not have
+  been saved.
 - Settings, new chat and linking open as overlays, not separate windows.
 
 ```
@@ -285,6 +288,12 @@ crates/
 - Serving keeps the connection open, reconnecting with backoff (1 s doubling
   to 60 s; reset once the queue drains); `Reconnect` retries at once.
   Connecting runs in the background and gives up after 30 s.
+- Once connected, the core asks the phone for contacts (daily, hourly while
+  none have come) and settings (until known), in the background.
+- Losing the connection or quitting first stores what was already received:
+  the server counts it as delivered once read. The receive task decrypts
+  only a few messages ahead, never cancels a decryption, and gives the
+  websocket a moment to send its acknowledgements.
 - A dead network can leave the connection looking open for minutes, so the
   core asks the server who it is every 20 s and reconnects if there is no
   answer within 10 s.

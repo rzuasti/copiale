@@ -156,6 +156,9 @@ pub struct Chat {
     pending_peer: Option<ServiceId>,
     /// A conversation for the view to open.
     requested_open: Option<ConversationId>,
+    /// The last failure to read or write local data, until dismissed: what
+    /// it was storing may be lost.
+    storage_error: Option<String>,
 }
 
 #[derive(Debug)]
@@ -233,6 +236,7 @@ impl Chat {
             picker: Picker::default(),
             pending_peer: None,
             requested_open: None,
+            storage_error: None,
         }
     }
 
@@ -279,6 +283,15 @@ impl Chat {
             }
             _ => 0,
         }
+    }
+
+    /// The last failure to read or write local data, until dismissed.
+    pub fn storage_error(&self) -> Option<&str> {
+        self.storage_error.as_deref()
+    }
+
+    pub fn dismiss_storage_error(&mut self) {
+        self.storage_error = None;
     }
 
     /// Whether any conversations are listed, regardless of the search.
@@ -515,6 +528,7 @@ impl Chat {
                     return Effects::log(LogChange::Changed(ix));
                 }
             }
+            Event::DatabaseError(error) => self.storage_error = Some(error.clone()),
             Event::Connected => self.connection = Connection::Syncing,
             Event::Synced => self.connection = Connection::Online,
             Event::Disconnected { retry_in, .. } => {
@@ -1583,6 +1597,21 @@ mod tests {
                 retry_at: later(4000)
             }
         );
+    }
+
+    #[test]
+    fn storage_errors_stay_until_dismissed() {
+        let mut chat = with_conversations();
+        assert_eq!(chat.storage_error(), None);
+
+        chat.apply(&Event::DatabaseError("disk full".into()), true);
+        chat.apply(&Event::DatabaseError("disk I/O error".into()), true);
+        // Later events don't clear it: what failed may be lost.
+        chat.apply(&Event::MessageAdded(incoming(1, NOW)), true);
+        assert_eq!(chat.storage_error(), Some("disk I/O error"));
+
+        chat.dismiss_storage_error();
+        assert_eq!(chat.storage_error(), None);
     }
 
     #[test]
