@@ -41,7 +41,9 @@ change above.
   already decrypted but not yet acknowledged came back and failed to decrypt
   again. The patch ends the contact list with
   `ParseContactError::Truncated` instead, keeps the contacts parsed so far,
-  and logs sizes only (no contact data) to help find the cause.
+  and logs sizes only (no contact data) to help find the cause. It also
+  strips the attachment padding to the declared size; each padding byte
+  otherwise parsed as an empty contact.
 - **Upstream PR:** pending.
 - **Used via:** `[patch."https://github.com/whisperfish/libsignal-service-rs"]`
   in the root `Cargo.toml`.

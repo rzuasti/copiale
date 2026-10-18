@@ -1,6 +1,6 @@
-From d657ee04f55b58075b252891ef3d4e811bba2196 Mon Sep 17 00:00:00 2001
+From 0823e547cc06818434296fe504a8613753cd9613 Mon Sep 17 00:00:00 2001
 From: Ricardo Zuasti <rzuasti@pm.me>
-Date: Tue, 13 Oct 2026 10:28:20 -0400
+Date: Sun, 18 Oct 2026 17:19:21 -0400
 Subject: [PATCH] fix(receiver): don't panic on a contact avatar past the
  buffer end
 
@@ -8,14 +8,18 @@ A contacts blob whose avatar length exceeds the remaining bytes made
 copy_to_bytes panic. End the iteration with ParseContactError::Truncated
 instead, keeping the contacts parsed so far.
 
+Also strip the attachment padding to the size the sender declared, as
+the official clients do; each padding byte otherwise parsed as an empty
+contact (MissingUuid).
+
 Assisted-by: Claude Opus 5.5
 ---
  src/models.rs   |   4 ++
- src/receiver.rs | 104 +++++++++++++++++++++++++++++++++++++++++++-----
- 2 files changed, 99 insertions(+), 9 deletions(-)
+ src/receiver.rs | 149 +++++++++++++++++++++++++++++++++++++++++++++---
+ 2 files changed, 144 insertions(+), 9 deletions(-)
 
 diff --git a/src/models.rs b/src/models.rs
-index b9827a059..a6397251b 100644
+index b9827a0..a639725 100644
 --- a/src/models.rs
 +++ b/src/models.rs
 @@ -36,6 +36,10 @@ pub enum ParseContactError {
@@ -30,13 +34,41 @@ index b9827a059..a6397251b 100644
      MissingProfileKey,
      #[error("missing avatar content-type")]
 diff --git a/src/receiver.rs b/src/receiver.rs
-index b51330c1a..6b61ef5cf 100644
+index b51330c..d3281f4 100644
 --- a/src/receiver.rs
 +++ b/src/receiver.rs
-@@ -100,11 +100,15 @@ impl MessageReceiver {
+@@ -89,6 +89,7 @@ impl MessageReceiver {
+ 
+             decrypt_in_place(key, &mut ciphertext)
+                 .expect("attachment decryption");
++            strip_attachment_padding(&mut ciphertext, blob.size);
+ 
+             Ok(DeviceContactsIterator::new(Bytes::from(ciphertext)))
+         } else {
+@@ -97,14 +98,36 @@ impl MessageReceiver {
+     }
+ }
+ 
++/// Drops the zero padding after the `size` bytes the sender declared;
++/// otherwise each padding byte parses as an empty contact.
++fn strip_attachment_padding(plaintext: &mut Vec<u8>, size: Option<u32>) {
++    match size {
++        Some(size) if size as usize <= plaintext.len() => {
++            plaintext.truncate(size as usize)
++        },
++        Some(size) => tracing::warn!(
++            size,
++            plaintext = plaintext.len(),
++            "attachment shorter than its declared size"
++        ),
++        None => {},
++    }
++}
++
  #[derive(Default)]
  struct DeviceContactsIterator {
      decrypted_buffer: Bytes,
++    total: usize,
 +    parsed: usize,
  }
  
@@ -44,13 +76,14 @@ index b51330c1a..6b61ef5cf 100644
      fn new(decrypted_buffer: Bytes) -> Self {
 -        Self { decrypted_buffer }
 +        Self {
++            total: decrypted_buffer.len(),
 +            decrypted_buffer,
 +            parsed: 0,
 +        }
      }
  }
  
-@@ -123,16 +127,98 @@ impl Iterator for DeviceContactsIterator {
+@@ -123,16 +146,124 @@ impl Iterator for DeviceContactsIterator {
                  .map_err(ParseContactError::Protobuf)
                  .ok()?;
  
@@ -74,6 +107,7 @@ index b51330c1a..6b61ef5cf 100644
 +                        parsed = self.parsed,
 +                        needed,
 +                        remaining,
++                        total = self.total,
 +                        "contact avatar runs past the end of the contacts; stopping"
 +                    );
 +                    self.decrypted_buffer.clear();
@@ -155,6 +189,31 @@ index b51330c1a..6b61ef5cf 100644
 +            Some(Err(ParseContactError::Truncated { needed: 100, .. }))
 +        ));
 +        assert!(contacts.next().is_none());
++    }
++
++    #[test]
++    fn padding_is_stripped_to_the_declared_size() {
++        let contacts = buffer(&[(details(Some(3)), 3), (details(None), 0)]);
++        let size = contacts.len() as u32;
++        let mut plaintext = contacts.to_vec();
++        plaintext.resize(plaintext.len() + 50, 0);
++
++        strip_attachment_padding(&mut plaintext, Some(size));
++        let parsed: Vec<_> =
++            DeviceContactsIterator::new(Bytes::from(plaintext)).collect();
++
++        assert_eq!(parsed.len(), 2);
++        assert!(parsed.iter().all(Result::is_ok));
++    }
++
++    #[test]
++    fn short_plaintext_is_kept_whole() {
++        let mut plaintext = vec![1, 2, 3];
++        strip_attachment_padding(&mut plaintext, Some(10));
++        assert_eq!(plaintext, [1, 2, 3]);
++
++        strip_attachment_padding(&mut plaintext, None);
++        assert_eq!(plaintext, [1, 2, 3]);
 +    }
 +}
 -- 
