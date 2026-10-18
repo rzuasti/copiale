@@ -92,6 +92,9 @@ went unsolved until 2011.
   reformatted it (even files you didn't otherwise touch), and add such changes
   to the current commit. Revert only if the reformatting actually introduces a
   bug.
+- Track follow-ups (upstream PRs to check, vendored crates to drop, things
+  to revisit later) as Codeberg issues with a due date, never as memories:
+  work spans multiple workstations.
 
 ## Naming
 
