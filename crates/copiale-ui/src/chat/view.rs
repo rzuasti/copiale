@@ -10,6 +10,7 @@ use std::time::Duration;
 use copiale_core::config::{self, Setting, TimestampVisibility};
 use copiale_core::{
     Account, Command, ConversationId, ConversationSummary, Event, MessageId, MessageStatus, Peer,
+    Timestamp,
 };
 use gpui_kit::base::{Easing, Presence, PresencePhase, Transition};
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState, Textarea, TextareaState};
@@ -24,9 +25,9 @@ use gpui_kit::{
     Focusable as _, FollowMode, HighlightStyle, Hsla, InteractiveElement as _, IntoElement,
     KeyBinding, KeyContext, ListAlignment, ListState, MouseButton, MouseMoveEvent,
     ParentElement as _, Pixels, Rems, Render, ScrollHandle, SharedString,
-    StatefulInteractiveElement as _, Styled as _, StyledText, Subscription, Task,
-    TestSupportExt as _, TextRun, Window, WindowId, actions, canvas, div, font, list, point, px,
-    relative, rems,
+    StatefulInteractiveElement as _, StyleRefinement, Styled as _, StyledText, Subscription, Task,
+    TestSupportExt as _, TextRun, WeakEntity, Window, WindowId, actions, canvas, div, font, list,
+    point, px, relative, rems,
 };
 
 use super::layout::{Layout, Spacing};
@@ -193,7 +194,35 @@ pub struct ChatView {
     with_actions: Vec<MessageId>,
     /// Tells the core we stopped typing after a pause.
     typing_idle: Option<Task<()>>,
+    log_part: Entity<Part>,
+    list_part: Entity<Part>,
+    /// Redraws each minute, for chat ages and day labels.
+    _minutes: Task<()>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// A part of the chat view drawn as a view of its own, so GPUI reuses its
+/// last frame until the chat view changes: a blink of the composer's cursor
+/// then redraws the composer, not the messages and chat list.
+struct Part {
+    view: WeakEntity<ChatView>,
+    render: fn(&mut ChatView, &mut Window, &mut Context<ChatView>) -> AnyElement,
+    /// How often it was drawn anew.
+    renders: usize,
+}
+
+impl Render for Part {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.renders += 1;
+        let render = self.render;
+        self.view
+            .update(cx, |view, cx| render(view, window, cx))
+            .unwrap_or_else(|_| div().into_any_element())
+    }
+}
+
+fn full_size() -> StyleRefinement {
+    StyleRefinement::default().size_full()
 }
 
 /// The inputs and window subscriptions, made for the window showing the
@@ -231,6 +260,27 @@ impl ChatView {
         let focus = cx.focus_handle();
         let mut chat = Chat::new(Clock::system());
         chat.set_twelve_hour(Settings::get(cx).layout.clock == config::Clock::H12);
+        let part = |render, cx: &mut Context<Self>| {
+            let view = cx.weak_entity();
+            cx.new(|_| Part {
+                view,
+                render,
+                renders: 0,
+            })
+        };
+        let log_part = part(|view, _, cx| view.render_log(cx), cx);
+        let list_part = part(|view, window, cx| view.render_sidebar(window, cx), cx);
+        let minutes = cx.spawn(async move |view, cx| {
+            loop {
+                let into_minute = Timestamp::now().as_millis() % 60_000;
+                // A little late, so the labels have changed by then.
+                let delay = Duration::from_millis(60_000 - into_minute + 10);
+                cx.background_executor().timer(delay).await;
+                if view.update(cx, |_, cx| cx.notify()).is_err() {
+                    break;
+                }
+            }
+        });
         Self {
             core,
             chat,
@@ -258,6 +308,9 @@ impl ChatView {
             hovered: None,
             with_actions: Vec::new(),
             typing_idle: None,
+            log_part,
+            list_part,
+            _minutes: minutes,
             _subscriptions: subscriptions,
         }
     }
@@ -738,6 +791,11 @@ impl ChatView {
         self.settings_scroll.scroll_to_item(0);
         Self::ready_query(&self.inputs().settings, window, cx);
         cx.notify();
+    }
+
+    /// How often the messages were drawn anew rather than reused.
+    pub fn log_renders(&self, cx: &App) -> usize {
+        self.log_part.read(cx).renders
     }
 
     pub fn settings_panel(&self) -> &SettingsPanel {
@@ -1748,12 +1806,6 @@ impl ChatView {
             let command = self.chat.load_older();
             self.send(command);
         }
-        let view = cx.entity();
-        let messages = list(self.log.clone(), move |ix, window, cx| {
-            view.update(cx, |view, cx| view.render_row(ix, window, cx))
-        })
-        .size_full()
-        .py(LOG_PADDING);
 
         v_flex()
             .size_full()
@@ -1761,23 +1813,9 @@ impl ChatView {
             .child(header)
             .child(
                 div()
-                    .id("log")
-                    .relative()
                     .flex_1()
                     .min_h_0()
-                    .when_some(cx.try_global::<Fonts>().cloned(), |log, fonts| {
-                        log.font_family(fonts.body)
-                            .line_height(relative(fonts.line_height))
-                    })
-                    .child(kinetic(
-                        "kinetic",
-                        &self.kinetic,
-                        &self.log,
-                        LOG_PADDING * 2.,
-                        messages,
-                    ))
-                    .vertical_scrollbar(&self.log)
-                    .test_support(),
+                    .child(self.log_part.clone().cached(full_size())),
             )
             .child(
                 v_flex()
@@ -1820,6 +1858,34 @@ impl ChatView {
                     }))
                     .child(Textarea::new(&self.inputs().composer)),
             )
+            .into_any_element()
+    }
+
+    /// The open conversation's messages; drawn as [`Part`].
+    fn render_log(&self, cx: &mut Context<Self>) -> AnyElement {
+        let view = cx.entity();
+        let messages = list(self.log.clone(), move |ix, window, cx| {
+            view.update(cx, |view, cx| view.render_row(ix, window, cx))
+        })
+        .size_full()
+        .py(LOG_PADDING);
+        div()
+            .id("log")
+            .relative()
+            .size_full()
+            .when_some(cx.try_global::<Fonts>().cloned(), |log, fonts| {
+                log.font_family(fonts.body)
+                    .line_height(relative(fonts.line_height))
+            })
+            .child(kinetic(
+                "kinetic",
+                &self.kinetic,
+                &self.log,
+                LOG_PADDING * 2.,
+                messages,
+            ))
+            .vertical_scrollbar(&self.log)
+            .test_support()
             .into_any_element()
     }
 
@@ -1901,7 +1967,7 @@ impl ChatView {
                         .h_full()
                         .w(SIDEBAR_WIDTH)
                         .ml(shown - SIDEBAR_WIDTH)
-                        .child(self.render_sidebar(window, cx)),
+                        .child(self.list_part.clone().cached(full_size())),
                 )
                 .test_support()
                 .into_any_element(),

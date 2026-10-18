@@ -1691,6 +1691,40 @@ fn layout_settings_change_the_log(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn cursor_blinks_reuse_the_drawn_log(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.open_alice(cx);
+    ui.frame(cx);
+    // Unlike `Ui::frame`, draws without refreshing, so caches apply.
+    let draw = |cx: &mut TestAppContext| {
+        cx.update_window(ui.window(), |_, window, cx| window.draw(cx).clear(cx))
+            .unwrap();
+    };
+    let renders = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            let chat = ui.shell.read(cx).chat().unwrap().read(cx);
+            chat.log_renders(cx)
+        })
+    };
+    draw(cx);
+    let before = renders(cx);
+    // As a blink of the cursor does.
+    cx.update(|cx| {
+        let chat = ui.shell.read(cx).chat().unwrap().read(cx);
+        chat.composer().clone().update(cx, |_, cx| cx.notify());
+    });
+    draw(cx);
+    assert_eq!(renders(cx), before);
+
+    ui.event(
+        Event::MessageAdded(message(11, Direction::Incoming, None)),
+        cx,
+    );
+    draw(cx);
+    assert!(renders(cx) > before);
+}
+
+#[gpui_kit::test]
 fn quit_from_the_keyboard_and_the_palette(cx: &mut TestAppContext) {
     let quits = Rc::new(Cell::new(0));
     let ui = Ui::open(cx);
