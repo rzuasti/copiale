@@ -1147,6 +1147,56 @@ async fn missing_key_can_start_over() {
 }
 
 #[tokio::test]
+async fn unlink_wipes_local_data_and_starts_over() {
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = MemorySecretStore::default();
+    let other = dir.path().join("config.toml");
+    std::fs::write(&other, "kept").unwrap();
+    let mut running = start(dir.path(), &secrets, true);
+    expect_ready(&mut running.events).await;
+    expect(&mut running.events, Event::Connected).await;
+    running.network.deliver(incoming(1, 100, "hi"));
+    message_added(&mut running.events).await;
+    conversation_updated(&mut running.events).await;
+    let old_key = secrets.secret();
+
+    send(&running, Command::Unlink);
+    // Fresh storage with a new key; the account must be linked again.
+    expect_unlinked(&mut running.events).await;
+    assert!(secrets.secret().is_some());
+    assert_ne!(secrets.secret(), old_key);
+    assert_eq!(std::fs::read_to_string(&other).unwrap(), "kept");
+    stop(running).await;
+
+    // Linked again, nothing from before is left.
+    let mut running = start(dir.path(), &secrets, true);
+    expect_ready(&mut running.events).await;
+    expect(&mut running.events, Event::Connected).await;
+    send(&running, Command::LoadConversations);
+    expect(&mut running.events, Event::Conversations(Vec::new())).await;
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn rejected_credentials_stop_reconnecting_until_asked() {
+    let (_dir, mut running) = ready().await;
+    running
+        .network
+        .fail_receive(BackendError::unauthorized("401 Unauthorized"));
+    running.network.disconnect();
+    expect_disconnected(&mut running.events, RETRY).await;
+    expect(&mut running.events, Event::LinkRevoked).await;
+    let attempts = running.network.connections();
+    tokio::time::sleep(RETRY * 4).await;
+    assert_eq!(running.network.connections(), attempts);
+
+    // Maybe a glitch: trying again works once the server accepts us.
+    send(&running, Command::Reconnect);
+    expect(&mut running.events, Event::Connected).await;
+    stop(running).await;
+}
+
+#[tokio::test]
 async fn unavailable_keychain_can_be_retried() {
     let dir = tempfile::tempdir().unwrap();
     let secrets = MemorySecretStore::default();

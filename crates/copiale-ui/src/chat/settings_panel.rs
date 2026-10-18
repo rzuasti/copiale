@@ -59,10 +59,11 @@ pub enum Field {
     ReadReceipts,
     TypingIndicators,
     DeviceName,
+    Unlink,
 }
 
 /// All rows, in order.
-pub const FIELDS: [Field; 17] = [
+pub const FIELDS: [Field; 18] = [
     Field::Theme,
     Field::UiFont,
     Field::MonoFont,
@@ -80,6 +81,7 @@ pub const FIELDS: [Field; 17] = [
     Field::ReadReceipts,
     Field::TypingIndicators,
     Field::DeviceName,
+    Field::Unlink,
 ];
 
 /// A row's value as shown.
@@ -96,6 +98,8 @@ pub enum Value {
     Font(Option<String>),
     /// Read-only: set on the phone.
     Info(String),
+    /// Something `Enter` does, not a value.
+    Action(&'static str),
 }
 
 /// What `Enter` on a row does.
@@ -103,6 +107,8 @@ pub enum Value {
 pub enum Activation {
     Change(Setting),
     PickFont(FontRole),
+    /// Ask before unlinking and wiping.
+    ConfirmUnlink,
     Nothing,
 }
 
@@ -145,7 +151,7 @@ impl Field {
             Self::Opacity | Self::Blur => Section::Window,
             Self::NotificationContent => Section::Notifications,
             Self::ReadReceipts | Self::TypingIndicators => Section::Privacy,
-            Self::DeviceName => Section::Account,
+            Self::DeviceName | Self::Unlink => Section::Account,
         }
     }
 
@@ -168,6 +174,7 @@ impl Field {
             Self::ReadReceipts => "Read receipts",
             Self::TypingIndicators => "Typing indicators",
             Self::DeviceName => "Device name",
+            Self::Unlink => "Unlink and wipe",
         }
     }
 
@@ -187,6 +194,7 @@ impl Field {
             }
             Self::Blur => Some("where the compositor allows"),
             Self::Avatars => Some("in the chat list"),
+            Self::Unlink => Some("deletes messages on this device"),
             _ => None,
         }
     }
@@ -227,6 +235,7 @@ impl Field {
                 Some(_) => "unknown".into(),
                 None => "…".into(),
             }),
+            Self::Unlink => Value::Action("↵"),
         }
     }
 
@@ -269,7 +278,8 @@ impl Field {
             | Self::BodyFont
             | Self::ReadReceipts
             | Self::TypingIndicators
-            | Self::DeviceName => return None,
+            | Self::DeviceName
+            | Self::Unlink => return None,
         };
         Some(setting)
     }
@@ -295,6 +305,7 @@ impl Field {
             Self::Avatars | Self::Blur => self
                 .step(config, 1)
                 .map_or(Activation::Nothing, Activation::Change),
+            Self::Unlink => Activation::ConfirmUnlink,
             _ => Activation::Nothing,
         }
     }
@@ -355,6 +366,8 @@ pub struct SettingsPanel {
     query: String,
     selected: usize,
     fonts: Option<FontPicker>,
+    /// Asking whether to unlink and wipe.
+    confirming_unlink: bool,
 }
 
 /// Picks a font for one role, previewing as it goes.
@@ -426,6 +439,18 @@ impl SettingsPanel {
             query: String::new(),
             selected: 0,
         });
+    }
+
+    pub fn confirm_unlink(&mut self) {
+        self.confirming_unlink = true;
+    }
+
+    pub fn cancel_unlink(&mut self) {
+        self.confirming_unlink = false;
+    }
+
+    pub fn confirming_unlink(&self) -> bool {
+        self.confirming_unlink
     }
 
     pub fn font_picker(&self) -> Option<&FontPicker> {
@@ -549,7 +574,7 @@ mod tests {
         panel.step(2);
         assert_eq!(panel.selected(), Some(Field::MonoFont));
         panel.step(100);
-        assert_eq!(panel.selected(), Some(Field::DeviceName));
+        assert_eq!(panel.selected(), Some(Field::Unlink));
         panel.select(Field::Clock);
         assert_eq!(panel.selected(), Some(Field::Clock));
         panel.set_query("size");
@@ -660,6 +685,21 @@ mod tests {
             assert_eq!(field.step(&config, 1), None);
             assert_eq!(field.activate(&config), Activation::Nothing);
         }
+    }
+
+    #[test]
+    fn unlink_asks_first_and_reset_forgets() {
+        let config = Config::default();
+        assert_eq!(Field::Unlink.activate(&config), Activation::ConfirmUnlink);
+        assert_eq!(Field::Unlink.step(&config, 1), None);
+        let mut panel = SettingsPanel::default();
+        panel.confirm_unlink();
+        assert!(panel.confirming_unlink());
+        panel.cancel_unlink();
+        assert!(!panel.confirming_unlink());
+        panel.confirm_unlink();
+        panel.reset();
+        assert!(!panel.confirming_unlink());
     }
 
     #[test]

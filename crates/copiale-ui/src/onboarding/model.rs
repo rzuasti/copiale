@@ -30,6 +30,10 @@ pub enum Screen {
         url: String,
     },
     Ready,
+    /// The phone unlinked this device; nothing is wiped until confirmed.
+    Revoked {
+        busy: bool,
+    },
     Stopped,
 }
 
@@ -90,6 +94,11 @@ impl Onboarding {
             Event::LinkUrl(url) => self.screen = Screen::Linking { url: url.clone() },
             Event::LinkFailed(error) => self.link_error = Some(error.to_string()),
             Event::Ready => self.screen = Screen::Ready,
+            Event::LinkRevoked => self.screen = Screen::Revoked { busy: false },
+            // Trying again worked.
+            Event::Connected if matches!(self.screen, Screen::Revoked { .. }) => {
+                self.screen = Screen::Ready;
+            }
             Event::Stopped => self.screen = Screen::Stopped,
             _ => {}
         }
@@ -153,6 +162,28 @@ impl Onboarding {
 
     pub fn cancel_link(&mut self) -> Option<Command> {
         matches!(self.screen, Screen::Linking { .. }).then_some(Command::CancelLink)
+    }
+
+    /// After the phone unlinked this device: wipes and starts over.
+    pub fn wipe(&mut self) -> Option<Command> {
+        let Screen::Revoked { busy } = &mut self.screen else {
+            return None;
+        };
+        if *busy {
+            return None;
+        }
+        *busy = true;
+        Some(Command::Unlink)
+    }
+
+    /// After the phone unlinked this device: in case it was a glitch.
+    pub fn reconnect(&mut self) -> Option<Command> {
+        matches!(self.screen, Screen::Revoked { busy: false }).then_some(Command::Reconnect)
+    }
+
+    /// Whether the account's chats belong on screen, now or once back.
+    pub fn has_account(&self) -> bool {
+        matches!(self.screen, Screen::Ready | Screen::Revoked { .. })
     }
 
     pub fn retry(&mut self) -> Option<Command> {
@@ -246,6 +277,34 @@ mod tests {
         at(Event::Unlinked {
             device_name: "Copiale on host".into(),
         })
+    }
+
+    #[test]
+    fn revoked_device_wipes_only_when_asked() {
+        let mut model = at(Event::Ready);
+        model.apply(&Event::LinkRevoked);
+        assert_eq!(model.screen(), &Screen::Revoked { busy: false });
+        assert!(model.has_account());
+        assert!(matches!(model.reconnect(), Some(Command::Reconnect)));
+        assert!(matches!(model.wipe(), Some(Command::Unlink)));
+        assert_eq!(model.screen(), &Screen::Revoked { busy: true });
+        assert!(model.wipe().is_none());
+        assert!(model.reconnect().is_none());
+        model.apply(&Event::Unlinked {
+            device_name: "Copiale on host".into(),
+        });
+        assert!(!model.has_account());
+    }
+
+    #[test]
+    fn reconnecting_after_revoked_returns_to_the_chats() {
+        let mut model = at(Event::LinkRevoked);
+        model.apply(&Event::Connected);
+        assert_eq!(model.screen(), &Screen::Ready);
+        // Connecting otherwise doesn't change screens.
+        let mut model = unlinked();
+        model.apply(&Event::Connected);
+        assert!(matches!(model.screen(), Screen::Unlinked { .. }));
     }
 
     #[test]

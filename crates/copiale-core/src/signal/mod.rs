@@ -525,6 +525,16 @@ fn store_error(error: impl std::error::Error) -> BackendError {
 
 /// Marks connection failures as network errors.
 fn presage_error<S: std::error::Error>(error: presage::Error<S>) -> BackendError {
+    let unauthorized = match &error {
+        presage::Error::ServiceError(error) => is_unauthorized(error),
+        presage::Error::MessageSenderError(error) => {
+            matches!(&**error, MessageSenderError::ServiceError(error) if is_unauthorized(error))
+        }
+        _ => false,
+    };
+    if unauthorized {
+        return BackendError::unauthorized(error.to_string());
+    }
     let network = match &error {
         presage::Error::ServiceError(error) => is_network(error),
         presage::Error::MessageSenderError(error) => {
@@ -537,6 +547,21 @@ fn presage_error<S: std::error::Error>(error: presage::Error<S>) -> BackendError
         BackendError::network(error.to_string())
     } else {
         BackendError::new(error.to_string())
+    }
+}
+
+/// The server rejected our credentials: on a request, or when opening the
+/// connection.
+fn is_unauthorized(error: &ServiceError) -> bool {
+    match error {
+        ServiceError::Unauthorized => true,
+        ServiceError::WsError(error) => matches!(
+            &**error,
+            reqwest_websocket::Error::Handshake(
+                reqwest_websocket::HandshakeError::UnexpectedStatusCode(status)
+            ) if matches!(status.as_u16(), 401 | 403)
+        ),
+        _ => false,
     }
 }
 
@@ -1954,6 +1979,16 @@ mod tests {
             presage_error(Error::from(MessageSenderError::ServiceError(closing()))).is_network()
         );
         assert!(!presage_error(Error::ServiceError(ServiceError::Unauthorized)).is_network());
+        assert!(presage_error(Error::ServiceError(ServiceError::Unauthorized)).is_unauthorized());
+        let handshake = |status: u16| {
+            let status = reqwest::StatusCode::from_u16(status).unwrap();
+            let error = reqwest_websocket::HandshakeError::UnexpectedStatusCode(status);
+            ServiceError::WsError(Box::new(error.into()))
+        };
+        assert!(presage_error(Error::ServiceError(handshake(401))).is_unauthorized());
+        assert!(presage_error(Error::ServiceError(handshake(403))).is_unauthorized());
+        assert!(!presage_error(Error::ServiceError(handshake(500))).is_unauthorized());
+        assert!(!presage_error(Error::ServiceError(closing())).is_unauthorized());
         assert!(
             !presage_error(Error::from(MessageSenderError::MaximumRetriesLimitExceeded))
                 .is_network()

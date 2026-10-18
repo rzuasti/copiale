@@ -36,6 +36,8 @@ presage = { git = "https://github.com/whisperfish/presage", rev = "94b3978f54564
 presage-store-sqlite = { git = "https://github.com/whisperfish/presage", rev = "94b3978f5456469cfd4d9f72351a5eff93715f81" }
 qrcode = { version = "0.14", default-features = false }
 rand = "0.9"
+# Only to read libsignal-service's handshake errors; same major as it uses.
+reqwest-websocket = { version = "0.6", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sqlx = { version = "0.9", default-features = false, features = ["sqlite", "migrate", "macros", "runtime-tokio"] }

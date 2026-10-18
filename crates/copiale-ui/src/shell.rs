@@ -172,6 +172,12 @@ impl Shell {
 
     pub fn on_event(&mut self, event: &Event, cx: &mut Context<Self>) {
         self.onboarding.apply(event);
+        // The core started over: the chats are gone.
+        let gone =
+            !self.onboarding.has_account() && !matches!(self.onboarding.screen(), Screen::Stopped);
+        if gone && let Some(chat) = self.chat.take() {
+            chat.update(cx, |chat, cx| chat.close_notices(cx));
+        }
         match self.onboarding.screen() {
             Screen::Passphrase { busy: false, .. } | Screen::Unlinked { busy: false, .. } => {
                 self.focus_pending = true;
@@ -186,6 +192,11 @@ impl Shell {
                     .get_or_insert_with(|| cx.new(|cx| ChatView::new(core, notifier, cx)))
                     .clone();
                 chat.update(cx, |chat, cx| chat.on_event(event, cx));
+            }
+            Screen::Revoked { .. } => {
+                if let Some(chat) = &self.chat {
+                    chat.update(cx, |chat, cx| chat.on_event(event, cx));
+                }
             }
             _ => {}
         }
@@ -277,6 +288,20 @@ impl Shell {
         cx.notify();
     }
 
+    fn wipe(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(command) = self.onboarding.wipe() {
+            self.core.send(command);
+        }
+        cx.notify();
+    }
+
+    fn reconnect(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(command) = self.onboarding.reconnect() {
+            self.core.send(command);
+        }
+        cx.notify();
+    }
+
     fn render_screen(&self, cx: &mut Context<Self>) -> AnyElement {
         match self.onboarding.screen().clone() {
             Screen::Starting => status("Starting…", cx),
@@ -288,6 +313,40 @@ impl Shell {
             .into_any_element(),
             // Shown by the chat view instead.
             Screen::Ready => status("Loading…", cx),
+            Screen::Revoked { busy } => card(
+                "This device was unlinked",
+                "Your phone removed Copiale from its linked devices, so it can't send or \
+                 receive messages. Wipe its local data to link it again; your messages stay \
+                 on your phone."
+                    .into(),
+                cx,
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(
+                        Button::new("wipe")
+                            .danger()
+                            .label(if busy {
+                                "Wiping…"
+                            } else {
+                                "Wipe and link again"
+                            })
+                            .disabled(busy)
+                            .on_click(cx.listener(|shell, _, window, cx| shell.wipe(window, cx))),
+                    )
+                    .child(
+                        Button::new("reconnect")
+                            .ghost()
+                            .label("Try again")
+                            .disabled(busy)
+                            .on_click(
+                                cx.listener(|shell, _, window, cx| shell.reconnect(window, cx)),
+                            ),
+                    ),
+            )
+            .into_any_element(),
             Screen::Passphrase { new, error, busy } => self.render_passphrase(new, error, busy, cx),
             Screen::StorageFailed {
                 failure,

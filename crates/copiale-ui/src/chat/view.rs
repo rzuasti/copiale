@@ -13,6 +13,7 @@ use copiale_core::{
     MessageStatus, Peer, Timestamp,
 };
 use gpui_kit::base::{Easing, Presence, PresencePhase, Transition};
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::list::ListItem;
@@ -110,6 +111,8 @@ const PICKING: &str = "Picking";
 const SEARCHING: &str = "Searching";
 /// Key context of the settings list.
 const SETTINGS: &str = "Settings";
+/// Key context of the unlink confirmation.
+const CONFIRM_UNLINK: &str = "ConfirmUnlink";
 
 /// Registers the chat key bindings. Composer bindings act on the input
 /// itself, ahead of its own, and pass keys on when they don't apply.
@@ -144,6 +147,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("delete", DeleteSelected, selecting),
         KeyBinding::new("backspace", DeleteSelected, selecting),
         KeyBinding::new("escape", Cancel, selecting),
+        KeyBinding::new("escape", Cancel, Some(CONFIRM_UNLINK)),
         KeyBinding::new("e", DeleteForEveryone, confirming),
         KeyBinding::new("m", DeleteForMe, confirming),
         KeyBinding::new("escape", Cancel, confirming),
@@ -175,6 +179,8 @@ pub struct ChatView {
     sidebar_top: Rc<Cell<Pixels>>,
     settings_panel: SettingsPanel,
     settings_scroll: ScrollHandle,
+    /// Held while asking whether to unlink.
+    confirm_focus: FocusHandle,
     /// Device name and privacy settings, once the core reports them.
     account: Option<Account>,
     layout: Layout,
@@ -307,6 +313,7 @@ impl ChatView {
             sidebar_top: Rc::default(),
             settings_panel: SettingsPanel::default(),
             settings_scroll: ScrollHandle::new(),
+            confirm_focus: cx.focus_handle(),
             account: None,
             layout: Layout::default(),
             drawn: false,
@@ -845,6 +852,11 @@ impl ChatView {
                 self.settings_panel.pick_font(role, &Settings::get(cx));
                 Self::ready_query(&self.inputs().font, window, cx);
             }
+            Activation::ConfirmUnlink => {
+                self.settings_panel.confirm_unlink();
+                // Neither button: `Enter` alone can't wipe.
+                window.focus(&self.confirm_focus, cx);
+            }
             Activation::Nothing => {}
         }
         cx.notify();
@@ -1216,6 +1228,9 @@ impl ChatView {
         if self.settings_panel.font_picker().is_some() {
             return self.render_font_picker(cx);
         }
+        if self.settings_panel.confirming_unlink() {
+            return self.render_unlink_confirm(cx);
+        }
         let config = Settings::get(cx);
         let mono = cx.theme().mono_font_family.clone();
         let muted = cx.palette().text_muted;
@@ -1396,6 +1411,16 @@ impl ChatView {
                     .truncate()
                     .child(text)
                     .into_any_element(),
+                Value::Action(glyph) => div()
+                    .id(("setting-action", n))
+                    .cursor_pointer()
+                    .text_color(palette.danger)
+                    .child(glyph)
+                    .on_click(cx.listener(move |view, _, window, cx| {
+                        view.activate_setting(field, window, cx)
+                    }))
+                    .test_support()
+                    .into_any_element(),
             };
         h_flex()
             .id(("setting", n))
@@ -1433,6 +1458,74 @@ impl ChatView {
             )
             .test_support()
             .into_any_element()
+    }
+
+    /// Asks before unlinking; `Tab` reaches the buttons, `Esc` goes back.
+    fn render_unlink_confirm(&self, cx: &mut Context<Self>) -> gpui_kit::Div {
+        let muted = cx.palette().text_muted;
+        let mono = cx.theme().mono_font_family.clone();
+        v_flex()
+            .key_context(CONFIRM_UNLINK)
+            .track_focus(&self.confirm_focus)
+            .on_action(cx.listener(|view, _: &Cancel, window, cx| view.cancel_unlink(window, cx)))
+            .p_4()
+            .gap_3()
+            .child(div().text_lg().child("Unlink this device?"))
+            .child(div().text_sm().text_color(muted).child(
+                "This deletes all messages and keys on this device and returns to the link \
+                 screen. Settings stay. Your messages stay on your phone.",
+            ))
+            .child(div().text_sm().text_color(muted).child(
+                "Your phone keeps listing this device until you remove it there, under \
+                 Settings > Linked devices.",
+            ))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("cancel-unlink")
+                            .ghost()
+                            .label("Cancel")
+                            .on_click(
+                                cx.listener(|view, _, window, cx| view.cancel_unlink(window, cx)),
+                            ),
+                    )
+                    .child(
+                        Button::new("confirm-unlink")
+                            .danger()
+                            .label("Unlink and wipe")
+                            .on_click(cx.listener(|view, _, window, cx| view.unlink(window, cx))),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .font_family(mono)
+                            .text_xs()
+                            .text_color(muted)
+                            .child("tab choose · esc back"),
+                    ),
+            )
+    }
+
+    fn cancel_unlink(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings_panel.cancel_unlink();
+        Self::focus_input(&self.inputs().settings, window, cx);
+        cx.notify();
+    }
+
+    /// Wipes local data; the shell shows the link screen once the core
+    /// starts over.
+    fn unlink(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.core.send(Command::Unlink);
+        self.close_overlay(window, cx);
+    }
+
+    /// Closes every notification shown, as the account's data goes.
+    pub fn close_notices(&mut self, cx: &mut Context<Self>) {
+        for action in self.notices.close_all() {
+            self.notifier.apply(action);
+        }
+        tray::update(cx, |tray| tray.unread = false);
     }
 
     /// Fonts to pick from, previewed as the highlight moves.

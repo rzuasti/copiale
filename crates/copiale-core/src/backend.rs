@@ -58,14 +58,21 @@ pub enum Incoming {
 #[error("{message}")]
 pub struct BackendError {
     message: String,
-    network: bool,
+    kind: ErrorKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ErrorKind {
+    Other,
+    Network,
+    Unauthorized,
 }
 
 impl BackendError {
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
-            network: false,
+            kind: ErrorKind::Other,
         }
     }
 
@@ -73,12 +80,25 @@ impl BackendError {
     pub fn network(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
-            network: true,
+            kind: ErrorKind::Network,
+        }
+    }
+
+    /// The server rejected this device's credentials, as once the phone
+    /// unlinks it.
+    pub fn unauthorized(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            kind: ErrorKind::Unauthorized,
         }
     }
 
     pub fn is_network(&self) -> bool {
-        self.network
+        self.kind == ErrorKind::Network
+    }
+
+    pub fn is_unauthorized(&self) -> bool {
+        self.kind == ErrorKind::Unauthorized
     }
 }
 

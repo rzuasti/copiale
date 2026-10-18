@@ -352,6 +352,7 @@ fn renders_every_screen(cx: &mut TestAppContext) {
             device_name: "Copiale on host".into(),
         },
         Event::Ready,
+        Event::LinkRevoked,
         Event::Stopped,
     ] {
         ui.event(event, cx);
@@ -1859,6 +1860,70 @@ fn overlays_keep_the_mouse_from_the_window_underneath(cx: &mut TestAppContext) {
     });
     assert!(following);
     assert_eq!(overlay(&ui, cx), Some(Overlay::Settings));
+}
+
+#[gpui_kit::test]
+fn unlink_asks_then_wipes_and_drops_the_chats(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.open_alice(cx);
+    ui.core.take();
+    open_settings(&ui, "unlink", cx);
+    ui.press("enter", cx);
+    assert!(ui.shows("confirm-unlink", cx));
+
+    // `Enter` alone doesn't wipe; `Esc` goes back to the list.
+    ui.press("enter", cx);
+    assert!(ui.shows("confirm-unlink", cx));
+    ui.press("escape", cx);
+    assert!(ui.shows("settings-list", cx));
+    // The first button is Cancel.
+    ui.press("enter", cx);
+    ui.press("tab", cx);
+    ui.press("enter", cx);
+    assert!(ui.shows("settings-list", cx));
+    assert!(ui.core.take().is_empty());
+
+    ui.press("enter", cx);
+    ui.click("confirm-unlink", cx);
+    assert!(matches!(ui.core.take().as_slice(), [Command::Unlink]));
+    assert_eq!(overlay(&ui, cx), None);
+
+    ui.event(
+        Event::Unlinked {
+            device_name: "Copiale on host".into(),
+        },
+        cx,
+    );
+    assert!(matches!(ui.screen(cx), Screen::Unlinked { .. }));
+    assert!(cx.update(|cx| ui.shell.read(cx).chat().is_none()));
+}
+
+#[gpui_kit::test]
+fn an_unlinked_device_asks_before_wiping(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.open_alice(cx);
+    ui.core.take();
+    ui.event(Event::LinkRevoked, cx);
+    assert_eq!(ui.screen(cx), Screen::Revoked { busy: false });
+    assert!(ui.shows("wipe", cx));
+
+    ui.click("reconnect", cx);
+    assert!(matches!(ui.core.take().as_slice(), [Command::Reconnect]));
+    ui.event(Event::Connected, cx);
+    assert_eq!(ui.screen(cx), Screen::Ready);
+    assert!(ui.shows(("row", 10u64), cx));
+
+    ui.event(Event::LinkRevoked, cx);
+    ui.click("wipe", cx);
+    assert!(matches!(ui.core.take().as_slice(), [Command::Unlink]));
+    assert_eq!(ui.screen(cx), Screen::Revoked { busy: true });
+    ui.event(
+        Event::Unlinked {
+            device_name: "Copiale on host".into(),
+        },
+        cx,
+    );
+    assert!(cx.update(|cx| ui.shell.read(cx).chat().is_none()));
 }
 
 #[gpui_kit::test]

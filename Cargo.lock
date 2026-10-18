@@ -1323,6 +1323,8 @@ dependencies = [
  "presage",
  "presage-store-sqlite",
  "rand 0.9.5",
+ "reqwest",
+ "reqwest-websocket",
  "serde",
  "serde_json",
  "sqlx",

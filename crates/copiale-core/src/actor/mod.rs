@@ -89,6 +89,11 @@ pub enum Command {
         conversation: ConversationId,
         typing: bool,
     },
+    /// Deletes all local data (database, salt, keychain key; not the
+    /// config) and starts over: [`Event::Unlinked`] or [`Event::Locked`]
+    /// follows. The phone keeps listing the device until removed there.
+    /// The UI must confirm first.
+    Unlink,
     /// Stops the core; [`Event::Stopped`] follows.
     Shutdown,
 }
@@ -168,6 +173,10 @@ pub enum Event {
         message: Message,
         error: BackendError,
     },
+    /// The server rejected this device's credentials, as once the phone
+    /// unlinks it. The core stops reconnecting: offer [`Command::Unlink`],
+    /// or [`Command::Reconnect`] in case it was a glitch.
+    LinkRevoked,
     /// The connection failed to open (`Some`) or closed (`None`); the next
     /// attempt is in `retry_in`.
     Disconnected {

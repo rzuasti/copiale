@@ -17,6 +17,7 @@ notify.workspace = true
 presage.workspace = true
 presage-store-sqlite.workspace = true
 rand.workspace = true
+reqwest-websocket.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
@@ -32,6 +33,8 @@ zeroize.workspace = true
 chrono.workspace = true
 copiale-testkit.workspace = true
 log.workspace = true
+# Builds handshake errors in tests; same major as libsignal-service uses.
+reqwest = { version = "0.13", default-features = false }
 tempfile.workspace = true
 tracing-log.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }

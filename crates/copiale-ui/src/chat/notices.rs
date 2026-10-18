@@ -71,7 +71,13 @@ impl Notices {
         if content != NotificationContent::Off {
             return Vec::new();
         }
+        self.close_all()
+    }
+
+    /// Closes everything shown and forgets what's pending.
+    pub fn close_all(&mut self) -> Vec<NoticeAction> {
         self.waiting.clear();
+        self.backlog = None;
         let mut actions: Vec<_> = self
             .counts
             .drain()

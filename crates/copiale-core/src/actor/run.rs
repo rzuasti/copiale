@@ -32,6 +32,14 @@ pub(super) struct Core {
     pub(super) events: UnboundedSender<Event>,
 }
 
+/// Why serving the account ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Served {
+    Stop,
+    /// Wipe local data and start over.
+    Unlink,
+}
+
 /// How a phase ended.
 enum Step<T> {
     Done(T),
@@ -44,13 +52,24 @@ enum Step<T> {
 impl Core {
     pub(super) async fn run<L: Linker>(mut self, mut linker: L) {
         tracing::info!("core started");
-        if let Some(db) = self.unlock().await {
+        while let Some(db) = self.unlock().await {
+            let mut served = Served::Stop;
             if let Some((backend, linked_now)) = self.set_up_account(&db, &mut linker).await {
                 self.emit(Event::Ready);
-                self.serve(&db, backend, linked_now).await;
+                served = self.serve(&db, backend, linked_now).await;
             }
-            // Before `Stopped`: the process may exit right after it.
+            // Before `Stopped`, as the process may exit right after it, and
+            // before wiping the file.
             db.close().await;
+            if served == Served::Stop {
+                break;
+            }
+            let (storage, secrets) = (self.storage.clone(), self.secrets.clone());
+            match blocking(move || storage.wipe(&*secrets)).await {
+                Ok(()) => tracing::info!("unlinked"),
+                // Opens what's left; the user can try again.
+                Err(error) => self.emit(Event::DatabaseError(error.to_string())),
+            }
         }
         tracing::info!("core stopped");
         self.emit(Event::Stopped);
@@ -219,7 +238,12 @@ impl Core {
     }
 
     /// Keeps a connection open, stores messages and answers queries.
-    async fn serve<B: SignalBackend>(&mut self, db: &Database, mut backend: B, linked_now: bool) {
+    async fn serve<B: SignalBackend>(
+        &mut self,
+        db: &Database,
+        mut backend: B,
+        linked_now: bool,
+    ) -> Served {
         // Overdue while not running.
         let mut next_expiry = self.expire(db).await;
         match db.fail_pending().await {
@@ -359,7 +383,8 @@ impl Core {
                     Some(Command::Typing { conversation, typing }) if settings.typing_indicators => {
                         self.typing(db, &mut backend, &mut typing_sent, conversation, typing).await;
                     }
-                    Some(Command::Shutdown) | None => break,
+                    Some(Command::Unlink) => return Served::Unlink,
+                    Some(Command::Shutdown) | None => return Served::Stop,
                     Some(other) => ignored(&other),
                 },
                 result = maybe(&mut connecting) => {
@@ -370,6 +395,10 @@ impl Core {
                             self.emit(Event::Connected);
                             probe.start();
                             outbox.connected(&mut backend);
+                        }
+                        Err(error) if error.is_unauthorized() => {
+                            tracing::warn!(%error, "credentials rejected");
+                            self.emit(Event::LinkRevoked);
                         }
                         Err(error) => {
                             tracing::warn!(%error, "connection failed");
@@ -563,7 +592,11 @@ impl Core {
                 incoming = None;
                 probe.stop();
                 outbox.disconnected();
-                retry_at = Some(self.disconnected(error, &mut delay));
+                if error.as_ref().is_some_and(BackendError::is_unauthorized) {
+                    self.emit(Event::LinkRevoked);
+                } else {
+                    retry_at = Some(self.disconnected(error, &mut delay));
+                }
             }
         }
     }

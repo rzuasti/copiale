@@ -235,6 +235,17 @@ not in the file:
 | Privacy | Read receipts and typing indicators (mirror account settings) |
 | Account | Device name, unlink and wipe |
 
+Unlinking and wiping:
+
+- **Unlink and wipe** (settings, Account) asks first, then deletes the
+  database, salt and keychain key, keeps `config.toml`, and returns to the
+  link screen. presage can't remove a linked device from the account, so
+  the confirmation says to remove it on the phone too.
+- When the server rejects this device's credentials (the phone unlinked
+  it), the core stops reconnecting and the app shows "This device was
+  unlinked": wipe and link again, or try again in case it was a glitch.
+  Nothing is deleted until confirmed.
+
 The settings UI (`Ctrl+,` or the palette) is one keyboard-driven list:
 
 - Sections in file order, then Privacy and Account; typing filters rows.
