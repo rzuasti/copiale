@@ -8,10 +8,14 @@ use std::rc::Rc;
 use copiale_core::ServiceId;
 use gpui_kit::component::{self, ThemeConfig, ThemeConfigColors};
 use gpui_kit::{App, Global, Hsla, Rgba, SharedString};
+
+use crate::settings::Settings;
 use serde::{Deserialize, Deserializer};
 
+mod fonts;
 mod system;
 
+pub use fonts::{Fonts, InstalledFonts};
 pub(crate) use system::watch_settings;
 pub use system::{Scheme, follow, follow_system, follow_window};
 
@@ -73,14 +77,15 @@ pub struct Palette {
 impl Palette {
     /// A contact's name color, stable across runs.
     pub fn nick(&self, peer: ServiceId) -> Hsla {
+        self.nick_for(peer.uuid().as_bytes())
+    }
+
+    /// A name color for any ID, e.g. a group's, stable across runs.
+    pub fn nick_for(&self, id: &[u8]) -> Hsla {
         // FNV-1a.
-        let hash = peer
-            .uuid()
-            .as_bytes()
-            .iter()
-            .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
-                (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3)
-            });
+        let hash = id.iter().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3)
+        });
         self.nicks[(hash % self.nicks.len() as u64) as usize]
     }
 }
@@ -112,16 +117,34 @@ impl Theme {
     }
 }
 
-/// Makes `theme` active and redraws all windows.
+/// Makes `theme` active, with the settings' fonts and opacity, and redraws
+/// all windows.
 pub fn apply(theme: &Theme, cx: &mut App) {
-    cx.set_global(theme.colors.clone());
-    let config = Rc::new(component_config(theme, system::mono_font(cx)));
+    let settings = Settings::get(cx);
+    let fonts = Fonts::resolve(&settings.typography, cx);
+    let palette = theme.colors.translucent(settings.window.opacity as f32);
+    let config = Rc::new(component_config(theme, &palette, &fonts));
+    cx.set_global(palette);
     component::Theme::update(cx, |kit| kit.apply_config(&config));
+    let fonts = fonts.into_resolved(cx);
+    cx.set_global(fonts);
+}
+
+impl Palette {
+    /// Window backgrounds at `opacity`; text and controls stay opaque.
+    pub fn translucent(&self, opacity: f32) -> Self {
+        Self {
+            background: self.background.opacity(opacity),
+            sidebar: self.sidebar.opacity(opacity),
+            ..self.clone()
+        }
+    }
 }
 
 /// Maps the palette onto GPUI Kit roles; the rest derive from these.
-fn component_config(theme: &Theme, mono_font: Option<SharedString>) -> ThemeConfig {
-    let c = &theme.colors;
+/// Popovers keep `theme`'s opaque background.
+fn component_config(theme: &Theme, palette: &Palette, fonts: &Fonts) -> ThemeConfig {
+    let c = palette;
     let mut k = ThemeConfigColors::default();
     for (role, color) in [
         (&mut k.background, c.background),
@@ -137,7 +160,7 @@ fn component_config(theme: &Theme, mono_font: Option<SharedString>) -> ThemeConf
         (&mut k.primary_foreground, c.accent_text),
         (&mut k.secondary, c.surface),
         (&mut k.secondary_foreground, c.text),
-        (&mut k.popover, c.background),
+        (&mut k.popover, theme.colors.background),
         (&mut k.popover_foreground, c.text),
         (&mut k.list, c.sidebar),
         (&mut k.list_hover, c.surface),
@@ -175,7 +198,9 @@ fn component_config(theme: &Theme, mono_font: Option<SharedString>) -> ThemeConf
             Appearance::Light => component::ThemeMode::Light,
             Appearance::Dark => component::ThemeMode::Dark,
         },
-        mono_font_family: mono_font,
+        font_family: Some(fonts.ui.clone()),
+        mono_font_family: Some(fonts.mono.clone()),
+        font_size: Some(fonts.size),
         colors: k,
         ..Default::default()
     }

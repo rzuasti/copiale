@@ -16,7 +16,8 @@ use tokio::task::LocalSet;
 use crate::backend::{BackendError, Linker};
 use crate::clock::{Clock, SystemClock};
 use crate::model::{
-    Contact, ConversationId, ConversationSummary, Message, MessageBody, MessageId, ServiceId,
+    Account, Contact, ConversationId, ConversationSummary, Message, MessageBody, MessageId,
+    ServiceId,
 };
 use crate::storage::{Passphrase, SecretStore, Storage};
 
@@ -118,6 +119,9 @@ pub enum Event {
     Connected,
     /// Queued messages have been delivered; the core is live.
     Synced,
+    /// The device name and privacy settings: once ready, and again when
+    /// the phone syncs settings.
+    Account(Account),
     /// A new message was stored; [`Event::ConversationUpdated`] follows.
     MessageAdded(Message),
     ConversationUpdated(ConversationSummary),

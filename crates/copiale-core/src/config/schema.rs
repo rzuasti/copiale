@@ -89,7 +89,7 @@ pub struct Notifications {
 }
 
 /// A setting stored as one of a fixed set of names.
-pub(crate) trait Choice: Copy + PartialEq + 'static {
+pub trait Choice: Copy + PartialEq + 'static {
     const CHOICES: &'static [(&'static str, Self)];
 
     fn name(self) -> &'static str {

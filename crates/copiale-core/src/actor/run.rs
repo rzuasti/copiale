@@ -18,9 +18,9 @@ use super::{Command, CoreOptions, DELETE_WINDOW, EDIT_WINDOW, Event, StorageFail
 use crate::backend::{BackendError, Incoming, Linker, SignalBackend};
 use crate::clock::Clock;
 use crate::model::{
-    AccountSettings, Change, ChatRef, Content, ConversationId, Destination, GroupRef, Message,
-    MessageBody, MessageChange, MessageId, MessageRef, MessageStatus, Outgoing, Quote, ReceiptKind,
-    ServiceId, Timestamp,
+    Account, AccountSettings, Change, ChatRef, Content, ConversationId, Destination, GroupRef,
+    Message, MessageBody, MessageChange, MessageId, MessageRef, MessageStatus, Outgoing, Quote,
+    ReceiptKind, ServiceId, Timestamp,
 };
 use crate::storage::{Database, KeyLookup, SecretStore, Storage, StorageError};
 
@@ -269,6 +269,14 @@ impl Core {
                 AccountSettings::default()
             }
         };
+        let device_name = backend.device_name();
+        let account = |settings| {
+            Event::Account(Account {
+                device_name: device_name.clone(),
+                settings,
+            })
+        };
+        self.emit(account(settings));
         let mut typing_sent = HashMap::new();
 
         let mut incoming: Option<LocalBoxStream<'static, Incoming>> = None;
@@ -483,6 +491,7 @@ impl Core {
                                     "settings synced"
                                 );
                                 settings = updated;
+                                self.emit(account(settings));
                             }
                             Err(error) => self.database_error(error),
                         }

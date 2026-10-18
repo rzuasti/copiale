@@ -382,6 +382,13 @@ impl SignalBackend for PresageBackend {
         ServiceId::new(self.manager.registration_data().service_ids.aci)
     }
 
+    fn device_name(&self) -> Option<String> {
+        self.manager
+            .registration_data()
+            .device_name()
+            .map(str::to_owned)
+    }
+
     async fn request_contact_sync(&mut self) -> Result<(), BackendError> {
         self.manager.request_contacts().await.map_err(presage_error)
     }

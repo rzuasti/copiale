@@ -24,7 +24,7 @@ pub use backend::{BackendError, Incoming, Linker, SignalBackend};
 pub use clock::{Clock, SystemClock};
 pub use dirs::runtime_dir;
 pub use model::{
-    AccountSettings, Attachment, Change, ChatRef, Contact, Content, ConversationId,
+    Account, AccountSettings, Attachment, Change, ChatRef, Contact, Content, ConversationId,
     ConversationSummary, Destination, Direction, Expiry, GroupId, GroupInfo, GroupMasterKey,
     GroupRef, GroupUpdate, IncomingMessage, Member, Message, MessageBody, MessageChange, MessageId,
     MessagePreview, MessageRef, MessageStatus, Outgoing, Peer, PhoneNumber, Quote, ReceiptKind,

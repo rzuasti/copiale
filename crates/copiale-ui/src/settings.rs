@@ -63,11 +63,16 @@ pub fn load(file: ConfigFile, cx: &mut App) {
     .detach();
 }
 
+/// Applies a change without saving it, e.g. to preview it.
+pub fn preview(setting: &Setting, cx: &mut App) {
+    let mut config = Settings::get(cx);
+    config.set(setting);
+    cx.set_global(Settings(config));
+}
+
 /// Applies a change now and saves it to the file, if loaded.
 pub fn change(setting: Setting, cx: &mut App) {
-    let mut config = Settings::get(cx);
-    config.set(&setting);
-    cx.set_global(Settings(config));
+    preview(&setting, cx);
     let Some(SettingsFile(file)) = cx.try_global::<SettingsFile>() else {
         return;
     };

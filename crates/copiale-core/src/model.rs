@@ -542,6 +542,14 @@ pub struct AccountSettings {
     pub typing_indicators: bool,
 }
 
+/// This device and its account, as the settings show them.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Account {
+    /// This device's name, as the phone lists it.
+    pub device_name: Option<String>,
+    pub settings: AccountSettings,
+}
+
 /// Which receipt an account sent for messages of ours.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReceiptKind {

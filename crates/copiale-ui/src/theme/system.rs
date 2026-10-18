@@ -1,6 +1,6 @@
 //! System appearance and fonts.
 
-use copiale_core::config::ThemeMode;
+use copiale_core::config::{ThemeMode, Typography};
 use gpui_kit::{App, Global, SharedString, Window, WindowAppearance};
 
 use super::{Theme, apply};
@@ -45,7 +45,16 @@ impl Theme {
 /// The system's scheme as last reported, and what was applied for it.
 struct Followed {
     scheme: Scheme,
-    applied: Option<(ThemeMode, Scheme)>,
+    applied: Option<Applied>,
+}
+
+/// What the applied theme depends on.
+#[derive(Clone, Debug, PartialEq)]
+struct Applied {
+    mode: ThemeMode,
+    scheme: Scheme,
+    typography: Typography,
+    opacity: f64,
 }
 
 impl Global for Followed {}
@@ -65,15 +74,21 @@ fn refresh(cx: &mut App) {
     let Some(followed) = cx.try_global::<Followed>() else {
         return;
     };
-    let wanted = (Settings::get(cx).appearance.theme, followed.scheme);
-    if followed.applied == Some(wanted) {
+    let settings = Settings::get(cx);
+    let wanted = Applied {
+        mode: settings.appearance.theme,
+        scheme: followed.scheme,
+        typography: settings.typography,
+        opacity: settings.window.opacity,
+    };
+    if followed.applied.as_ref() == Some(&wanted) {
         return;
     }
-    apply(&Theme::for_mode(wanted.0, wanted.1), cx);
+    apply(&Theme::for_mode(wanted.mode, wanted.scheme), cx);
     cx.global_mut::<Followed>().applied = Some(wanted);
 }
 
-/// Reapplies the theme when the settings change it.
+/// Reapplies the theme when the settings change it, its fonts or opacity.
 pub(crate) fn watch_settings(cx: &mut App) {
     cx.observe_global::<Settings>(refresh).detach();
 }

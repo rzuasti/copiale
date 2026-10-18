@@ -8,13 +8,15 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::{Disableable as _, v_flex};
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render,
-    SharedString, Styled as _, Subscription, Task, Window, WindowId, div, px,
+    SharedString, Styled as _, Subscription, Task, Window, WindowBackgroundAppearance, WindowId,
+    div, px,
 };
 
 use crate::chat::{ChatView, NoticeKey};
 use crate::notifier::Notifier;
 use crate::onboarding::{Onboarding, Screen, describe};
 use crate::qr::{QrMatrix, qr_code};
+use crate::settings::Settings;
 use crate::theme::ActivePalette as _;
 use crate::{CoreSink, main_window, titlebar};
 
@@ -31,6 +33,8 @@ pub struct Shell {
     focus_pending: bool,
     /// QR code for the current provisioning URL.
     qr: Option<(String, Option<QrMatrix>)>,
+    /// The window background last set, and for which window.
+    background: Option<(WindowId, WindowBackgroundAppearance)>,
     _events: Option<Task<()>>,
     _clicks: Option<Task<()>>,
 }
@@ -54,6 +58,7 @@ impl Shell {
             inputs: None,
             focus_pending: true,
             qr: None,
+            background: None,
             _events: None,
             _clicks: None,
         }
@@ -423,9 +428,27 @@ impl Shell {
     }
 }
 
+impl Shell {
+    /// See-through where the settings' opacity is below 1, blurred if asked.
+    fn sync_background(&mut self, window: &Window, cx: &App) {
+        let settings = Settings::get(cx).window;
+        let wanted = match (settings.opacity < 1., settings.blur) {
+            (false, _) => WindowBackgroundAppearance::Opaque,
+            (true, false) => WindowBackgroundAppearance::Transparent,
+            (true, true) => WindowBackgroundAppearance::Blurred,
+        };
+        let id = window.window_handle().window_id();
+        if self.background != Some((id, wanted)) {
+            window.set_background_appearance(wanted);
+            self.background = Some((id, wanted));
+        }
+    }
+}
+
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.attach(window, cx);
+        self.sync_background(window, cx);
         let content = if let (Screen::Ready, Some(chat)) = (self.onboarding.screen(), &self.chat) {
             let chat = chat.clone();
             chat.update(cx, |chat, cx| chat.attach(window, cx));

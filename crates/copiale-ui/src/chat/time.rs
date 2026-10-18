@@ -9,18 +9,28 @@ use copiale_core::Timestamp;
 #[derive(Clone, Copy, Debug)]
 pub struct Clock {
     fixed: Option<(FixedOffset, Timestamp)>,
+    twelve_hour: bool,
 }
 
 impl Clock {
     pub fn system() -> Self {
-        Self { fixed: None }
+        Self {
+            fixed: None,
+            twelve_hour: false,
+        }
     }
 
     /// Always `now`, in a fixed time zone.
     pub fn fixed(offset: FixedOffset, now: Timestamp) -> Self {
         Self {
             fixed: Some((offset, now)),
+            twelve_hour: false,
         }
+    }
+
+    /// Shows times as "2:05 PM" instead of "14:05".
+    pub fn set_twelve_hour(&mut self, twelve_hour: bool) {
+        self.twelve_hour = twelve_hour;
     }
 
     pub fn now(&self) -> Timestamp {
@@ -42,9 +52,14 @@ impl Clock {
         self.local(timestamp).date()
     }
 
-    /// "14:05".
+    /// "14:05", or "2:05 PM".
     pub fn time(&self, timestamp: Timestamp) -> String {
-        self.local(timestamp).format("%H:%M").to_string()
+        let format = if self.twelve_hour {
+            "%-I:%M %p"
+        } else {
+            "%H:%M"
+        };
+        self.local(timestamp).format(format).to_string()
     }
 
     /// "Today", "Yesterday", "Mon 12 Oct", or with the year if not this one.
@@ -139,6 +154,14 @@ mod tests {
     fn times_are_local_and_24_hour() {
         assert_eq!(clock().time(Timestamp::from_millis(NOW)), "14:05");
         assert_eq!(clock().time(ago(14 * 60 * MINUTE)), "00:05");
+    }
+
+    #[test]
+    fn twelve_hour_times() {
+        let mut clock = clock();
+        clock.set_twelve_hour(true);
+        assert_eq!(clock.time(Timestamp::from_millis(NOW)), "2:05 PM");
+        assert_eq!(clock.time(ago(14 * 60 * MINUTE)), "12:05 AM");
     }
 
     #[test]

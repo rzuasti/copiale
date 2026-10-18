@@ -230,6 +230,17 @@ not in the file:
 | Privacy | Read receipts and typing indicators (mirror account settings) |
 | Account | Device name, unlink and wipe |
 
+The settings UI (`Ctrl+,` or the palette) is one keyboard-driven list:
+
+- Sections in file order, then Privacy and Account; typing filters rows.
+- `↑`/`↓` move, `←`/`→` change, `Enter` toggles or cycles; clicks work too.
+- Fonts open a fuzzy picker over installed fonts plus "Default"; moving
+  previews live, `Enter` saves, `Esc` restores.
+- Every change applies at once and is written to `config.toml`.
+- Privacy and device name are read-only mirrors of the phone's settings;
+  message style shows the current style until blocks and bubbles exist.
+- Fonts that aren't installed fall back to the default with a warning.
+
 ## Architecture
 
 ### Crates

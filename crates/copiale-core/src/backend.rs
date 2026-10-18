@@ -149,6 +149,9 @@ pub trait SignalBackend {
     /// This account's ID, e.g. the peer of Note to Self.
     fn own_id(&self) -> ServiceId;
 
+    /// This device's name, as the phone lists it.
+    fn device_name(&self) -> Option<String>;
+
     /// Asks the phone to send its contacts; they arrive as
     /// [`Incoming::ContactsSynced`].
     async fn request_contact_sync(&mut self) -> Result<(), BackendError>;

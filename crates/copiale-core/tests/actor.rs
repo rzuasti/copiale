@@ -7,15 +7,15 @@ use std::time::Duration;
 
 use copiale_core::storage::{KdfParams, Passphrase, Storage, StoragePaths};
 use copiale_core::{
-    BackendError, Change, ChatRef, Command, Contact, Content, ConversationId, ConversationSummary,
-    CoreHandle, CoreOptions, Destination, Direction, Event, Events, Expiry, GroupInfo, GroupRef,
-    GroupUpdate, Incoming, IncomingMessage, Member, Message, MessageBody, MessageChange,
-    MessagePreview, MessageRef, MessageStatus, Outgoing, Peer, PhoneNumber, Quote, ReceiptKind,
-    SentMessage, StorageFailure, Timestamp,
+    Account, AccountSettings, BackendError, Change, ChatRef, Command, Contact, Content,
+    ConversationId, ConversationSummary, CoreHandle, CoreOptions, Destination, Direction, Event,
+    Events, Expiry, GroupInfo, GroupRef, GroupUpdate, Incoming, IncomingMessage, Member, Message,
+    MessageBody, MessageChange, MessagePreview, MessageRef, MessageStatus, Outgoing, Peer,
+    PhoneNumber, Quote, ReceiptKind, SentMessage, StorageFailure, Timestamp,
 };
 use copiale_testkit::{
-    FAKE_LINK_URL, FakeNetwork, FakePhone, ManualClock, MemorySecretStore, OWN_ID, SentText,
-    fake_backend, fake_linker, group_key, service_id, text,
+    DEVICE_NAME, FAKE_LINK_URL, FakeNetwork, FakePhone, ManualClock, MemorySecretStore, OWN_ID,
+    SentText, fake_backend, fake_linker, group_key, service_id, text,
 };
 use tempfile::TempDir;
 
@@ -83,7 +83,7 @@ fn start_with(
 async fn ready() -> (TempDir, Running) {
     let dir = tempfile::tempdir().unwrap();
     let mut running = start(dir.path(), &MemorySecretStore::default(), true);
-    expect(&mut running.events, Event::Ready).await;
+    expect_ready(&mut running.events).await;
     expect(&mut running.events, Event::Connected).await;
     (dir, running)
 }
@@ -131,6 +131,15 @@ async fn next_event(events: &mut Events) -> Event {
 
 async fn expect(events: &mut Events, expected: Event) {
     assert_eq!(next_event(events).await, expected);
+}
+
+/// `Ready`, then the account.
+async fn expect_ready(events: &mut Events) -> Account {
+    expect(events, Event::Ready).await;
+    let Event::Account(account) = next_event(events).await else {
+        panic!("expected Account");
+    };
+    account
 }
 
 /// Shuts down and checks storage was closed before `Stopped`.
@@ -293,14 +302,14 @@ async fn messages_survive_a_restart() {
     let dir = tempfile::tempdir().unwrap();
     let secrets = MemorySecretStore::default();
     let mut running = start(dir.path(), &secrets, true);
-    expect(&mut running.events, Event::Ready).await;
+    expect_ready(&mut running.events).await;
     expect(&mut running.events, Event::Connected).await;
     running.network.deliver(incoming(1, 100, "kept"));
     let message = message_added(&mut running.events).await;
     stop(running).await;
 
     let mut running = start(dir.path(), &secrets, true);
-    expect(&mut running.events, Event::Ready).await;
+    expect_ready(&mut running.events).await;
     send(
         &running,
         Command::LoadMessages {
@@ -383,7 +392,7 @@ async fn contacts_are_asked_for_daily() {
     let dir = tempfile::tempdir().unwrap();
     let secrets = MemorySecretStore::default();
     let mut running = start(dir.path(), &secrets, true);
-    expect(&mut running.events, Event::Ready).await;
+    expect_ready(&mut running.events).await;
     expect(&mut running.events, Event::Connected).await;
     running
         .network
@@ -395,7 +404,7 @@ async fn contacts_are_asked_for_daily() {
 
     // Asked less than a day ago, with contacts stored.
     let mut running = start(dir.path(), &secrets, true);
-    expect(&mut running.events, Event::Ready).await;
+    expect_ready(&mut running.events).await;
     expect(&mut running.events, Event::Connected).await;
     assert_eq!(running.network.contact_sync_requests(), 0);
     stop(running).await;
@@ -653,7 +662,7 @@ async fn sends_interrupted_by_quitting_fail_on_restart() {
     let dir = tempfile::tempdir().unwrap();
     let secrets = MemorySecretStore::default();
     let mut running = start(dir.path(), &secrets, true);
-    expect(&mut running.events, Event::Ready).await;
+    expect_ready(&mut running.events).await;
     expect(&mut running.events, Event::Connected).await;
     running.network.pause_sends();
     let chat = open_chat(&mut running, 2).await;
@@ -662,7 +671,7 @@ async fn sends_interrupted_by_quitting_fail_on_restart() {
     stop(running).await;
 
     let mut running = start(dir.path(), &secrets, true);
-    expect(&mut running.events, Event::Ready).await;
+    expect_ready(&mut running.events).await;
 
     let messages = load_messages(&mut running, pending.conversation).await;
     assert_eq!(messages[0].status, Some(MessageStatus::Failed));
@@ -801,7 +810,7 @@ async fn messages_waiting_too_long_fail() {
         options,
         |_| {},
     );
-    expect(&mut running.events, Event::Ready).await;
+    expect_ready(&mut running.events).await;
     expect(&mut running.events, Event::Connected).await;
     running.network.go_offline();
 
@@ -838,7 +847,7 @@ async fn stalled_connection_times_out_while_commands_are_served() {
         options,
         |network| network.stall_connections(true),
     );
-    expect(&mut running.events, Event::Ready).await;
+    expect_ready(&mut running.events).await;
 
     send(&running, Command::LoadConversations);
     assert_eq!(
@@ -873,7 +882,7 @@ async fn reports_receive_failure_and_keeps_serving_commands() {
         |network| network.fail_receive(BackendError::new("unauthorized")),
     );
 
-    expect(&mut running.events, Event::Ready).await;
+    expect_ready(&mut running.events).await;
     expect(
         &mut running.events,
         Event::Disconnected {
@@ -927,7 +936,7 @@ async fn reconnect_backs_off_and_resets_once_synced() {
             }
         },
     );
-    expect(&mut running.events, Event::Ready).await;
+    expect_ready(&mut running.events).await;
 
     for retry_in in [RETRY, RETRY * 2, RETRY * 4, RETRY * 4] {
         expect_disconnected(&mut running.events, retry_in).await;
@@ -960,7 +969,7 @@ async fn reconnect_command_skips_the_wait() {
         slow,
         |network| network.fail_receive(BackendError::new("offline")),
     );
-    expect(&mut running.events, Event::Ready).await;
+    expect_ready(&mut running.events).await;
     expect_disconnected(&mut running.events, Duration::from_secs(600)).await;
 
     send(&running, Command::Reconnect);
@@ -999,7 +1008,8 @@ async fn links_after_the_phone_approves() {
     expect(&mut running.events, Event::LinkUrl(FAKE_LINK_URL.into())).await;
     running.phone.approve();
 
-    expect(&mut running.events, Event::Ready).await;
+    let account = expect_ready(&mut running.events).await;
+    assert_eq!(account.device_name.as_deref(), Some("Copiale on test"));
     expect(&mut running.events, Event::Connected).await;
     assert!(running.phone.is_linked());
     assert_eq!(
@@ -1034,7 +1044,7 @@ async fn rejected_link_can_be_retried() {
     send(&running, link());
     expect(&mut running.events, Event::LinkUrl(FAKE_LINK_URL.into())).await;
     running.phone.approve();
-    expect(&mut running.events, Event::Ready).await;
+    expect_ready(&mut running.events).await;
     stop(running).await;
 }
 
@@ -1096,7 +1106,7 @@ async fn passphrase_database_unlocks_on_restart() {
     )
     .await;
     send(&running, Command::SetPassphrase(Passphrase::new("right")));
-    expect(&mut running.events, Event::Ready).await;
+    expect_ready(&mut running.events).await;
     stop(running).await;
 
     let mut running = start(dir.path(), &secrets, true);
@@ -1110,7 +1120,7 @@ async fn passphrase_database_unlocks_on_restart() {
     send(&running, Command::Unlock(Passphrase::new("wrong")));
     expect(&mut running.events, Event::WrongPassphrase).await;
     send(&running, Command::Unlock(Passphrase::new("right")));
-    expect(&mut running.events, Event::Ready).await;
+    expect_ready(&mut running.events).await;
     stop(running).await;
 }
 
@@ -1156,7 +1166,7 @@ async fn unavailable_keychain_can_be_retried() {
     secrets.set_available(true);
     send(&running, Command::Retry);
 
-    expect(&mut running.events, Event::Ready).await;
+    expect_ready(&mut running.events).await;
     stop(running).await;
 }
 
@@ -1513,18 +1523,36 @@ async fn settings_are_requested_until_known() {
     let dir = tempfile::tempdir().unwrap();
     let secrets = MemorySecretStore::default();
     let mut running = start(dir.path(), &secrets, true);
-    expect(&mut running.events, Event::Ready).await;
+    let account = expect_ready(&mut running.events).await;
+    assert_eq!(
+        account,
+        Account {
+            device_name: Some(DEVICE_NAME.into()),
+            settings: AccountSettings::default(),
+        }
+    );
     expect(&mut running.events, Event::Connected).await;
     assert_eq!(running.network.settings_sync_requests(), 1);
     running.network.deliver(Incoming::Settings {
         read_receipts: Some(true),
         typing_indicators: None,
     });
-    flush(&mut running).await;
+    let synced = AccountSettings {
+        read_receipts: true,
+        typing_indicators: false,
+    };
+    let events = flush(&mut running).await;
+    assert_eq!(
+        events,
+        [Event::Account(Account {
+            device_name: Some(DEVICE_NAME.into()),
+            settings: synced,
+        })]
+    );
     stop(running).await;
 
     let mut running = start(dir.path(), &secrets, true);
-    expect(&mut running.events, Event::Ready).await;
+    assert_eq!(expect_ready(&mut running.events).await.settings, synced);
     expect(&mut running.events, Event::Connected).await;
     assert_eq!(running.network.settings_sync_requests(), 0);
     stop(running).await;
@@ -2080,7 +2108,7 @@ async fn ready_at(clock: &ManualClock) -> (TempDir, Running) {
     let options = timed(fast(), clock);
     let secrets = MemorySecretStore::default();
     let mut running = start_with(dir.path(), &secrets, true, options, |_| {});
-    expect(&mut running.events, Event::Ready).await;
+    expect_ready(&mut running.events).await;
     expect(&mut running.events, Event::Connected).await;
     (dir, running)
 }
@@ -2243,7 +2271,7 @@ async fn overdue_messages_are_deleted_on_start() {
     let secrets = MemorySecretStore::default();
     let clock = ManualClock::new(Timestamp::from_millis(NOW));
     let mut running = start_with(dir.path(), &secrets, true, timed(fast(), &clock), |_| {});
-    expect(&mut running.events, Event::Ready).await;
+    expect_ready(&mut running.events).await;
     expect(&mut running.events, Event::Connected).await;
     running.network.deliver(timed_incoming(1, NOW, "gone", 60));
     let gone = message_added(&mut running.events).await;
@@ -2260,6 +2288,7 @@ async fn overdue_messages_are_deleted_on_start() {
 
     clock.advance(Duration::from_secs(60));
     let mut running = start_with(dir.path(), &secrets, true, timed(fast(), &clock), |_| {});
+    // Removed before the account is announced.
     expect(&mut running.events, Event::Ready).await;
     expect_removed(&mut running.events, &gone).await;
     let left = load_messages(&mut running, gone.conversation).await;

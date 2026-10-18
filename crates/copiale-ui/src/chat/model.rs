@@ -240,6 +240,11 @@ impl Chat {
         &self.clock
     }
 
+    /// Shows times as "2:05 PM" instead of "14:05".
+    pub fn set_twelve_hour(&mut self, twelve_hour: bool) {
+        self.clock.set_twelve_hour(twelve_hour);
+    }
+
     pub fn connection(&self) -> &Connection {
         &self.connection
     }

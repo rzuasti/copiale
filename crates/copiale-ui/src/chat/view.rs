@@ -7,8 +7,10 @@ use std::ops::Range;
 use std::rc::Rc;
 use std::time::Duration;
 
-use copiale_core::config::Setting;
-use copiale_core::{Command, ConversationId, ConversationSummary, Event, MessageId, MessageStatus};
+use copiale_core::config::{self, Setting, TimestampVisibility};
+use copiale_core::{
+    Account, Command, ConversationId, ConversationSummary, Event, MessageId, MessageStatus, Peer,
+};
 use gpui_kit::base::{Easing, Presence, PresencePhase, Transition};
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::kbd::Kbd;
@@ -21,24 +23,26 @@ use gpui_kit::{
     Action, AnyElement, App, AppContext as _, AsKeystroke as _, Context, Entity, FocusHandle,
     Focusable as _, FollowMode, HighlightStyle, Hsla, InteractiveElement as _, IntoElement,
     KeyBinding, KeyContext, ListAlignment, ListState, MouseButton, MouseMoveEvent,
-    ParentElement as _, Pixels, Rems, Render, SharedString, StatefulInteractiveElement as _,
-    Styled as _, StyledText, Subscription, Task, TestSupportExt as _, TextRun, Window, WindowId,
-    actions, canvas, div, font, list, point, px, relative, rems,
+    ParentElement as _, Pixels, Rems, Render, ScrollHandle, SharedString,
+    StatefulInteractiveElement as _, Styled as _, StyledText, Subscription, Task,
+    TestSupportExt as _, TextRun, Window, WindowId, actions, canvas, div, font, list, point, px,
+    relative, rems,
 };
 
-use super::layout::Layout;
+use super::layout::{Layout, Spacing};
 use super::model::{
     Chat, Compose, Connection, Effects, LogChange, Overlay, Row, member_list, title,
 };
 use super::notices::Notices;
 use super::palette::PaletteAction;
+use super::settings_panel::{Activation, FIELDS, Field, Section, SettingsPanel, Value};
 use super::text::message_markdown;
 use super::time::Clock;
 use crate::drawer::drawer;
 use crate::kinetic::{self, Kinetic, kinetic};
 use crate::notifier::Notifier;
 use crate::settings::{self, Settings};
-use crate::theme::ActivePalette as _;
+use crate::theme::{ActivePalette as _, Fonts, InstalledFonts};
 use crate::{CoreSink, Quit, main_window, tray};
 
 /// Load the previous page when the top visible row is this close to the
@@ -82,7 +86,10 @@ actions!(
         PickNext,
         TogglePalette,
         OpenSettings,
-        CloseOverlay,
+        SettingPrevious,
+        SettingNext,
+        SettingDecrease,
+        SettingIncrease,
         PreviousChat,
         NextChat,
         SearchPrevious,
@@ -100,8 +107,8 @@ const CONFIRMING: &str = "Confirming";
 const PICKING: &str = "Picking";
 /// Key context of the search box.
 const SEARCHING: &str = "Searching";
-/// Key context of overlays without an input.
-const OVERLAY: &str = "Overlay";
+/// Key context of the settings list.
+const SETTINGS: &str = "Settings";
 
 /// Registers the chat key bindings. Composer bindings act on the input
 /// itself, ahead of its own, and pass keys on when they don't apply.
@@ -116,11 +123,14 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("secondary-,", OpenSettings, Some(CONTEXT)),
         KeyBinding::new("alt-up", PreviousChat, Some(CONTEXT)),
         KeyBinding::new("alt-down", NextChat, Some(CONTEXT)),
-        KeyBinding::new("escape", CloseOverlay, Some(OVERLAY)),
         // After everything else Esc does.
         KeyBinding::new("escape", HideWindow, Some(CONTEXT)),
         KeyBinding::new("up", PickPrevious, Some("Picking > Input")),
         KeyBinding::new("down", PickNext, Some("Picking > Input")),
+        KeyBinding::new("up", SettingPrevious, Some("Settings > Input")),
+        KeyBinding::new("down", SettingNext, Some("Settings > Input")),
+        KeyBinding::new("left", SettingDecrease, Some("Settings > Input")),
+        KeyBinding::new("right", SettingIncrease, Some("Settings > Input")),
         KeyBinding::new("up", SearchPrevious, Some("Searching > Input")),
         KeyBinding::new("down", SearchNext, Some("Searching > Input")),
         KeyBinding::new("up", EditLast, composing),
@@ -162,8 +172,10 @@ pub struct ChatView {
     /// The pointer reached the sidebar's top and hasn't left the sidebar.
     search_hovered: bool,
     sidebar_top: Rc<Cell<Pixels>>,
-    /// Holds focus while an overlay without an input is open.
-    overlay_focus: FocusHandle,
+    settings_panel: SettingsPanel,
+    settings_scroll: ScrollHandle,
+    /// Device name and privacy settings, once the core reports them.
+    account: Option<Account>,
     layout: Layout,
     /// A frame has been drawn, so layout changes animate.
     drawn: bool,
@@ -194,6 +206,10 @@ struct Inputs {
     new_chat: Entity<InputState>,
     /// The palette's query.
     palette: Entity<InputState>,
+    /// The settings list's filter.
+    settings: Entity<InputState>,
+    /// The font picker's query.
+    font: Entity<InputState>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -201,16 +217,23 @@ impl ChatView {
     /// Asks the core for the chat list; shown once attached to a window.
     pub fn new(core: Rc<dyn CoreSink>, notifier: Rc<dyn Notifier>, cx: &mut Context<Self>) -> Self {
         let subscriptions = vec![cx.observe_global::<Settings>(|view, cx| {
-            let content = Settings::get(cx).notifications.content;
-            for action in view.notices.set_content(content) {
+            let settings = Settings::get(cx);
+            for action in view.notices.set_content(settings.notifications.content) {
                 view.notifier.apply(action);
             }
+            view.chat
+                .set_twelve_hour(settings.layout.clock == config::Clock::H12);
+            // Fonts, spacing and timestamps change row heights.
+            view.log.remeasure();
+            cx.notify();
         })];
         core.send(Command::LoadConversations);
         let focus = cx.focus_handle();
+        let mut chat = Chat::new(Clock::system());
+        chat.set_twelve_hour(Settings::get(cx).layout.clock == config::Clock::H12);
         Self {
             core,
-            chat: Chat::new(Clock::system()),
+            chat,
             notices: Notices::new(Settings::get(cx).notifications.content),
             notifier,
             log: ListState::new(0, ListAlignment::Top, px(1000.)),
@@ -223,7 +246,9 @@ impl ChatView {
             focus_pending: true,
             search_hovered: false,
             sidebar_top: Rc::default(),
-            overlay_focus: cx.focus_handle(),
+            settings_panel: SettingsPanel::default(),
+            settings_scroll: ScrollHandle::new(),
+            account: None,
             layout: Layout::default(),
             drawn: false,
             countdown: None,
@@ -274,7 +299,11 @@ impl ChatView {
         });
         let new_chat = cx.new(|cx| InputState::new(window, cx).placeholder("New chat with…"));
         let palette = cx.new(|cx| InputState::new(window, cx).placeholder("Chat or command…"));
+        let settings = cx.new(|cx| InputState::new(window, cx).placeholder("Filter settings…"));
+        let font = cx.new(|cx| InputState::new(window, cx).placeholder("Font…"));
         let subscriptions = vec![
+            cx.subscribe_in(&settings, window, Self::on_settings_event),
+            cx.subscribe_in(&font, window, Self::on_font_event),
             cx.subscribe_in(&search, window, Self::on_search_event),
             cx.subscribe_in(&new_chat, window, Self::on_picker_event),
             cx.subscribe_in(&palette, window, Self::on_picker_event),
@@ -295,6 +324,8 @@ impl ChatView {
             composer,
             new_chat,
             palette,
+            settings,
+            font,
             _subscriptions: subscriptions,
         });
         self.active = window.is_window_active();
@@ -313,6 +344,7 @@ impl ChatView {
         }
         self.active = false;
         self.chat.set_search("");
+        self.close_font_picker(false, cx);
         self.chat.close_overlay();
         self.search_hovered = false;
         self.hovered = None;
@@ -380,6 +412,9 @@ impl ChatView {
 
     /// Applies a core event, shown or not.
     pub fn on_event(&mut self, event: &Event, cx: &mut Context<Self>) {
+        if let Event::Account(account) = event {
+            self.account = Some(account.clone());
+        }
         let effects = self.chat.apply(event, self.active);
         self.run(effects, cx);
         if let Some(id) = self.chat.take_requested_open() {
@@ -698,8 +733,153 @@ impl ChatView {
 
     fn open_settings(&mut self, _: &OpenSettings, window: &mut Window, cx: &mut Context<Self>) {
         self.chat.open_overlay(Overlay::Settings);
-        window.focus(&self.overlay_focus, cx);
+        self.close_font_picker(false, cx);
+        self.settings_panel.reset();
+        self.settings_scroll.scroll_to_item(0);
+        Self::ready_query(&self.inputs().settings, window, cx);
         cx.notify();
+    }
+
+    pub fn settings_panel(&self) -> &SettingsPanel {
+        &self.settings_panel
+    }
+
+    pub fn account(&self) -> Option<&Account> {
+        self.account.as_ref()
+    }
+
+    fn on_settings_event(
+        &mut self,
+        input: &Entity<InputState>,
+        event: &InputEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            InputEvent::Change => {
+                self.settings_panel.set_query(&input.read(cx).value());
+                self.reveal_setting();
+                cx.notify();
+            }
+            InputEvent::PressEnter { .. } => {
+                if let Some(field) = self.settings_panel.selected() {
+                    self.activate_setting(field, window, cx);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// `Enter` or a click on a row's value.
+    fn activate_setting(&mut self, field: Field, window: &mut Window, cx: &mut Context<Self>) {
+        match field.activate(&Settings::get(cx)) {
+            Activation::Change(setting) => settings::change(setting, cx),
+            Activation::PickFont(role) => {
+                self.settings_panel.pick_font(role, &Settings::get(cx));
+                Self::ready_query(&self.inputs().font, window, cx);
+            }
+            Activation::Nothing => {}
+        }
+        cx.notify();
+    }
+
+    fn step_setting(&mut self, step: isize, cx: &mut Context<Self>) {
+        self.settings_panel.step(step);
+        self.reveal_setting();
+        cx.notify();
+    }
+
+    fn change_setting(&mut self, field: Field, step: i32, cx: &mut Context<Self>) {
+        if let Some(setting) = field.step(&Settings::get(cx), step) {
+            settings::change(setting, cx);
+        }
+        cx.notify();
+    }
+
+    fn change_selected(&mut self, step: i32, cx: &mut Context<Self>) {
+        if let Some(field) = self.settings_panel.selected() {
+            self.change_setting(field, step, cx);
+        }
+    }
+
+    /// Scrolls the highlighted row into view.
+    fn reveal_setting(&self) {
+        let fields = self.settings_panel.fields();
+        if let Some(ix) = self
+            .settings_panel
+            .selected()
+            .and_then(|field| settings_item(&fields, field))
+        {
+            self.settings_scroll.scroll_to_item(ix);
+        }
+    }
+
+    fn on_font_event(
+        &mut self,
+        input: &Entity<InputState>,
+        event: &InputEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(picker) = self.settings_panel.font_picker_mut() else {
+            return;
+        };
+        match event {
+            InputEvent::Change => {
+                picker.set_query(&input.read(cx).value());
+                cx.notify();
+            }
+            InputEvent::PressEnter { .. } => self.choose_font(None, window, cx),
+            _ => {}
+        }
+    }
+
+    /// Moves the font picker's highlight and previews that font.
+    fn step_font(&mut self, step: isize, cx: &mut Context<Self>) {
+        let installed = InstalledFonts::get(cx);
+        let Some(picker) = self.settings_panel.font_picker_mut() else {
+            return;
+        };
+        let entries = picker.entries(&installed);
+        picker.step(step, entries.len());
+        if let Some(setting) = picker.setting(&entries, picker.selected()) {
+            settings::preview(&setting, cx);
+        }
+        cx.notify();
+    }
+
+    /// Saves font entry `ix`, or the highlighted one, and returns to the
+    /// list.
+    fn choose_font(&mut self, ix: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
+        let installed = InstalledFonts::get(cx);
+        let Some(picker) = self.settings_panel.font_picker_mut() else {
+            return;
+        };
+        let entries = picker.entries(&installed);
+        let setting = picker.setting(&entries, ix.unwrap_or(picker.selected()));
+        self.settings_panel.close_font_picker(true);
+        if let Some(setting) = setting {
+            settings::change(setting, cx);
+        }
+        Self::focus_input(&self.inputs().settings, window, cx);
+        cx.notify();
+    }
+
+    /// Closes the font picker, undoing its preview unless `keep`.
+    fn close_font_picker(&mut self, keep: bool, cx: &mut Context<Self>) {
+        if let Some(setting) = self.settings_panel.close_font_picker(keep) {
+            settings::preview(&setting, cx);
+        }
+    }
+
+    fn cancel_font(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_font_picker(false, cx);
+        Self::focus_input(&self.inputs().settings, window, cx);
+        cx.notify();
+    }
+
+    fn focus_input(input: &Entity<InputState>, window: &mut Window, cx: &mut Context<Self>) {
+        input.update(cx, |input, cx| input.focus(window, cx));
     }
 
     fn ready_query(input: &Entity<InputState>, window: &mut Window, cx: &mut Context<Self>) {
@@ -777,6 +957,7 @@ impl ChatView {
 
     /// Closes any overlay and returns to the composer.
     fn close_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_font_picker(false, cx);
         self.chat.close_overlay();
         self.restore_focus(window, cx);
         cx.notify();
@@ -809,16 +990,21 @@ impl ChatView {
         let (id, card) = match self.chat.overlay()? {
             Overlay::NewChat => ("new-chat", self.render_new_chat(cx)),
             Overlay::Palette => ("palette", self.render_palette(window, cx)),
-            Overlay::Settings => ("settings", self.render_settings(cx)),
+            Overlay::Settings => ("settings", self.render_settings(window, cx)),
+        };
+        let width = match self.chat.overlay() {
+            Some(Overlay::Settings) => px(560.),
+            _ => px(420.),
         };
         let palette = cx.palette();
         let card = card
             .id(id)
             // Clicks inside don't reach the backdrop.
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .w(px(420.))
+            .w(width)
             .max_w(relative(0.9))
-            .bg(palette.background)
+            // Opaque, unlike the window background.
+            .bg(cx.theme().popover)
             .border_1()
             .border_color(palette.border)
             .rounded(px(6.))
@@ -956,47 +1142,299 @@ impl ChatView {
         self.picker(&self.inputs().palette, rows, "No matches", cx)
     }
 
-    /// Where settings live until the settings screen arrives.
-    fn render_settings(&self, cx: &mut Context<Self>) -> gpui_kit::Div {
-        let palette = cx.palette();
+    /// Every setting by section, filtered by the query; or the font picker.
+    fn render_settings(&self, window: &Window, cx: &mut Context<Self>) -> gpui_kit::Div {
+        if self.settings_panel.font_picker().is_some() {
+            return self.render_font_picker(cx);
+        }
+        let config = Settings::get(cx);
+        let mono = cx.theme().mono_font_family.clone();
+        let muted = cx.palette().text_muted;
+        let border = cx.palette().border;
+        let fields = self.settings_panel.fields();
+        let selected = self.settings_panel.selected();
+        let mut items = Vec::new();
+        let mut section = None;
+        for field in &fields {
+            if section != Some(field.section()) {
+                section = Some(field.section());
+                items.push(section_header(field.section(), muted, mono.clone()));
+            }
+            items.push(self.render_setting(*field, &config, selected == Some(*field), cx));
+        }
+        let empty = fields.is_empty().then(|| {
+            div()
+                .px_3()
+                .py_2()
+                .text_sm()
+                .text_color(muted)
+                .child("No matches")
+        });
         let path = Settings::path(cx).map_or_else(
-            || "No config directory: using defaults".to_owned(),
+            || "No config directory: not saved".to_owned(),
             |path| path.display().to_string(),
         );
+        let max_height = (window.viewport_size().height - px(220.)).max(px(160.));
         v_flex()
-            .key_context(OVERLAY)
-            .track_focus(&self.overlay_focus)
-            .on_action(
-                cx.listener(|view, _: &CloseOverlay, window, cx| view.close_overlay(window, cx)),
-            )
-            .p_4()
-            .gap_3()
-            .child(div().text_lg().child("Settings"))
-            .child(div().text_sm().text_color(palette.text_muted).child(
-                "A settings screen is coming. Until then, edit config.toml; changes \
-                         apply as you save.",
-            ))
+            .key_context(SETTINGS)
+            .on_action(cx.listener(|view, _: &SettingPrevious, _, cx| view.step_setting(-1, cx)))
+            .on_action(cx.listener(|view, _: &SettingNext, _, cx| view.step_setting(1, cx)))
+            .on_action(cx.listener(|view, _: &SettingDecrease, _, cx| view.change_selected(-1, cx)))
+            .on_action(cx.listener(|view, _: &SettingIncrease, _, cx| view.change_selected(1, cx)))
+            .on_action(cx.listener(|view, _: &Escape, window, cx| view.close_overlay(window, cx)))
             .child(
                 div()
-                    .id("config-path")
-                    .font_family(cx.theme().mono_font_family.clone())
-                    .text_xs()
-                    .child(path)
+                    .p_2()
+                    .border_b_1()
+                    .border_color(border)
+                    .child(Input::new(&self.inputs().settings).small()),
+            )
+            .child(
+                div()
+                    .id("settings-list")
+                    .max_h(max_height)
+                    .overflow_y_scroll()
+                    .track_scroll(&self.settings_scroll)
+                    .py_1()
+                    .children(items)
+                    .children(empty)
                     .test_support(),
             )
             .child(
-                h_flex().justify_end().child(
-                    div()
-                        .id("close-settings")
-                        .cursor_pointer()
-                        .font_family(cx.theme().mono_font_family.clone())
-                        .text_xs()
-                        .text_color(palette.action)
-                        .child("esc close")
-                        .on_click(cx.listener(|view, _, window, cx| view.close_overlay(window, cx)))
-                        .test_support(),
+                h_flex()
+                    .px_3()
+                    .py_2()
+                    .gap_3()
+                    .border_t_1()
+                    .border_color(border)
+                    .font_family(mono)
+                    .text_xs()
+                    .text_color(muted)
+                    .child(
+                        div()
+                            .id("config-path")
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(path)
+                            .test_support(),
+                    )
+                    .child("↑↓ ←→ ↵")
+                    .child(
+                        div()
+                            .id("close-settings")
+                            .cursor_pointer()
+                            .text_color(cx.palette().action)
+                            .child("esc close")
+                            .on_click(
+                                cx.listener(|view, _, window, cx| view.close_overlay(window, cx)),
+                            )
+                            .test_support(),
+                    ),
+            )
+    }
+
+    /// A row: marker, label and hint, then the value, which clicks change.
+    fn render_setting(
+        &self,
+        field: Field,
+        config: &config::Config,
+        selected: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let n = FIELDS.iter().position(|f| *f == field).unwrap_or(0) as u64;
+        let palette = cx.palette();
+        let (accent, muted) = (palette.accent, palette.text_muted);
+        let mono = cx.theme().mono_font_family.clone();
+        let read_only = field.read_only();
+        let value =
+            match field.value(config, self.account.as_ref()) {
+                Value::Choice { options, selected } => {
+                    let mut parts = Vec::new();
+                    for (ix, option) in options.into_iter().enumerate() {
+                        if ix > 0 {
+                            parts.push(div().child("│").into_any_element());
+                        }
+                        let current = ix == selected;
+                        parts.push(
+                            div()
+                                .id(("setting-option", n * 16 + ix as u64))
+                                .when(current && !read_only, |el| el.text_color(accent))
+                                .when(!current && !read_only, |el| {
+                                    el.cursor_pointer()
+                                        .hover(|style| style.underline())
+                                        .on_click(cx.listener(move |_, _, _, cx| {
+                                            if let Some(setting) = field.choose(ix) {
+                                                settings::change(setting, cx);
+                                            }
+                                        }))
+                                })
+                                .child(option)
+                                .test_support()
+                                .into_any_element(),
+                        );
+                    }
+                    h_flex().gap_1().children(parts).into_any_element()
+                }
+                Value::Number(text) => {
+                    let arrow = |id: &'static str, glyph: &'static str, step: i32| {
+                        div()
+                            .id((id, n))
+                            .px_1()
+                            .cursor_pointer()
+                            .hover(|style| style.text_color(accent))
+                            .child(glyph)
+                            .on_click(cx.listener(move |view, _, _, cx| {
+                                view.change_setting(field, step, cx)
+                            }))
+                            .test_support()
+                    };
+                    h_flex()
+                        .child(arrow("setting-less", "‹", -1))
+                        .child(div().text_color(palette.text).child(text))
+                        .child(arrow("setting-more", "›", 1))
+                        .into_any_element()
+                }
+                Value::Toggle(on) => div()
+                    .id(("setting-toggle", n))
+                    .cursor_pointer()
+                    .when(on, |el| el.text_color(accent))
+                    .child(if on { "on" } else { "off" })
+                    .on_click(cx.listener(move |view, _, window, cx| {
+                        view.activate_setting(field, window, cx)
+                    }))
+                    .test_support()
+                    .into_any_element(),
+                Value::Font(font) => div()
+                    .id(("setting-font", n))
+                    .cursor_pointer()
+                    .max_w(px(200.))
+                    .truncate()
+                    .when(font.is_some(), |el| el.text_color(palette.text))
+                    .child(match (font, selected) {
+                        (Some(font), true) => format!("{font} ↵"),
+                        (Some(font), false) => font,
+                        (None, true) => "default ↵".into(),
+                        (None, false) => "default".into(),
+                    })
+                    .on_click(cx.listener(move |view, _, window, cx| {
+                        view.activate_setting(field, window, cx)
+                    }))
+                    .test_support()
+                    .into_any_element(),
+                Value::Info(text) => div()
+                    .max_w(px(220.))
+                    .truncate()
+                    .child(text)
+                    .into_any_element(),
+            };
+        h_flex()
+            .id(("setting", n))
+            .px_3()
+            .py(px(3.))
+            .gap_2()
+            .items_start()
+            .when(selected, |row| row.bg(palette.surface))
+            .on_click(cx.listener(move |view, _, _, cx| {
+                view.settings_panel.select(field);
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .flex_none()
+                    .w(rems(0.75))
+                    .font_family(mono.clone())
+                    .text_color(accent)
+                    .child(if selected { "▸" } else { "" }),
+            )
+            .child(
+                v_flex().flex_1().min_w_0().child(field.label()).children(
+                    field
+                        .hint()
+                        .map(|hint| div().text_xs().text_color(muted).child(hint)),
                 ),
             )
+            .child(
+                div()
+                    .flex_none()
+                    .font_family(mono)
+                    .text_sm()
+                    .text_color(muted)
+                    .child(value),
+            )
+            .test_support()
+            .into_any_element()
+    }
+
+    /// Fonts to pick from, previewed as the highlight moves.
+    fn render_font_picker(&self, cx: &mut Context<Self>) -> gpui_kit::Div {
+        let installed = InstalledFonts::get(cx);
+        let Some(picker) = self.settings_panel.font_picker() else {
+            return div();
+        };
+        let palette = cx.palette();
+        let (muted, border) = (palette.text_muted, palette.border);
+        let mono = cx.theme().mono_font_family.clone();
+        let rows: Vec<_> = picker
+            .entries(&installed)
+            .into_iter()
+            .enumerate()
+            .map(|(ix, entry)| {
+                let current = (entry.font == picker.original).then(|| "current".into());
+                picker_row(
+                    ("font", ix as u64),
+                    picker.selected() == ix,
+                    None,
+                    StyledText::new(entry.label)
+                        .with_highlights(match_highlights(entry.highlights, cx)),
+                    current,
+                    muted,
+                    mono.clone(),
+                )
+                .on_click(
+                    cx.listener(move |view, _, window, cx| view.choose_font(Some(ix), window, cx)),
+                )
+                .into_any_element()
+            })
+            .collect();
+        let empty = rows.is_empty().then(|| {
+            div()
+                .px_3()
+                .py_2()
+                .text_sm()
+                .text_color(muted)
+                .child("No matches")
+        });
+        let label = match picker.role {
+            super::FontRole::Ui => Field::UiFont,
+            super::FontRole::Mono => Field::MonoFont,
+            super::FontRole::Body => Field::BodyFont,
+        }
+        .label();
+        v_flex()
+            .key_context(PICKING)
+            .on_action(cx.listener(|view, _: &PickPrevious, _, cx| view.step_font(-1, cx)))
+            .on_action(cx.listener(|view, _: &PickNext, _, cx| view.step_font(1, cx)))
+            .on_action(cx.listener(|view, _: &Escape, window, cx| view.cancel_font(window, cx)))
+            .child(
+                h_flex()
+                    .px_3()
+                    .pt_2()
+                    .gap_3()
+                    .font_family(mono)
+                    .text_xs()
+                    .text_color(muted)
+                    .child(div().flex_1().child(label))
+                    .child("↑↓ preview · ↵ pick · esc back"),
+            )
+            .child(
+                div()
+                    .p_2()
+                    .border_b_1()
+                    .border_color(border)
+                    .child(Input::new(&self.inputs().font).small()),
+            )
+            .child(v_flex().p_1().children(rows).children(empty))
     }
 
     /// Focuses search; the palette stands in while the chat list is hidden.
@@ -1172,8 +1610,18 @@ impl ChatView {
                 .map(|at| self.chat.clock().age(at))
                 .unwrap_or_default()
         };
+        let layout = Settings::get(cx).layout;
+        let avatar = layout.avatars.then(|| {
+            let palette = cx.palette();
+            let color = match summary.peer {
+                Peer::Contact(peer) => palette.nick(peer),
+                Peer::Group(group) => palette.nick_for(group.as_bytes()),
+            };
+            avatar(&title(summary), color, px(20.), cx)
+        });
         ListItem::new(("conversation", id.get() as u64))
             .selected(selected)
+            .py(Spacing::for_density(layout.density).chat)
             .on_click(cx.listener(move |view, _, window, cx| view.open(id, window, cx)))
             .child(
                 h_flex()
@@ -1186,6 +1634,7 @@ impl ChatView {
                             .text_color(cx.palette().accent)
                             .child(if unread { "●" } else { "" }),
                     )
+                    .children(avatar)
                     .child(
                         div()
                             .flex_1()
@@ -1316,6 +1765,10 @@ impl ChatView {
                     .relative()
                     .flex_1()
                     .min_h_0()
+                    .when_some(cx.try_global::<Fonts>().cloned(), |log, fonts| {
+                        log.font_family(fonts.body)
+                            .line_height(relative(fonts.line_height))
+                    })
                     .child(kinetic(
                         "kinetic",
                         &self.kinetic,
@@ -1629,7 +2082,14 @@ impl ChatView {
     fn render_row(&self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if let Some(row) = self.chat.row(ix) {
             let hovered = self.hovered == Some(row.message.id);
-            return render_log_row(row, hovered, window, cx);
+            let layout = Settings::get(cx).layout;
+            let style = LogStyle {
+                spacing: Spacing::for_density(layout.density),
+                timestamps: layout.timestamps,
+                avatars: layout.avatars,
+                time: self.chat.clock().time(row.message.sent_at),
+            };
+            return render_log_row(row, hovered, &style, window, cx);
         }
         match self.chat.typing_label() {
             Some(label) if self.typing_row => div()
@@ -1648,11 +2108,21 @@ impl ChatView {
     }
 }
 
+/// How log rows look, from the settings.
+struct LogStyle {
+    spacing: Spacing,
+    timestamps: TimestampVisibility,
+    avatars: bool,
+    /// The message's own time, for showing on hover.
+    time: String,
+}
+
 /// Log style: `sender @ time > text`; follow-ups in a group indent to the
 /// first message's text.
 fn render_log_row(
     row: Row<'_>,
     hovered: bool,
+    style: &LogStyle,
     window: &mut Window,
     cx: &mut Context<ChatView>,
 ) -> AnyElement {
@@ -1672,7 +2142,11 @@ fn render_log_row(
     let error: Option<SharedString> = row.error.map(|error| error.to_string().into());
 
     let sender = truncate(&row.prefix.sender, MAX_SENDER_CHARS);
-    let prefix: SharedString = format!("{sender} @ {} >", row.prefix.time).into();
+    let prefix: SharedString = match style.timestamps {
+        TimestampVisibility::Always => format!("{sender} @ {} >", row.prefix.time),
+        TimestampVisibility::Hover | TimestampVisibility::Never => format!("{sender} >"),
+    }
+    .into();
     let font_size = PREFIX_SIZE.to_pixels(window.rem_size());
     let run = TextRun {
         len: prefix.len(),
@@ -1695,6 +2169,8 @@ fn render_log_row(
         div()
             .flex_none()
             .w(width)
+            // The measured width may round below the drawn one.
+            .whitespace_nowrap()
             .font_family(mono.clone())
             .text_size(PREFIX_SIZE)
             .line_height(window.line_height())
@@ -1708,6 +2184,19 @@ fn render_log_row(
             )]))
     });
     let indent = (!row.leads).then(|| div().flex_none().w(width));
+    let avatar_size = window.line_height();
+    let avatar = style.avatars.then(|| match row.prefix.peer {
+        Some(_) if row.leads => avatar(&row.prefix.sender, sender_color, avatar_size, cx),
+        _ => div().flex_none().w(avatar_size),
+    });
+    let shown = hovered || row.selected || row.confirming_delete;
+    let hover_time = (style.timestamps == TimestampVisibility::Hover && shown).then(|| {
+        div()
+            .font_family(mono.clone())
+            .text_xs()
+            .text_color(muted)
+            .child(style.time.clone())
+    });
 
     let day = row.day.clone().map(|day| {
         h_flex()
@@ -1804,10 +2293,13 @@ fn render_log_row(
                 .px_4()
                 .items_start()
                 .gap_2()
-                .when(row.leads, |this| this.pt_1())
-                .when(hovered || row.selected || row.confirming_delete, |this| {
-                    this.bg(palette.surface)
+                .pt(if row.leads {
+                    style.spacing.group
+                } else {
+                    style.spacing.message
                 })
+                .when(shown, |this| this.bg(palette.surface))
+                .children(avatar)
                 .children(prefix)
                 .children(indent)
                 .child(
@@ -1825,6 +2317,7 @@ fn render_log_row(
                         }))
                         .children(actions),
                 )
+                .children(hover_time)
                 .children(message.edited.then(|| {
                     div()
                         .font_family(mono.clone())
@@ -2000,6 +2493,62 @@ fn key_hint(action: &dyn Action, window: &Window) -> Option<SharedString> {
     Some(Kbd::format(key.as_keystroke()).into())
 }
 
+/// A round badge with a name's initials.
+fn avatar(name: &str, color: Hsla, size: Pixels, cx: &App) -> gpui_kit::Div {
+    div()
+        .flex_none()
+        .size(size)
+        .rounded_full()
+        .bg(color)
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(size * 0.45)
+        .font_weight(gpui_kit::FontWeight::BOLD)
+        .text_color(cx.palette().accent_text)
+        .child(initials(name))
+}
+
+/// The first letter or digit of up to two words, upper case.
+fn initials(name: &str) -> String {
+    name.split_whitespace()
+        .filter_map(|word| word.chars().find(|c| c.is_alphanumeric()))
+        .take(2)
+        .flat_map(char::to_uppercase)
+        .collect()
+}
+
+/// A muted section title in the settings list.
+fn section_header(section: Section, muted: Hsla, mono: SharedString) -> AnyElement {
+    div()
+        .px_3()
+        .pt_2()
+        .pb_1()
+        .font_family(mono)
+        .text_xs()
+        .text_color(muted)
+        .child(section.label().to_uppercase())
+        .into_any_element()
+}
+
+/// Where `field` is among the settings list's children, counting section
+/// headers.
+fn settings_item(fields: &[Field], field: Field) -> Option<usize> {
+    let mut ix = 0;
+    let mut section = None;
+    for listed in fields {
+        if section != Some(listed.section()) {
+            section = Some(listed.section());
+            ix += 1;
+        }
+        if *listed == field {
+            return Some(ix);
+        }
+        ix += 1;
+    }
+    None
+}
+
 fn layout_for(window: &Window) -> Layout {
     Layout::for_width(f32::from(window.viewport_size().width))
 }
@@ -2064,6 +2613,15 @@ impl Render for ChatView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn initials_take_the_first_letter_of_two_words() {
+        assert_eq!(initials("alice"), "A");
+        assert_eq!(initials("Bob van Dijk"), "BV");
+        assert_eq!(initials("+1 555 0100"), "15");
+        assert_eq!(initials("(Émile) Zola"), "ÉZ");
+        assert_eq!(initials(""), "");
+    }
 
     #[test]
     fn long_names_are_truncated() {

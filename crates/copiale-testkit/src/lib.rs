@@ -50,6 +50,9 @@ pub fn fake_backend() -> (FakeBackend, FakeNetwork) {
 /// The fake account's own ID.
 pub const OWN_ID: u128 = 0x5e1f;
 
+/// The device name of an account linked before the core started.
+pub const DEVICE_NAME: &str = "Copiale on testbox";
+
 /// Deterministic group master key for fixtures.
 pub fn group_key(n: u8) -> GroupMasterKey {
     GroupMasterKey::new([n; 32])
@@ -102,6 +105,8 @@ struct State {
     store: Option<SqliteStore>,
     /// Disappearing messages timers, by conversation.
     expire_timers: Vec<(Destination, u32)>,
+    /// Set when linked; [`DEVICE_NAME`] for an account linked before.
+    device_name: Option<String>,
 }
 
 type DeletedForMe = (Destination, Vec<(Option<ServiceId>, Timestamp)>);
@@ -228,6 +233,11 @@ impl SignalBackend for FakeBackend {
 
     fn own_id(&self) -> ServiceId {
         service_id(OWN_ID)
+    }
+
+    fn device_name(&self) -> Option<String> {
+        let name = self.state.lock().unwrap().device_name.clone();
+        Some(name.unwrap_or_else(|| DEVICE_NAME.into()))
     }
 
     async fn request_settings_sync(&mut self) -> Result<(), BackendError> {
@@ -673,6 +683,9 @@ impl Linker for FakeLinker {
         url: oneshot::Sender<String>,
     ) -> Result<FakeBackend, BackendError> {
         self.state.lock().unwrap().device_name = Some(device_name.into());
+        if let Some(backend) = &self.backend {
+            backend.state.lock().unwrap().device_name = Some(device_name.into());
+        }
         url.send(FAKE_LINK_URL.into()).ok();
         match self.approvals.recv().await {
             Some(Ok(())) => {

@@ -4,17 +4,22 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
-use copiale_core::config::{Config, NotificationContent, ThemeMode};
+use copiale_core::config::{Clock, Config, Density, NotificationContent, Setting, ThemeMode};
 use copiale_core::{
-    Attachment, BackendError, Command, Contact, Content, ConversationId, ConversationSummary,
-    Direction, Event, Expiry, GroupMasterKey, GroupUpdate, Member, Message, MessageBody, MessageId,
-    MessageStatus, Peer, Quote, ServiceId, StorageFailure, Timestamp, Unsupported,
+    Account, AccountSettings, Attachment, BackendError, Command, Contact, Content, ConversationId,
+    ConversationSummary, Direction, Event, Expiry, GroupMasterKey, GroupUpdate, Member, Message,
+    MessageBody, MessageId, MessageStatus, Peer, Quote, ServiceId, StorageFailure, Timestamp,
+    Unsupported,
 };
-use copiale_ui::chat::{COMPACT_BELOW, Compose, Layout, Notice, NoticeAction, NoticeKey, Overlay};
+use copiale_ui::chat::{
+    COMPACT_BELOW, ChatView, Compose, Field, Layout, Notice, NoticeAction, NoticeKey, Overlay,
+};
 use copiale_ui::notifier::Notifier;
 use copiale_ui::onboarding::Screen;
-use copiale_ui::settings::Settings;
-use copiale_ui::theme::{self, ActivePalette as _, Appearance, Scheme, Theme};
+use copiale_ui::settings::{self, Settings};
+use copiale_ui::theme::{
+    self, ActivePalette as _, Appearance, Fonts, InstalledFonts, Scheme, Theme,
+};
 use copiale_ui::tray::{self, Tray, TrayAction, TrayState};
 use copiale_ui::{
     APP_ID, CoreSink, Quit, Request, Shell, main_window, main_window_options, titlebar,
@@ -1515,6 +1520,174 @@ fn settings_open_from_the_keyboard_and_close(cx: &mut TestAppContext) {
     ui.press("ctrl-,", cx);
     ui.click("close-settings", cx);
     assert!(!ui.shows("settings", cx));
+}
+
+fn config(cx: &mut TestAppContext) -> Config {
+    cx.update(|cx| Settings::get(cx))
+}
+
+fn chat_view<T>(ui: &Ui, cx: &mut TestAppContext, f: impl FnOnce(&ChatView) -> T) -> T {
+    cx.update(|cx| f(ui.shell.read(cx).chat().unwrap().read(cx)))
+}
+
+/// Opens settings filtered to `query`.
+fn open_settings(ui: &Ui, query: &str, cx: &mut TestAppContext) {
+    ui.press("ctrl-,", cx);
+    ui.type_text(query, cx);
+    ui.frame(cx);
+}
+
+#[gpui_kit::test]
+fn settings_change_live_from_the_keyboard(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.open_alice(cx);
+    ui.press("ctrl-,", cx);
+    assert_eq!(
+        chat_view(&ui, cx, |view| view.settings_panel().selected()),
+        Some(Field::Theme)
+    );
+
+    ui.press("right", cx);
+    assert_eq!(config(cx).appearance.theme, ThemeMode::Dark);
+    cx.update(|cx| assert_theme(&Theme::dark(), cx));
+    ui.press("enter", cx);
+    assert_eq!(config(cx).appearance.theme, ThemeMode::Light);
+
+    ui.press("down", cx);
+    ui.press("down", cx);
+    assert_eq!(
+        chat_view(&ui, cx, |view| view.settings_panel().selected()),
+        Some(Field::MonoFont)
+    );
+    // Fonts pick from a list; arrows don't change them.
+    ui.press("right", cx);
+    assert_eq!(config(cx).typography.mono_font, None);
+}
+
+#[gpui_kit::test]
+fn settings_filter_then_step(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.open_alice(cx);
+    open_settings(&ui, "density", cx);
+    ui.press("right", cx);
+    assert_eq!(config(cx).layout.density, Density::Roomy);
+    ui.press("left", cx);
+    ui.press("left", cx);
+    ui.press("left", cx);
+    assert_eq!(config(cx).layout.density, Density::Compact);
+    ui.click(("setting-option", 6 * 16 + 1u64), cx);
+    assert_eq!(config(cx).layout.density, Density::Cozy);
+}
+
+#[gpui_kit::test]
+fn font_size_and_opacity_apply_to_the_theme(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.open_alice(cx);
+    open_settings(&ui, "size", cx);
+    ui.press("right", cx);
+    ui.press("right", cx);
+    assert_eq!(config(cx).typography.size, 16);
+    assert_eq!(cx.update(|cx| cx.theme().font_size), px(16.));
+    assert_eq!(cx.update(|cx| cx.global::<Fonts>().size), 16.);
+    // The families GPUI Kit resolved, not virtual names.
+    cx.update(|cx| {
+        let fonts = cx.global::<Fonts>();
+        assert_eq!(fonts.ui, cx.theme().font_family);
+        assert_eq!(fonts.body, fonts.ui);
+        assert_eq!(fonts.mono, cx.theme().mono_font_family);
+    });
+
+    ui.press("escape", cx);
+    open_settings(&ui, "opacity", cx);
+    ui.press("left", cx);
+    ui.press("left", cx);
+    assert_eq!(config(cx).window.opacity, 0.9);
+    let background = cx.update(|cx| cx.palette().background);
+    assert!((background.a - 0.9).abs() < 1e-6, "{background:?}");
+    // Popovers stay opaque.
+    assert_eq!(cx.update(|cx| cx.theme().popover.a), 1.);
+}
+
+#[gpui_kit::test]
+fn font_picker_previews_and_saves_or_restores(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.open_alice(cx);
+    let fonts: Rc<[String]> = ["Alpha Sans", "Beta Mono"].map(String::from).into();
+    cx.update(|cx| cx.set_global(InstalledFonts(fonts)));
+    let ui_font = |cx: &mut TestAppContext| config(cx).typography.ui_font;
+
+    open_settings(&ui, "ui font", cx);
+    ui.press("enter", cx);
+    assert!(ui.shows(("font", 0u64), cx));
+    ui.press("down", cx);
+    assert_eq!(ui_font(cx).as_deref(), Some("Alpha Sans"));
+    assert_eq!(
+        cx.update(|cx| cx.global::<Fonts>().ui.clone()),
+        "Alpha Sans"
+    );
+    ui.press("escape", cx);
+    assert_eq!(ui_font(cx), None);
+    assert!(ui.shows("settings-list", cx));
+
+    ui.press("enter", cx);
+    ui.type_text("beta", cx);
+    ui.frame(cx);
+    ui.press("enter", cx);
+    assert_eq!(ui_font(cx).as_deref(), Some("Beta Mono"));
+    assert!(ui.shows("settings-list", cx));
+
+    // Closing settings mid-preview restores the font.
+    ui.press("enter", cx);
+    ui.press("down", cx);
+    ui.press("down", cx);
+    ui.click("settings-backdrop", cx);
+    assert_eq!(overlay(&ui, cx), None);
+    assert_eq!(ui_font(cx).as_deref(), Some("Beta Mono"));
+}
+
+#[gpui_kit::test]
+fn settings_mirror_the_account(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    let account = Account {
+        device_name: Some("Copiale on laptop".into()),
+        settings: AccountSettings {
+            read_receipts: true,
+            typing_indicators: false,
+        },
+    };
+    ui.event(Event::Account(account.clone()), cx);
+    assert_eq!(
+        chat_view(&ui, cx, |view| view.account().cloned()),
+        Some(account)
+    );
+    open_settings(&ui, "account", cx);
+    assert!(ui.shows(("setting", 16u64), cx));
+    ui.press("right", cx);
+    ui.press("enter", cx);
+    assert_eq!(config(cx), Config::default());
+}
+
+#[gpui_kit::test]
+fn layout_settings_change_the_log(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.open_alice(cx);
+    ui.event(
+        Event::MessageAdded(message(11, Direction::Outgoing, Some(MessageStatus::Sent))),
+        cx,
+    );
+    ui.frame(cx);
+    let gap = |cx: &mut TestAppContext| ui.top(("row", 11u64), cx) - ui.top(("row", 10u64), cx);
+    let cozy = gap(cx);
+    cx.update(|cx| settings::change(Setting::Density(Density::Roomy), cx));
+    ui.frame(cx);
+    assert!(gap(cx) > cozy);
+
+    let time = |cx: &mut TestAppContext| {
+        chat_view(&ui, cx, |view| view.chat().row(0).unwrap().prefix.time)
+    };
+    assert!(!time(cx).ends_with('M'));
+    cx.update(|cx| settings::change(Setting::Clock(Clock::H12), cx));
+    assert!(time(cx).ends_with("AM") || time(cx).ends_with("PM"));
 }
 
 #[gpui_kit::test]

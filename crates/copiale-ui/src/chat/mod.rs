@@ -6,6 +6,7 @@ mod model;
 mod new_chat;
 mod notices;
 mod palette;
+mod settings_panel;
 mod text;
 mod time;
 mod view;
@@ -17,5 +18,9 @@ pub use model::{
 pub use new_chat::{Candidate, MAX_CANDIDATES};
 pub use notices::{Notice, NoticeAction, NoticeKey, Notices};
 pub use palette::{Entry, MAX_CHATS, PaletteAction};
+pub use settings_panel::{
+    Activation, FIELDS, Field, FontEntry, FontPicker, FontRole, MAX_FONTS, Section, SettingsPanel,
+    Value,
+};
 pub use time::Clock;
 pub use view::{ChatView, FocusSearch, NewChat, init};
