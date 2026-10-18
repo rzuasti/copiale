@@ -44,7 +44,7 @@ change above.
   and logs sizes only (no contact data) to help find the cause. It also
   strips the attachment padding to the declared size; each padding byte
   otherwise parsed as an empty contact.
-- **Upstream PR:** pending.
+- **Upstream PR:** [whisperfish/libsignal-service-rs#483](https://github.com/whisperfish/libsignal-service-rs/pull/483).
 - **Used via:** `[patch."https://github.com/whisperfish/libsignal-service-rs"]`
   in the root `Cargo.toml`.
 
