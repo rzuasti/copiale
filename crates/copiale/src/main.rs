@@ -2,6 +2,8 @@
 
 mod cli;
 mod instance;
+#[cfg(unix)]
+mod signals;
 
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -63,6 +65,16 @@ fn main() -> ExitCode {
     };
 
     let (requests, received) = unbounded();
+    #[cfg(unix)]
+    {
+        let requests = requests.clone();
+        let quit = move || {
+            requests.unbounded_send(Request::Quit).ok();
+        };
+        if let Err(error) = signals::quit_on_signals(quit) {
+            tracing::warn!(%error, "can't handle termination signals");
+        }
+    }
     if let Some(instance) = instance {
         instance.serve(move |request| {
             requests.unbounded_send(request).ok();

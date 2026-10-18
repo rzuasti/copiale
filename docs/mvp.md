@@ -146,7 +146,9 @@ Scope, UI design, architecture and work items for the first usable release.
 ### Quick mode and background
 
 - Closing the window keeps the app running and connected; quitting is
-  explicit (palette, `Ctrl/⌘+Q`, `copiale --quit`).
+  explicit (palette, `Ctrl/⌘+Q`, `copiale --quit`). On Unix, SIGINT,
+  SIGTERM and SIGHUP quit the same way; a second one ends the process at
+  once.
 - Hiding closes the window, as GPUI can't hide one; chats, drafts and
   onboarding carry over to the next. On Linux the app also goes headless
   while hidden, and reconnects with the requesting process's

@@ -24,8 +24,8 @@ use futures::StreamExt as _;
 use futures::channel::mpsc::UnboundedReceiver;
 use gpui_kit::component::TitleBar;
 use gpui_kit::{
-    App, AppContext as _, Bounds, KeyBinding, TitlebarOptions, WindowBounds, WindowDecorations,
-    WindowOptions, actions, px, size,
+    App, AppContext as _, Bounds, KeyBinding, QuitMode, TitlebarOptions, WindowBounds,
+    WindowDecorations, WindowOptions, actions, px, size,
 };
 use notifier::{DesktopNotifier, NoNotifier, Notifier};
 pub use qr::QrMatrix;
@@ -150,6 +150,8 @@ pub fn run(core: CoreHandle, events: Events, mut requests: UnboundedReceiver<Req
 /// the caller to handle.
 pub fn init(cx: &mut App) {
     gpui_kit::init(cx);
+    // Hiding closes the main window, which on Linux would quit.
+    cx.set_quit_mode(QuitMode::Explicit);
     cx.bind_keys([KeyBinding::new("secondary-q", Quit, None)]);
     chat::init(cx);
     theme::watch_settings(cx);

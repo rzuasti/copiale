@@ -39,6 +39,8 @@ rand = "0.9"
 # Only to read libsignal-service's handshake errors; same major as it uses.
 reqwest-websocket = { version = "0.6", default-features = false }
 serde = { version = "1", features = ["derive"] }
+# Same registry as async-process uses for SIGCHLD.
+signal-hook = { version = "0.3", default-features = false, features = ["iterator"] }
 serde_json = "1"
 sqlx = { version = "0.9", default-features = false, features = ["sqlite", "migrate", "macros", "runtime-tokio"] }
 tempfile = "3"
