@@ -12,7 +12,7 @@ mod file;
 mod parse;
 mod schema;
 
-pub use file::{ConfigFile, ConfigWatcher};
+pub use file::{ConfigEvent, ConfigFile, ConfigSync};
 pub use schema::{
     Appearance, Choice, Clock, Config, Density, Layout, MessageStyle, NotificationContent,
     Notifications, Setting, ThemeMode, TimestampVisibility, Typography, WindowConfig,

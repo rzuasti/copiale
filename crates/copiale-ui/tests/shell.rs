@@ -2,10 +2,10 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use copiale_core::config::{
-    Clock, Config, Density, MessageStyle, NotificationContent, Setting, ThemeMode,
+    Clock, Config, ConfigFile, Density, MessageStyle, NotificationContent, Setting, ThemeMode,
 };
 use copiale_core::{
     Account, AccountSettings, Attachment, BackendError, Command, Contact, Content, ConversationId,
@@ -1717,6 +1717,33 @@ fn layout_settings_change_the_log(cx: &mut TestAppContext) {
     assert!(!time(cx).ends_with('M'));
     cx.update(|cx| settings::change(Setting::Clock(Clock::H12), cx));
     assert!(time(cx).ends_with("AM") || time(cx).ends_with("PM"));
+}
+
+#[gpui_kit::test]
+fn quick_setting_changes_end_saved_and_applied(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let file = ConfigFile::new(dir.path().join("config.toml"));
+    let (tx, events) = std::sync::mpsc::channel();
+    cx.update(|cx| settings::load_with(file.clone(), move |event| tx.send(event).unwrap(), cx));
+
+    std::fs::write(file.path(), "[layout]\navatars = true\n").unwrap();
+    for size in 10..=30 {
+        cx.update(|cx| settings::change(Setting::FontSize(size), cx));
+    }
+
+    // Until past the watcher's debounce, reloads never undo a change.
+    let until = Instant::now() + Duration::from_secs(1);
+    while let Some(wait) = until.checked_duration_since(Instant::now()) {
+        let Ok(event) = events.recv_timeout(wait) else {
+            break;
+        };
+        cx.update(|cx| settings::apply(event, cx));
+        assert_eq!(config(cx).typography.size, 30);
+    }
+    assert!(config(cx).layout.avatars);
+    let saved = file.load().config;
+    assert_eq!(saved.typography.size, 30);
+    assert!(saved.layout.avatars);
 }
 
 #[gpui_kit::test]

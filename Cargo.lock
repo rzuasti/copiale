@@ -1366,6 +1366,7 @@ dependencies = [
  "notify-rust",
  "qrcode",
  "serde",
+ "tempfile",
  "toml 1.1.8+spec-1.1.0",
  "tracing",
  "tray-icon",

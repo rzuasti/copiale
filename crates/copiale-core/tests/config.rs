@@ -4,8 +4,8 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use copiale_core::config::{
-    Clock, Config, ConfigFile, Density, Loaded, MessageStyle, NotificationContent, Setting,
-    ThemeMode, TimestampVisibility,
+    Clock, Config, ConfigError, ConfigEvent, ConfigFile, ConfigSync, Density, Loaded, MessageStyle,
+    NotificationContent, Setting, ThemeMode, TimestampVisibility,
 };
 
 /// Generous: file watching on a loaded machine can be slow.
@@ -126,57 +126,146 @@ fn write_keeps_file_permissions() {
     assert_eq!(mode, 0o600);
 }
 
-#[test]
-fn watcher_reports_external_edits() {
-    let (_dir, file) = config_file();
+/// A watching [`ConfigSync`] that saw the file as it is now.
+fn sync(file: &ConfigFile) -> (ConfigSync, mpsc::Receiver<ConfigEvent>) {
     let (tx, rx) = mpsc::channel();
-    let _watcher = file.watch(move |loaded| tx.send(loaded).unwrap()).unwrap();
+    let mut sync = file
+        .sync(&file.load(), move |event| tx.send(event).unwrap())
+        .unwrap();
+    sync.watch().unwrap();
+    (sync, rx)
+}
+
+fn changed(rx: &mpsc::Receiver<ConfigEvent>) -> (Loaded, u64) {
+    match rx.recv_timeout(WAIT).expect("reload") {
+        ConfigEvent::Changed { loaded, saved } => (loaded, saved),
+        event => panic!("expected a reload, got {event:?}"),
+    }
+}
+
+fn saved(rx: &mpsc::Receiver<ConfigEvent>) -> (u64, Vec<ConfigError>) {
+    match rx.recv_timeout(WAIT).expect("save") {
+        ConfigEvent::Saved { through, errors } => (through, errors),
+        event => panic!("expected a save, got {event:?}"),
+    }
+}
+
+/// Longer than the watcher's debounce.
+const QUIET: Duration = Duration::from_millis(800);
+
+#[test]
+fn sync_reports_external_edits() {
+    let (_dir, file) = config_file();
+    let (_sync, rx) = sync(&file);
 
     std::fs::write(file.path(), "[appearance]\ntheme = \"light\"\n").unwrap();
 
-    let loaded = rx.recv_timeout(WAIT).expect("reload after edit");
+    let (loaded, saved) = changed(&rx);
     assert_eq!(loaded.config.appearance.theme, ThemeMode::Light);
+    assert_eq!(saved, 0);
 }
 
 #[test]
-fn watcher_reports_warnings_and_skips_unchanged_saves() {
+fn sync_reports_warnings_and_skips_unchanged_saves() {
     let (_dir, file) = config_file();
-    let (tx, rx) = mpsc::channel();
-    let _watcher = file.watch(move |loaded| tx.send(loaded).unwrap()).unwrap();
+    let (_sync, rx) = sync(&file);
 
     std::fs::write(file.path(), "[layout]\ndensity = \"tight\"\n").unwrap();
-    let loaded = rx.recv_timeout(WAIT).expect("reload after edit");
+    let (loaded, _) = changed(&rx);
     assert_eq!(loaded.config, Config::default());
     assert_eq!(loaded.warnings.len(), 1);
 
-    // Same settings and warnings: no callback.
+    // Same settings and warnings: no event.
     std::fs::write(file.path(), "# comment\n[layout]\ndensity = \"tight\"\n").unwrap();
-    assert!(rx.recv_timeout(Duration::from_millis(800)).is_err());
+    assert!(rx.recv_timeout(QUIET).is_err());
 }
 
 #[test]
-fn watcher_sees_settings_ui_writes() {
+fn sync_reports_edits_made_before_watching() {
     let (_dir, file) = config_file();
     let (tx, rx) = mpsc::channel();
-    let _watcher = file.watch(move |loaded| tx.send(loaded).unwrap()).unwrap();
+    let mut sync = file
+        .sync(&file.load(), move |event| tx.send(event).unwrap())
+        .unwrap();
+    file.write(&[Setting::Avatars(true)]).unwrap();
 
-    file.write(&[Setting::Density(Density::Compact)]).unwrap();
+    sync.watch().unwrap();
 
-    let loaded = rx.recv_timeout(WAIT).expect("reload after write");
-    assert_eq!(loaded.config.layout.density, Density::Compact);
+    assert!(changed(&rx).0.config.layout.avatars);
 }
 
 #[test]
-fn dropping_watcher_stops_it() {
+fn sync_merges_quick_writes_without_reloading_them() {
     let (_dir, file) = config_file();
-    let (tx, rx) = mpsc::channel();
-    let watcher = file.watch(move |loaded| tx.send(loaded).unwrap()).unwrap();
+    let (mut sync, rx) = sync(&file);
 
-    drop(watcher);
+    let mut last = 0;
+    for size in 10..=30 {
+        last = sync.write(vec![Setting::FontSize(size)]);
+    }
 
-    // The callback (and its sender) is dropped with the watcher thread.
+    loop {
+        let (through, errors) = saved(&rx);
+        assert!(errors.is_empty());
+        if through == last {
+            break;
+        }
+    }
+    assert_eq!(file.load().config.typography.size, 30);
+    // Its own writes: no reload.
+    assert!(rx.recv_timeout(QUIET).is_err());
+}
+
+#[test]
+fn sync_reports_external_edits_before_writing_over_them() {
+    let (_dir, file) = config_file();
+    let (mut sync, rx) = sync(&file);
+
+    std::fs::write(file.path(), "[layout]\navatars = true\n").unwrap();
+    let number = sync.write(vec![Setting::FontSize(20)]);
+
+    let (loaded, saved_through) = changed(&rx);
+    assert!(loaded.config.layout.avatars);
     assert_eq!(
+        loaded.config.typography.size,
+        Config::default().typography.size
+    );
+    assert_eq!(saved_through, 0);
+    let (through, errors) = saved(&rx);
+    assert_eq!(through, number);
+    assert!(errors.is_empty());
+    let config = file.load().config;
+    assert!(config.layout.avatars);
+    assert_eq!(config.typography.size, 20);
+    assert!(rx.recv_timeout(QUIET).is_err());
+}
+
+#[test]
+fn sync_skips_invalid_settings_only() {
+    let (_dir, file) = config_file();
+    let (mut sync, rx) = sync(&file);
+
+    let number = sync.write(vec![Setting::FontSize(0), Setting::Avatars(true)]);
+
+    let (through, errors) = saved(&rx);
+    assert_eq!(through, number);
+    assert!(matches!(errors[..], [ConfigError::Invalid { .. }]));
+    assert!(file.load().config.layout.avatars);
+}
+
+#[test]
+fn dropping_sync_finishes_writes_and_stops() {
+    let (_dir, file) = config_file();
+    let (mut sync, rx) = sync(&file);
+
+    sync.write(vec![Setting::Blur(true)]);
+    drop(sync);
+
+    assert_eq!(saved(&rx).0, 1);
+    assert!(file.load().config.window.blur);
+    // The callback (and its sender) is dropped with the thread.
+    assert!(matches!(
         rx.recv_timeout(WAIT),
         Err(mpsc::RecvTimeoutError::Disconnected)
-    );
+    ));
 }
