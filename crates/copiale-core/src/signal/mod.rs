@@ -6,7 +6,7 @@
 mod store;
 
 use futures::future::LocalBoxFuture;
-use futures::stream::LocalBoxStream;
+use futures::stream::{LocalBoxStream, Stream};
 use futures::{FutureExt as _, StreamExt as _};
 use presage::Manager;
 use presage::libsignal_service::configuration::SignalServers;
@@ -29,6 +29,7 @@ use presage::model::messages::Received;
 use presage::store::{ContentsStore as _, StateStore as _, Thread};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
+use tokio::time::{Duration, Instant};
 
 use crate::backend::{BackendError, Incoming, Linker, SignalBackend};
 use crate::model::{
@@ -86,7 +87,14 @@ impl Linker for PresageLinker {
 /// A linked account.
 pub struct PresageBackend {
     manager: Manager<AppStore, Registered>,
-    receiver: Option<JoinHandle<()>>,
+    receiver: Option<Receiver>,
+}
+
+/// The task receiving on the open connection.
+struct Receiver {
+    task: JoinHandle<()>,
+    /// Asks it to stop; see [`relay`].
+    stop: Option<oneshot::Sender<()>>,
 }
 
 impl PresageBackend {
@@ -101,7 +109,7 @@ impl PresageBackend {
 impl Drop for PresageBackend {
     fn drop(&mut self) {
         if let Some(receiver) = self.receiver.take() {
-            receiver.abort();
+            receiver.task.abort();
         }
     }
 }
@@ -114,8 +122,9 @@ impl SignalBackend for PresageBackend {
     ) -> LocalBoxFuture<'static, Result<LocalBoxStream<'static, Incoming>, BackendError>> {
         let mut manager = self.manager.clone();
         let (opened_tx, opened_rx) = oneshot::channel();
-        let (items_tx, items_rx) = mpsc::unbounded_channel();
-        let receiver = tokio::task::spawn_local(async move {
+        let (items_tx, items_rx) = mpsc::channel(RECEIVE_BUFFER);
+        let (stop, stop_rx) = oneshot::channel();
+        let task = tokio::task::spawn_local(async move {
             let stream = match manager.receive_messages().await {
                 Ok(stream) => {
                     opened_tx.send(Ok(())).ok();
@@ -126,17 +135,14 @@ impl SignalBackend for PresageBackend {
                     return;
                 }
             };
-            futures::pin_mut!(stream);
-            while let Some(received) = stream.next().await {
-                if let Some(item) = incoming(received)
-                    && items_tx.send(item).is_err()
-                {
-                    break;
-                }
-            }
+            relay(stream, items_tx, stop_rx).await;
         });
+        let receiver = Receiver {
+            task,
+            stop: Some(stop),
+        };
         if let Some(previous) = self.receiver.replace(receiver) {
-            previous.abort();
+            previous.task.abort();
         }
         async move {
             opened_rx
@@ -149,6 +155,16 @@ impl SignalBackend for PresageBackend {
             Ok(stream.boxed_local())
         }
         .boxed_local()
+    }
+
+    fn stop_receiving(&mut self) {
+        if let Some(stop) = self
+            .receiver
+            .as_mut()
+            .and_then(|receiver| receiver.stop.take())
+        {
+            stop.send(()).ok();
+        }
     }
 
     /// Sends on a clone of the manager; libsignal-service adds the sync
@@ -494,6 +510,71 @@ impl SignalBackend for PresageBackend {
             .map_err(presage_error)
         }
         .boxed_local()
+    }
+}
+
+/// Messages decrypted ahead of the core storing them: few, as stopping must
+/// wait for them.
+const RECEIVE_BUFFER: usize = 8;
+
+/// While stopping, a read pending this long is waiting for the server, not
+/// decrypting, so cancelling it loses nothing.
+const DRAIN_IDLE: Duration = Duration::from_secs(2);
+
+/// While stopping, no read starts after this long.
+const DRAIN_LIMIT: Duration = Duration::from_secs(5);
+
+/// While stopping, how long after the last read the websocket gets to send
+/// its queued acknowledgements; the server sends unacknowledged messages
+/// again, which then fail to decrypt.
+const ACK_FLUSH: Duration = Duration::from_millis(250);
+
+/// Passes on what `stream` receives until it ends or `stop` fires, then
+/// what was already on its way: presage acknowledges messages before
+/// decrypting them, and cancelling a decryption may lose the message.
+async fn relay(
+    stream: impl Stream<Item = Received>,
+    items: mpsc::Sender<Incoming>,
+    mut stop: oneshot::Receiver<()>,
+) {
+    let mut stream = Box::pin(stream);
+    let mut stop_by = None;
+    let mut last_read = None;
+    loop {
+        if stop_by.is_some_and(|at| Instant::now() >= at) {
+            break;
+        }
+        let started = Instant::now();
+        let mut next = stream.next();
+        // `None`: stopping, and only waiting for the server.
+        let received = match stop_by {
+            Some(_) => tokio::time::timeout_at(started + DRAIN_IDLE, &mut next)
+                .await
+                .ok(),
+            None => tokio::select! {
+                received = &mut next => Some(received),
+                _ = &mut stop => {
+                    stop_by = Some(Instant::now() + DRAIN_LIMIT);
+                    tokio::time::timeout_at(started + DRAIN_IDLE, &mut next).await.ok()
+                }
+            },
+        };
+        let Some(Some(received)) = received else {
+            break;
+        };
+        last_read = Some(Instant::now());
+        if let Some(item) = incoming(received)
+            && items.send(item).await.is_err()
+        {
+            break;
+        }
+    }
+    drop(stream);
+    // `items` stays open meanwhile, so the backend, and its websocket, live.
+    if stop_by.is_some()
+        && let Some(at) = last_read
+    {
+        tokio::time::sleep_until(at + ACK_FLUSH).await;
     }
 }
 
@@ -1993,6 +2074,89 @@ mod tests {
             !presage_error(Error::from(MessageSenderError::MaximumRetriesLimitExceeded))
                 .is_network()
         );
+    }
+
+    /// Relays `stream`, asking it to stop after `stop_after`; returns when
+    /// each item, and the end, came through.
+    async fn relayed(
+        stream: impl Stream<Item = Received>,
+        stop_after: Duration,
+    ) -> (Vec<Duration>, Duration) {
+        let start = Instant::now();
+        let (items_tx, mut items) = mpsc::channel(RECEIVE_BUFFER);
+        let (stop, stop_rx) = oneshot::channel();
+        let stopper = async {
+            tokio::time::sleep(stop_after).await;
+            stop.send(()).ok();
+        };
+        let collect = async {
+            let mut arrived = Vec::new();
+            while items.recv().await.is_some() {
+                arrived.push(start.elapsed());
+            }
+            (arrived, start.elapsed())
+        };
+        let ((), (), relayed) = tokio::join!(relay(stream, items_tx, stop_rx), stopper, collect);
+        relayed
+    }
+
+    /// `count` messages, one per `period`, on a connection that stays open.
+    fn arrivals(period: Duration, count: usize) -> impl Stream<Item = Received> {
+        futures::stream::unfold(0, move |n| async move {
+            if n == count {
+                std::future::pending::<()>().await;
+            }
+            tokio::time::sleep(period).await;
+            Some((Received::QueueEmpty, n + 1))
+        })
+    }
+
+    const SECOND: Duration = Duration::from_secs(1);
+
+    #[tokio::test(start_paused = true)]
+    async fn relays_until_the_connection_closes() {
+        let stream = futures::stream::iter([Received::QueueEmpty, Received::QueueEmpty]);
+
+        let (arrived, ended) = relayed(stream, 3600 * SECOND).await;
+
+        assert_eq!(arrived, [Duration::ZERO; 2]);
+        assert_eq!(ended, Duration::ZERO);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stopping_lets_messages_already_received_through() {
+        let received = futures::stream::iter([Received::QueueEmpty, Received::QueueEmpty]);
+        let stream = received.chain(futures::stream::pending());
+
+        let (arrived, ended) = relayed(stream, Duration::ZERO).await;
+
+        assert_eq!(arrived.len(), 2);
+        assert_eq!(ended, DRAIN_IDLE);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stopping_waits_for_a_message_being_decrypted() {
+        let (arrived, ended) = relayed(arrivals(SECOND, 1), Duration::ZERO).await;
+
+        assert_eq!(arrived, [SECOND]);
+        assert_eq!(ended, SECOND + DRAIN_IDLE);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stopping_an_idle_connection_ends_at_once() {
+        let (arrived, ended) = relayed(futures::stream::pending(), 10 * SECOND).await;
+
+        assert_eq!(arrived, []);
+        assert_eq!(ended, 10 * SECOND);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stopping_reads_for_a_limited_time_then_flushes_acknowledgements() {
+        let (arrived, ended) = relayed(arrivals(SECOND, usize::MAX), Duration::ZERO).await;
+
+        assert_eq!(arrived.len(), 5);
+        assert_eq!(arrived.last(), Some(&DRAIN_LIMIT));
+        assert_eq!(ended, DRAIN_LIMIT + ACK_FLUSH);
     }
 
     /// Linking generates Kyber prekeys deep in async frames; leave them

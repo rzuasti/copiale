@@ -37,4 +37,4 @@ log.workspace = true
 reqwest = { version = "0.13", default-features = false }
 tempfile.workspace = true
 tracing-log.workspace = true
-tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }
+tokio = { workspace = true, features = ["rt", "sync", "macros", "time", "test-util"] }

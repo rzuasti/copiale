@@ -85,6 +85,8 @@ struct Link {
 struct State {
     /// The open connection, if any.
     connection: Option<UnboundedSender<Incoming>>,
+    /// [`SignalBackend::stop_receiving`] leaves the connection open.
+    ignore_stops: bool,
     connections: usize,
     receive_failures: VecDeque<BackendError>,
     sent: Vec<SentText>,
@@ -163,6 +165,14 @@ impl SignalBackend for FakeBackend {
             Ok(stream.boxed_local())
         }
         .boxed_local()
+    }
+
+    /// Ends the connection after what was delivered on it.
+    fn stop_receiving(&mut self) {
+        let mut state = self.state.lock().unwrap();
+        if !state.ignore_stops {
+            state.connection = None;
+        }
     }
 
     /// Counts as started at once; completes when sends aren't paused and
@@ -358,6 +368,12 @@ impl FakeNetwork {
     /// Closes the open connection, as if the network dropped it.
     pub fn disconnect(&self) {
         self.state.lock().unwrap().connection = None;
+    }
+
+    /// Keeps connections open when the core asks to stop receiving, like a
+    /// backend that never finishes.
+    pub fn ignore_stops(&self) {
+        self.state.lock().unwrap().ignore_stops = true;
     }
 
     /// Makes the next connection attempt fail; queues up for repeated calls.

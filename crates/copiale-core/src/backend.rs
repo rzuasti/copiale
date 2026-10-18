@@ -116,6 +116,11 @@ pub trait SignalBackend {
         &mut self,
     ) -> LocalBoxFuture<'static, Result<LocalBoxStream<'static, Incoming>, BackendError>>;
 
+    /// Ends the stream from [`Self::receive`] once what was already received
+    /// has come through: the server may count it as delivered, so dropping
+    /// the stream instead would lose it.
+    fn stop_receiving(&mut self);
+
     /// Sends a message, or a change to one of ours, to one account or a
     /// group, with a copy to this account's other devices. Quotes of our
     /// messages have no author.

@@ -258,6 +258,9 @@ pub struct CoreOptions {
     /// How long an outgoing message may wait for a connection before it
     /// fails.
     pub send_timeout: Duration,
+    /// How long losing the connection, or stopping, waits for what was
+    /// already received to be stored; whatever is left after it is lost.
+    pub drain_timeout: Duration,
     /// Times disappearing messages.
     pub clock: Arc<dyn Clock>,
 }
@@ -271,6 +274,7 @@ impl Default for CoreOptions {
             probe_interval: Duration::from_secs(20),
             probe_timeout: Duration::from_secs(10),
             send_timeout: Duration::from_secs(600),
+            drain_timeout: Duration::from_secs(10),
             clock: Arc::new(SystemClock),
         }
     }

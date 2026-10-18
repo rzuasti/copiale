@@ -922,6 +922,96 @@ async fn reports_disconnect() {
     stop(running).await;
 }
 
+/// Enough that most are still waiting to be stored when the connection is
+/// dropped right after.
+const BACKLOG: u64 = 200;
+
+fn deliver_backlog(network: &FakeNetwork) {
+    for n in 0..BACKLOG {
+        network.deliver(incoming(1, 1_000 + n, "queued"));
+    }
+}
+
+#[tokio::test]
+async fn messages_received_before_losing_the_connection_are_stored() {
+    let (_dir, mut running) = ready().await;
+    deliver_backlog(&running.network);
+    // Connection checks fail from now on.
+    running.network.go_offline();
+
+    let mut added = 0;
+    loop {
+        match next_event(&mut running.events).await {
+            Event::MessageAdded(_) => added += 1,
+            Event::Disconnected { error, .. } => {
+                assert_eq!(
+                    error,
+                    Some(BackendError::network("no answer from the server"))
+                );
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(added, BACKLOG);
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn messages_received_before_quitting_are_stored() {
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = MemorySecretStore::default();
+    let mut running = start(dir.path(), &secrets, true);
+    expect_ready(&mut running.events).await;
+    expect(&mut running.events, Event::Connected).await;
+    deliver_backlog(&running.network);
+    stop(running).await;
+
+    let mut running = start(dir.path(), &secrets, true);
+    expect_ready(&mut running.events).await;
+    send(&running, Command::LoadConversations);
+    let conversation = loop {
+        if let Event::Conversations(conversations) = next_event(&mut running.events).await {
+            break conversations[0].id;
+        }
+    };
+    send(
+        &running,
+        Command::LoadMessages {
+            conversation,
+            before: None,
+            limit: BACKLOG as u32 + 1,
+        },
+    );
+    let messages = loop {
+        if let Event::Messages { messages, .. } = next_event(&mut running.events).await {
+            break messages;
+        }
+    };
+    assert_eq!(messages.len() as u64, BACKLOG);
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn quitting_waits_only_so_long_for_the_connection_to_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let options = CoreOptions {
+        drain_timeout: RETRY,
+        ..fast()
+    };
+    let mut running = start_with(
+        dir.path(),
+        &MemorySecretStore::default(),
+        true,
+        options,
+        FakeNetwork::ignore_stops,
+    );
+    expect_ready(&mut running.events).await;
+    expect(&mut running.events, Event::Connected).await;
+
+    stop(running).await;
+}
+
 #[tokio::test]
 async fn reconnect_backs_off_and_resets_once_synced() {
     let dir = tempfile::tempdir().unwrap();

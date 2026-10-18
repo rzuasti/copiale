@@ -310,6 +310,13 @@ impl Core {
         let mut outbox = Outbox::new(self.options.send_timeout);
         let mut probe = Probe::new(self.options.probe_interval, self.options.probe_timeout);
         let mut groups = Groups::new();
+        // Set while the stream ends after the connection was lost, with the
+        // reason; it reconnects once the stream has ended.
+        let mut draining: Option<Option<BackendError>> = None;
+        // Set once told to stop; serving ends with the stream.
+        let mut stopping = false;
+        // When to stop waiting for the stream to end.
+        let mut drain_by: Option<Instant> = None;
         loop {
             if retry_at.is_some_and(|at| at <= Instant::now()) {
                 retry_at = None;
@@ -325,11 +332,14 @@ impl Core {
                 );
             }
             let wait = retry_at.unwrap_or_else(Instant::now);
+            let drain_wait = drain_by.unwrap_or_else(Instant::now);
             // Set when the connection turns out to be gone, with the reason.
             let mut lost = None;
+            // Set when the stream has ended.
+            let mut ended = false;
 
             tokio::select! {
-                command = self.commands.recv() => match command {
+                command = self.commands.recv(), if !stopping => match command {
                     Some(Command::SendText { conversation, body, reply_to }) => {
                         self.send_text(db, &mut outbox, &mut backend, conversation, body, reply_to).await;
                         // Recipients stop showing us typing when the message arrives.
@@ -383,8 +393,14 @@ impl Core {
                     Some(Command::Typing { conversation, typing }) if settings.typing_indicators => {
                         self.typing(db, &mut backend, &mut typing_sent, conversation, typing).await;
                     }
+                    // Local data goes, so what's still arriving can too.
                     Some(Command::Unlink) => return Served::Unlink,
-                    Some(Command::Shutdown) | None => return Served::Stop,
+                    Some(Command::Shutdown) | None if incoming.is_none() => return Served::Stop,
+                    Some(Command::Shutdown) | None => {
+                        stopping = true;
+                        backend.stop_receiving();
+                        drain_by.get_or_insert(Instant::now() + self.options.drain_timeout);
+                    }
                     Some(other) => ignored(&other),
                 },
                 result = maybe(&mut connecting) => {
@@ -539,8 +555,10 @@ impl Core {
                         }
                     }
                     None => {
-                        tracing::info!("connection closed");
-                        lost = Some(None);
+                        if draining.is_none() && !stopping {
+                            tracing::info!("connection closed");
+                        }
+                        ended = true;
                     }
                 },
                 update = groups.next() => match update {
@@ -584,14 +602,42 @@ impl Core {
                     }
                 },
                 () = tokio::time::sleep_until(wait), if retry_at.is_some() => {}
+                () = tokio::time::sleep_until(drain_wait), if drain_by.is_some() => {
+                    tracing::warn!("stopped waiting for messages already received");
+                    ended = true;
+                }
                 () = due(&*self.options.clock, next_expiry) => {
                     next_expiry = self.expire(db).await;
                 }
             }
-            if let Some(error) = lost {
-                incoming = None;
+            // Stop sending and checking at once, but let what was received
+            // come through before reconnecting.
+            if let Some(error) = lost
+                && draining.is_none()
+            {
                 probe.stop();
                 outbox.disconnected();
+                match incoming {
+                    Some(_) => {
+                        backend.stop_receiving();
+                        drain_by = Some(Instant::now() + self.options.drain_timeout);
+                        draining = Some(error);
+                    }
+                    None => {
+                        draining = Some(error);
+                        ended = true;
+                    }
+                }
+            }
+            if ended {
+                incoming = None;
+                drain_by = None;
+                if stopping {
+                    return Served::Stop;
+                }
+                probe.stop();
+                outbox.disconnected();
+                let error = draining.take().flatten();
                 if error.as_ref().is_some_and(BackendError::is_unauthorized) {
                     self.emit(Event::LinkRevoked);
                 } else {
