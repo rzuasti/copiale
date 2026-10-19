@@ -6,13 +6,14 @@ process memory, and the copies it can't control.
 ## Protections
 
 - **No core dumps** (`copiale_core::hardening`), first thing at startup:
-  - Unix: core size limit set to zero.
-  - Linux: also non-dumpable (`PR_SET_DUMPABLE`), which covers dump handlers
-    that ignore the limit, and blocks `ptrace` and `perf` from other
-    processes of the user.
-  - macOS: the limit only.
+  - Unix: core size limit set to zero, which systemd-coredump and apport
+    honor too.
+  - Not `PR_SET_DUMPABLE` on Linux: it makes `/proc/<pid>` root-owned,
+    and xdg-desktop-portal then rejects every request ("Unable to open
+    /proc/<pid>/root"). It wouldn't stop piped dumps with
+    `fs.suid_dumpable = 2` anyway.
   - Windows: nothing yet; Windows Error Reporting may keep a dump.
-  - `COPIALE_UNSAFE_DEBUG=1` skips all of it, for `gdb` and `perf -p`.
+  - `COPIALE_UNSAFE_CORE_DUMPS=1` skips it, for debugging crashes.
 - **Database closed on every exit from the core**, panics included:
   SQLCipher frees its global state at exit, crashing connections still
   closing.

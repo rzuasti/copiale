@@ -1,12 +1,12 @@
 //! Keeps secrets in memory (keys, passphrase, messages) from reaching disk
-//! or other processes through core dumps and debuggers.
+//! through core dumps.
 //!
-//! `COPIALE_UNSAFE_DEBUG=1` skips this, for debugging and profiling
-//! (`gdb`, `perf -p`); core dumps can then hold the database key.
+//! `COPIALE_UNSAFE_CORE_DUMPS=1` skips this, for debugging crashes; core
+//! dumps can then hold the database key.
 
 use std::io;
 
-pub const UNSAFE_ENV: &str = "COPIALE_UNSAFE_DEBUG";
+pub const UNSAFE_ENV: &str = "COPIALE_UNSAFE_CORE_DUMPS";
 
 /// Disables core dumps unless [`UNSAFE_ENV`] is set. Call first thing in
 /// `main`, after logging.
@@ -18,9 +18,9 @@ pub fn init() {
     }
 }
 
-/// Sets the core size limit to zero. On Linux, also makes the process
-/// non-dumpable: covers dump handlers that ignore the limit, and keeps
-/// other processes of the user from attaching (`ptrace`, `perf`).
+/// Sets the core size limit to zero; dump handlers such as systemd-coredump
+/// honor it too. Not `PR_SET_DUMPABLE`: it hides `/proc/<pid>` from
+/// xdg-desktop-portal, failing every portal request.
 #[cfg(unix)]
 pub fn disable_core_dumps() -> io::Result<()> {
     let none = libc::rlimit {
@@ -29,11 +29,6 @@ pub fn disable_core_dumps() -> io::Result<()> {
     };
     // SAFETY: `none` is a valid `rlimit`.
     if unsafe { libc::setrlimit(libc::RLIMIT_CORE, &none) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    #[cfg(target_os = "linux")]
-    // SAFETY: `PR_SET_DUMPABLE` takes one integer argument.
-    if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0 as libc::c_ulong) } != 0 {
         return Err(io::Error::last_os_error());
     }
     Ok(())
