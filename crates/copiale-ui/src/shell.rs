@@ -11,6 +11,7 @@ use gpui_kit::{
     SharedString, Styled as _, Subscription, Task, Window, WindowBackgroundAppearance, WindowId,
     div, px,
 };
+use zeroize::Zeroizing;
 
 use crate::chat::{ChatView, NoticeKey};
 use crate::notifier::Notifier;
@@ -238,10 +239,10 @@ impl Shell {
     fn submit_passphrase(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let inputs = self.inputs();
         let (passphrase, confirmation) = (inputs.passphrase.clone(), inputs.confirmation.clone());
-        if let Some(command) = self
-            .onboarding
-            .submit_passphrase(&passphrase.read(cx).value(), &confirmation.read(cx).value())
-        {
+        if let Some(command) = self.onboarding.submit_passphrase(
+            &secret_value(passphrase.read(cx)),
+            &secret_value(confirmation.read(cx)),
+        ) {
             for input in [&passphrase, &confirmation] {
                 input.update(cx, |input, cx| input.set_value("", window, cx));
             }
@@ -561,4 +562,15 @@ fn error_text(error: Option<String>, cx: &App) -> impl IntoElement {
         .text_sm()
         .text_color(cx.palette().danger)
         .children(error.map(SharedString::from))
+}
+
+/// The input's text, copied once into memory zeroed on drop. GPUI's own
+/// copies stay: see `docs/security.md`.
+fn secret_value(input: &InputState) -> Zeroizing<String> {
+    let text = input.text();
+    let mut value = Zeroizing::new(String::with_capacity(text.len()));
+    for chunk in text.chunks() {
+        value.push_str(chunk);
+    }
+    value
 }

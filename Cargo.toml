@@ -11,7 +11,8 @@ repository = "https://codeberg.org/korba/copiale"
 publish = false
 
 [workspace.dependencies]
-argon2 = "0.6"
+# Zeroes its working memory.
+argon2 = { version = "0.6", features = ["zeroize"] }
 # Same version and runtime as GPUI's.
 ashpd = { version = "0.13", default-features = false, features = ["async-io", "settings"] }
 chrono = "0.4"
@@ -28,6 +29,7 @@ interprocess = "2.4"
 # GPUI snapshots may break the API between releases; upgrade deliberately.
 gpui-kit = "=0.7.3"
 keyring = "4.2"
+libc = "0.2"
 log = "0.4"
 notify = "8"
 notify-rust = "4.18"

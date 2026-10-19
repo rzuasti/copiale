@@ -47,6 +47,8 @@ went unsolved until 2011.
   - Messages live in app tables only; presage's message saving is disabled
     through a delegating `Store` wrapper.
   - No telemetry.
+  - No core dumps (`copiale_core::hardening`); key and passphrase copies
+    left in memory are listed in `docs/security.md`.
   - Never log message content, phone numbers or keys; log redacted
     identifiers only (`ServiceId`, `PhoneNumber`, `GroupId`). Dependency
     logs are capped at `warn`, and all output is scrubbed of UUIDs, long

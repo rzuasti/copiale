@@ -1,6 +1,6 @@
 //! Database keys and passphrase-based key derivation.
 
-use std::fmt;
+use std::fmt::{self, Write as _};
 use std::io::Write as _;
 use std::path::Path;
 
@@ -35,8 +35,17 @@ impl DatabaseKey {
 
     /// Value for `PRAGMA key`: a raw key, so SQLCipher skips its own key
     /// derivation.
+    ///
+    /// Not zeroed: sqlx keeps it for the pools' lifetime (see
+    /// `docs/security.md`). Built in place, leaving no other copies.
     pub(crate) fn pragma_value(&self) -> String {
-        format!("\"x'{}'\"", to_hex(self.as_bytes()))
+        let mut value = String::with_capacity(2 * KEY_LEN + 5);
+        value.push_str("\"x'");
+        for byte in self.as_bytes() {
+            write!(value, "{byte:02x}").expect("writing to a String");
+        }
+        value.push_str("'\"");
+        value
     }
 }
 

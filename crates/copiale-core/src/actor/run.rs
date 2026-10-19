@@ -1,6 +1,7 @@
 //! The core's phases: unlock storage, set up the account, serve.
 
 use std::collections::HashMap;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -53,15 +54,15 @@ impl Core {
     pub(super) async fn run<L: Linker>(mut self, mut linker: L) {
         tracing::info!("core started");
         while let Some(db) = self.unlock().await {
-            let mut served = Served::Stop;
-            if let Some((backend, linked_now)) = self.set_up_account(&db, &mut linker).await {
+            // Closed before `Stopped`, as the process may exit right after
+            // it, and before wiping the file.
+            let served = closing(db, async |db| {
+                let (backend, linked_now) = self.set_up_account(db, &mut linker).await?;
                 self.emit(Event::Ready);
-                served = self.serve(&db, backend, linked_now).await;
-            }
-            // Before `Stopped`, as the process may exit right after it, and
-            // before wiping the file.
-            db.close().await;
-            if served == Served::Stop {
+                Some(self.serve(db, backend, linked_now).await)
+            })
+            .await;
+            if served != Some(Served::Unlink) {
                 break;
             }
             let (storage, secrets) = (self.storage.clone(), self.secrets.clone());
@@ -1313,6 +1314,14 @@ pub(crate) fn default_device_name() -> String {
     }
 }
 
+/// Runs `work` with the database, then closes it, also when `work` panics
+/// (see [`Database::close`]); the panic then carries on.
+async fn closing<T>(db: Database, work: impl AsyncFnOnce(&Database) -> T) -> T {
+    let result = AssertUnwindSafe(work(&db)).catch_unwind().await;
+    db.close().await;
+    result.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+}
+
 async fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
     tokio::task::spawn_blocking(work)
         .await
@@ -1345,5 +1354,22 @@ mod tests {
     #[test]
     fn device_name_mentions_copiale() {
         assert!(default_device_name().starts_with("Copiale"));
+    }
+
+    #[tokio::test]
+    async fn a_panic_still_closes_the_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = crate::storage::DatabaseKey::generate();
+        let db = Database::open(&dir.path().join("test.db"), &key)
+            .await
+            .unwrap();
+        let pool = db.pool().clone();
+
+        let result = AssertUnwindSafe(closing(db, async |_| panic!("serving failed")))
+            .catch_unwind()
+            .await;
+
+        assert!(result.is_err());
+        assert!(pool.is_closed());
     }
 }

@@ -7,6 +7,7 @@ mod backend;
 mod clock;
 pub mod config;
 mod dirs;
+pub mod hardening;
 pub mod logging;
 mod model;
 pub mod signal;

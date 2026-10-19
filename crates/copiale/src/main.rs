@@ -27,6 +27,7 @@ fn spawn_guard() -> std::sync::MutexGuard<'static, ()> {
 
 fn main() -> ExitCode {
     copiale_core::logging::init();
+    copiale_core::hardening::init();
 
     let cli = match cli::parse(std::env::args_os().skip(1)) {
         Ok(cli) => cli,
