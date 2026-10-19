@@ -1240,6 +1240,38 @@ fn keyboard_edits_replies_and_deletes(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn edits_of_messages_that_go_keep_the_text(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    chat_with_recent(&ui, cx);
+    ui.press("up", cx);
+    ui.type_text("!", cx);
+    let text = chat_state(&ui, cx).0;
+
+    ui.event(
+        Event::MessageRemoved {
+            conversation: ConversationId::new(1),
+            id: MessageId::new(11),
+        },
+        cx,
+    );
+    assert_eq!(chat_state(&ui, cx), (text.clone(), Compose::New, None));
+    assert!(ui.shows("compose", cx), "says why");
+    ui.press("escape", cx);
+    assert!(!ui.shows("compose", cx));
+    assert_eq!(chat_state(&ui, cx).0, text);
+
+    ui.core.take();
+    ui.press("enter", cx);
+    assert!(
+        ui.core.take().iter().any(|command| matches!(
+            command,
+            Command::SendText { reply_to: None, body, .. } if body.as_str() == text
+        )),
+        "sent as a new message"
+    );
+}
+
+#[gpui_kit::test]
 fn row_actions_work_with_the_mouse(cx: &mut TestAppContext) {
     let ui = Ui::ready(cx);
     chat_with_recent(&ui, cx);

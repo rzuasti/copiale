@@ -183,6 +183,8 @@ struct Log {
     loading_older: bool,
     errors: HashMap<MessageId, BackendError>,
     compose: Compose,
+    /// Why a reply or edit ended on its own, until the next one.
+    compose_ended: Option<&'static str>,
     /// Selected from the keyboard.
     selected: Option<MessageId>,
     /// Asking how to delete it.
@@ -191,6 +193,28 @@ struct Log {
 }
 
 impl Log {
+    /// Ends a reply, edit, selection or delete question of a message that's
+    /// gone; the composer keeps its text, now a new message.
+    fn forget(&mut self, id: MessageId) {
+        let ended = match self.compose {
+            Compose::Edit(target) if target == id => Some("the message you were editing is gone"),
+            Compose::Reply(target) if target == id => {
+                Some("the message you were replying to is gone")
+            }
+            _ => None,
+        };
+        if ended.is_some() {
+            self.compose = Compose::New;
+            self.compose_ended = ended;
+        }
+        if self.selected == Some(id) {
+            self.selected = None;
+        }
+        if self.confirming == Some(id) {
+            self.confirming = None;
+        }
+    }
+
     fn regroup(&mut self, clock: &Clock) {
         self.starts.clear();
         for (ix, message) in self.messages.iter().enumerate() {
@@ -710,6 +734,7 @@ impl Chat {
             loading_older: false,
             errors: HashMap::new(),
             compose: Compose::New,
+            compose_ended: None,
             selected: None,
             confirming: None,
             change_failed: HashSet::new(),
@@ -812,6 +837,7 @@ impl Chat {
             return None;
         }
         let body = MessageBody::new(text);
+        log.compose_ended = None;
         Some(match std::mem::take(&mut log.compose) {
             Compose::New => Command::SendText {
                 conversation: log.id,
@@ -862,7 +888,7 @@ impl Chat {
     pub fn compose_banner(&self) -> Option<String> {
         let log = self.open.as_ref()?;
         match log.compose {
-            Compose::New => None,
+            Compose::New => log.compose_ended.map(Into::into),
             Compose::Edit(_) => Some("editing your message".into()),
             Compose::Reply(id) => {
                 let message = log.messages.iter().find(|m| m.id == id)?;
@@ -890,6 +916,7 @@ impl Chat {
             .is_some_and(|m| self.actions(m).reply);
         if let Some(log) = self.open.as_mut().filter(|_| can) {
             log.compose = Compose::Reply(message);
+            log.compose_ended = None;
             log.selected = None;
         }
         can
@@ -905,6 +932,7 @@ impl Chat {
         let text = found.content.body().map(|body| body.as_str().to_string())?;
         let log = self.open.as_mut()?;
         log.compose = Compose::Edit(message);
+        log.compose_ended = None;
         log.selected = None;
         Some(text)
     }
@@ -921,8 +949,8 @@ impl Chat {
         self.start_edit(id, last)
     }
 
-    /// Ends a reply, edit, selection or delete question; `false` if there
-    /// was none.
+    /// Ends a reply, edit, selection or delete question, or dismisses why
+    /// one ended; `false` if there was none.
     pub fn cancel(&mut self) -> bool {
         let Some(log) = self.open.as_mut() else {
             return false;
@@ -930,7 +958,7 @@ impl Chat {
         if log.confirming.take().is_some() || log.selected.take().is_some() {
             return true;
         }
-        std::mem::take(&mut log.compose) != Compose::New
+        log.compose_ended.take().is_some() | (std::mem::take(&mut log.compose) != Compose::New)
     }
 
     /// Selects the last message that can be acted on; returns its row.
@@ -1107,6 +1135,7 @@ impl Chat {
         };
         log.messages.remove(ix);
         log.errors.remove(&id);
+        log.forget(id);
         log.regroup(&self.clock);
         Effects::log(LogChange::Removed(ix))
     }
@@ -1123,6 +1152,9 @@ impl Chat {
             return Effects::default();
         };
         log.messages[ix] = message.clone();
+        if message.content == Content::Deleted {
+            log.forget(message.id);
+        }
         match error {
             Some(error) => log.errors.insert(message.id, error),
             None => log.errors.remove(&message.id),
@@ -1959,6 +1991,50 @@ mod tests {
         chat.start_reply(open, MessageId::new(2));
         assert!(chat.cancel());
         assert_eq!(chat.compose(), Compose::New);
+        assert!(!chat.cancel());
+    }
+
+    #[test]
+    fn replies_and_edits_of_messages_that_go_end() {
+        let recent = NOW - 2 * MINUTE;
+        let mut chat = opened(vec![incoming(1, recent), mine(2, recent + MINUTE)]);
+        let open = ConversationId::new(1);
+
+        chat.start_edit(open, MessageId::new(2));
+        chat.apply(
+            &Event::MessageRemoved {
+                conversation: open,
+                id: MessageId::new(2),
+            },
+            true,
+        );
+        assert_eq!(chat.compose(), Compose::New);
+        assert_eq!(
+            chat.compose_banner().as_deref(),
+            Some("the message you were editing is gone")
+        );
+        let Some(Command::SendText { reply_to: None, .. }) = chat.submit("kept") else {
+            panic!("expected a new message");
+        };
+        assert_eq!(chat.compose_banner(), None);
+
+        chat.start_reply(open, MessageId::new(1));
+        assert_eq!(chat.select_last(), Some(0));
+        chat.confirm_delete(MessageId::new(1));
+        let deleted = Message {
+            content: Content::Deleted,
+            ..incoming(1, recent)
+        };
+        chat.apply(&Event::MessageUpdated(deleted), true);
+        assert_eq!(chat.compose(), Compose::New);
+        assert_eq!(chat.selected(), None);
+        assert_eq!(chat.confirming_delete(), None);
+        assert_eq!(
+            chat.compose_banner().as_deref(),
+            Some("the message you were replying to is gone")
+        );
+        assert!(chat.cancel(), "dismisses the notice");
+        assert_eq!(chat.compose_banner(), None);
         assert!(!chat.cancel());
     }
 
