@@ -251,7 +251,10 @@ impl Core {
             Ok(count) => tracing::info!(count, "unsent messages marked failed"),
             Err(error) => self.database_error(error),
         }
-        let day_ago = Timestamp::now()
+        let day_ago = self
+            .options
+            .clock
+            .now()
             .as_millis()
             .saturating_sub(PENDING_CHANGE_LIFETIME_MS);
         match db
@@ -469,7 +472,7 @@ impl Core {
                         if let Change::Edit { content, .. } = &mut change.change {
                             own_quotes(content, backend.own_id());
                         }
-                        match db.apply_change(&change).await {
+                        match db.apply_change(&change, self.options.clock.now()).await {
                             Ok(Some(message)) => {
                                 let conversation = message.conversation;
                                 self.emit(Event::MessageUpdated(message));
@@ -832,10 +835,11 @@ impl Core {
         };
         // Signal identifies a message by author and sent time, so each needs
         // its own.
-        let mut sent_at = Timestamp::now();
+        let now = self.options.clock.now();
+        let mut sent_at = now;
         let message = loop {
             match db
-                .add_pending(conversation, sent_at, &content, expire_timer)
+                .add_pending(conversation, sent_at, &content, expire_timer, now)
                 .await
             {
                 Ok(Some(message)) => break message,
@@ -869,7 +873,10 @@ impl Core {
             message.status,
             Some(MessageStatus::Sent | MessageStatus::Delivered | MessageStatus::Read)
         );
-        let age = Timestamp::now()
+        let age = self
+            .options
+            .clock
+            .now()
             .as_millis()
             .saturating_sub(message.sent_at.as_millis());
         if message.sender.is_some() || !sent || u128::from(age) > window.as_millis() {
@@ -914,7 +921,7 @@ impl Core {
             );
             return;
         }
-        let at = Timestamp::now();
+        let at = self.options.clock.now();
         let change = MessageChange {
             destination,
             author: None,
@@ -962,7 +969,8 @@ impl Core {
                 let outgoing = Outgoing::Delete {
                     target: message.sent_at,
                 };
-                outbox.push(id, destination, outgoing, Timestamp::now(), backend);
+                let at = self.options.clock.now();
+                outbox.push(id, destination, outgoing, at, backend);
             }
             return;
         }
@@ -993,7 +1001,7 @@ impl Core {
 
     /// Applies our edit or delete here; `false` if it didn't apply.
     async fn apply_own_change(&self, db: &Database, change: &MessageChange) -> bool {
-        match db.apply_change(change).await {
+        match db.apply_change(change, self.options.clock.now()).await {
             Ok(Some(message)) => {
                 let conversation = message.conversation;
                 self.emit(Event::MessageUpdated(message));

@@ -351,7 +351,7 @@ mod tests {
             .open_conversation(&Destination::Contact(peer(1)))
             .await
             .unwrap();
-        db.add_pending(conversation, at(100), &Content::text("x"), None)
+        db.add_pending(conversation, at(100), &Content::text("x"), None, at(100))
             .await
             .unwrap();
 

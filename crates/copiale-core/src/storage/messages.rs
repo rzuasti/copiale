@@ -114,6 +114,7 @@ impl Database {
             sent_at,
             content,
             expiry,
+            now,
         )
         .await?;
         let message = match message {
@@ -133,6 +134,7 @@ impl Database {
         sent_at: Timestamp,
         content: &Content,
         expire_timer: Option<u32>,
+        now: Timestamp,
     ) -> Result<Option<Message>, StorageError> {
         let mut tx = self.begin_write().await?;
         let exists: Option<i64> = sqlx::query_scalar("SELECT id FROM conversations WHERE id = ?")
@@ -153,6 +155,7 @@ impl Database {
             sent_at,
             content,
             expiry,
+            now,
         )
         .await?;
         tx.commit().await.map_err(database_error)?;
@@ -577,8 +580,9 @@ async fn conversation_id(
     .map_err(database_error)
 }
 
-/// Inserts a message into `conversation` unless it's a duplicate, and
-/// bumps the conversation's activity.
+/// Inserts a message into `conversation`, stored at `received_at`, unless
+/// it's a duplicate, and bumps the conversation's activity.
+#[allow(clippy::too_many_arguments)]
 async fn insert_message(
     tx: &mut sqlx::SqliteConnection,
     conversation: i64,
@@ -587,8 +591,8 @@ async fn insert_message(
     sent_at: Timestamp,
     content: &Content,
     expiry: Option<Expiry>,
+    received_at: Timestamp,
 ) -> Result<Option<Message>, StorageError> {
-    let received_at = Timestamp::now();
     let outgoing = author.is_none();
     let read = outgoing || content.is_quiet();
     let author_bytes = author.map(|author| author.uuid().as_bytes().to_vec());
@@ -811,7 +815,7 @@ mod tests {
             Timestamp::from_millis(sent_at),
             &Content::text(body),
             None,
-            Timestamp::from_millis(0),
+            Timestamp::from_millis(sent_at),
         )
         .await
         .unwrap()
@@ -934,6 +938,7 @@ mod tests {
             Timestamp::from_millis(sent_at),
             &Content::text("out"),
             None,
+            Timestamp::from_millis(sent_at),
         )
         .await
         .unwrap()
@@ -1262,6 +1267,7 @@ mod tests {
                 Timestamp::from_millis(1),
                 &Content::text("x"),
                 None,
+                Timestamp::from_millis(1),
             )
             .await
             .unwrap();
@@ -1417,7 +1423,13 @@ mod tests {
 
         let conversation = unread.conversation;
         let pending = db
-            .add_pending(conversation, at(200), &Content::text("out"), Some(30))
+            .add_pending(
+                conversation,
+                at(200),
+                &Content::text("out"),
+                Some(30),
+                at(200),
+            )
             .await
             .unwrap()
             .unwrap();
@@ -1436,7 +1448,13 @@ mod tests {
         let (_dir, db) = db().await;
         let conversation = conversation_with(&db, Destination::Contact(peer(1))).await;
         let pending = db
-            .add_pending(conversation, at(200), &Content::text("out"), Some(30))
+            .add_pending(
+                conversation,
+                at(200),
+                &Content::text("out"),
+                Some(30),
+                at(200),
+            )
             .await
             .unwrap()
             .unwrap();

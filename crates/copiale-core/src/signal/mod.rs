@@ -114,6 +114,8 @@ impl Drop for PresageBackend {
     }
 }
 
+// Timestamps of syncs, receipts and typing messages made here use the
+// system clock, not `CoreOptions::clock`: they go to Signal.
 impl SignalBackend for PresageBackend {
     /// Receives on a clone of the manager in a local task, so sending
     /// doesn't wait for the stream. Must run inside a `LocalSet`.

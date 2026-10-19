@@ -70,6 +70,8 @@ went unsolved until 2011.
 
 - **Rust**: format with `rustfmt`. Avoid import aliases (`use ... as ...`)
   unless necessary.
+  - Prefer plain arguments over a struct made only to satisfy
+    `clippy::too_many_arguments`; allow the lint on that function instead.
 
 ## Testing & linting
 

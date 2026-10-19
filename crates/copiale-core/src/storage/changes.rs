@@ -11,10 +11,11 @@ use crate::model::{
 impl Database {
     /// Applies an edit or delete by the message's author; returns the
     /// changed message. One for a message not stored yet is kept until it
-    /// is; `None` then, and when there's nothing to change.
+    /// is, from `now`; `None` then, and when there's nothing to change.
     pub(crate) async fn apply_change(
         &self,
         change: &MessageChange,
+        now: Timestamp,
     ) -> Result<Option<Message>, StorageError> {
         let mut tx = self.begin_write().await?;
         let author = author_bytes(change.author);
@@ -61,7 +62,7 @@ impl Database {
             .bind(millis(change.target))
             .bind(content)
             .bind(edited_at)
-            .bind(millis(Timestamp::now()))
+            .bind(millis(now))
             .execute(&mut *tx)
             .await
             .map_err(database_error)?;
@@ -301,7 +302,7 @@ mod tests {
         let original = incoming(&db, 1, 100, "teh").await.unwrap();
 
         let edited = db
-            .apply_change(&change(1, 100, edit("the", 200)))
+            .apply_change(&change(1, 100, edit("the", 200)), at(0))
             .await
             .unwrap()
             .unwrap();
@@ -312,14 +313,14 @@ mod tests {
         assert_eq!(edited.sent_at, original.sent_at);
         // A second edit may target the first edit's time.
         let again = db
-            .apply_change(&change(1, 200, edit("the end", 300)))
+            .apply_change(&change(1, 200, edit("the end", 300)), at(0))
             .await
             .unwrap()
             .unwrap();
         assert_eq!(again.content, Content::text("the end"));
         // An older edit arriving late changes nothing.
         let stale = db
-            .apply_change(&change(1, 100, edit("teh", 250)))
+            .apply_change(&change(1, 100, edit("teh", 250)), at(0))
             .await
             .unwrap();
         assert_eq!(stale, None);
@@ -337,7 +338,7 @@ mod tests {
             author: Some(peer(2)),
             ..change(1, 100, Change::Delete)
         };
-        assert_eq!(db.apply_change(&forged).await.unwrap(), None);
+        assert_eq!(db.apply_change(&forged, at(0)).await.unwrap(), None);
 
         let stored = db.messages(original.conversation, None, 10).await.unwrap();
         assert_eq!(stored[0].content, Content::text("mine"));
@@ -350,20 +351,20 @@ mod tests {
         incoming(&db, 1, 100, "oops").await.unwrap();
 
         let deleted = db
-            .apply_change(&change(1, 100, Change::Delete))
+            .apply_change(&change(1, 100, Change::Delete), at(0))
             .await
             .unwrap()
             .unwrap();
 
         assert_eq!(deleted.content, Content::Deleted);
         assert_eq!(
-            db.apply_change(&change(1, 100, Change::Delete))
+            db.apply_change(&change(1, 100, Change::Delete), at(0))
                 .await
                 .unwrap(),
             None
         );
         assert_eq!(
-            db.apply_change(&change(1, 100, edit("back", 200)))
+            db.apply_change(&change(1, 100, edit("back", 200)), at(0))
                 .await
                 .unwrap(),
             None
@@ -384,13 +385,13 @@ mod tests {
     async fn changes_arriving_first_apply_when_the_message_does() {
         let (_dir, db) = db().await;
         assert_eq!(
-            db.apply_change(&change(1, 100, edit("v2", 200)))
+            db.apply_change(&change(1, 100, edit("v2", 200)), at(0))
                 .await
                 .unwrap(),
             None
         );
         assert_eq!(
-            db.apply_change(&change(1, 100, edit("v3", 300)))
+            db.apply_change(&change(1, 100, edit("v3", 300)), at(0))
                 .await
                 .unwrap(),
             None
@@ -401,10 +402,10 @@ mod tests {
         assert_eq!(message.content, Content::text("v3"));
         assert!(message.edited);
 
-        db.apply_change(&change(2, 50, edit("x", 60)))
+        db.apply_change(&change(2, 50, edit("x", 60)), at(0))
             .await
             .unwrap();
-        db.apply_change(&change(2, 50, Change::Delete))
+        db.apply_change(&change(2, 50, Change::Delete), at(0))
             .await
             .unwrap();
         let message = incoming(&db, 2, 50, "secret").await.unwrap();
@@ -433,12 +434,15 @@ mod tests {
             .unwrap();
 
         let edited = db
-            .apply_change(&MessageChange {
-                destination: group,
-                author: None,
-                target: at(100),
-                change: edit("hi everyone", 200),
-            })
+            .apply_change(
+                &MessageChange {
+                    destination: group,
+                    author: None,
+                    target: at(100),
+                    change: edit("hi everyone", 200),
+                },
+                at(0),
+            )
             .await
             .unwrap()
             .unwrap();
@@ -542,13 +546,12 @@ mod tests {
     #[tokio::test]
     async fn kept_changes_expire() {
         let (_dir, db) = db().await;
-        db.apply_change(&change(1, 100, Change::Delete))
+        db.apply_change(&change(1, 100, Change::Delete), at(10))
             .await
             .unwrap();
 
-        assert_eq!(db.expire_pending_changes(at(1)).await.unwrap(), 0);
-        let later = Timestamp::from_millis(Timestamp::now().as_millis() + 1);
-        assert_eq!(db.expire_pending_changes(later).await.unwrap(), 1);
+        assert_eq!(db.expire_pending_changes(at(10)).await.unwrap(), 0);
+        assert_eq!(db.expire_pending_changes(at(11)).await.unwrap(), 1);
 
         let message = incoming(&db, 1, 100, "kept").await.unwrap();
         assert_eq!(message.content, Content::text("kept"));

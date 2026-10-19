@@ -8,10 +8,11 @@ use std::time::Duration;
 use copiale_core::storage::{KdfParams, Passphrase, Storage, StoragePaths};
 use copiale_core::{
     Account, AccountSettings, BackendError, Change, ChatRef, Command, Contact, Content,
-    ConversationId, ConversationSummary, CoreHandle, CoreOptions, Destination, Direction, Event,
-    Events, Expiry, GroupInfo, GroupRef, GroupUpdate, Incoming, IncomingMessage, Member, Message,
-    MessageBody, MessageChange, MessagePreview, MessageRef, MessageStatus, Outgoing, Peer,
-    PhoneNumber, Quote, ReceiptKind, SentMessage, StorageFailure, Timestamp,
+    ConversationId, ConversationSummary, CoreHandle, CoreOptions, Destination, Direction,
+    EDIT_WINDOW, Event, Events, Expiry, GroupInfo, GroupRef, GroupUpdate, Incoming,
+    IncomingMessage, Member, Message, MessageBody, MessageChange, MessagePreview, MessageRef,
+    MessageStatus, Outgoing, Peer, PhoneNumber, Quote, ReceiptKind, SentMessage, StorageFailure,
+    Timestamp,
 };
 use copiale_testkit::{
     DEVICE_NAME, FAKE_LINK_URL, FakeNetwork, FakePhone, ManualClock, MemorySecretStore, OWN_ID,
@@ -375,30 +376,19 @@ async fn contacts_are_asked_for_hourly_while_none_come() {
     let dir = tempfile::tempdir().unwrap();
     let secrets = MemorySecretStore::default();
     let clock = ManualClock::new(Timestamp::from_millis(NOW));
-    let start_at = |offset: Duration| {
-        clock.set(Timestamp::from_millis(NOW + offset.as_millis() as u64));
-        let options = timed(fast(), &clock);
-        start_with(dir.path(), &secrets, true, options, |_| {})
-    };
-    let connected = async |running: &mut Running| {
-        expect_ready(&mut running.events).await;
-        expect(&mut running.events, Event::Connected).await;
-    };
+    let start_at = |offset| connected_at(dir.path(), &secrets, &clock, offset);
 
-    let mut running = start_at(Duration::ZERO);
-    connected(&mut running).await;
+    let running = start_at(Duration::ZERO).await;
     until(&running, |network| network.contact_sync_requests() == 1).await;
     stop(running).await;
 
     // The phone sent nothing; too soon to ask again.
-    let mut running = start_at(Duration::from_secs(1800));
-    connected(&mut running).await;
+    let mut running = start_at(Duration::from_secs(1800)).await;
     sync(&mut running).await;
     assert_eq!(running.network.contact_sync_requests(), 0);
     stop(running).await;
 
-    let mut running = start_at(Duration::from_secs(3600));
-    connected(&mut running).await;
+    let running = start_at(Duration::from_secs(3600)).await;
     until(&running, |network| network.contact_sync_requests() == 1).await;
     stop(running).await;
 }
@@ -451,9 +441,10 @@ async fn synced_contacts_are_listed_and_title_chats() {
 async fn contacts_are_asked_for_daily() {
     let dir = tempfile::tempdir().unwrap();
     let secrets = MemorySecretStore::default();
-    let mut running = start(dir.path(), &secrets, true);
-    expect_ready(&mut running.events).await;
-    expect(&mut running.events, Event::Connected).await;
+    let clock = ManualClock::new(Timestamp::from_millis(NOW));
+    let start_at = |offset| connected_at(dir.path(), &secrets, &clock, offset);
+
+    let mut running = start_at(Duration::ZERO).await;
     running
         .network
         .sync_contacts(&[contact(1, Some("Alice"), None)])
@@ -463,10 +454,13 @@ async fn contacts_are_asked_for_daily() {
     stop(running).await;
 
     // Asked less than a day ago, with contacts stored.
-    let mut running = start(dir.path(), &secrets, true);
-    expect_ready(&mut running.events).await;
-    expect(&mut running.events, Event::Connected).await;
+    let mut running = start_at(DAY - Duration::from_millis(1)).await;
+    sync(&mut running).await;
     assert_eq!(running.network.contact_sync_requests(), 0);
+    stop(running).await;
+
+    let running = start_at(DAY).await;
+    until(&running, |network| network.contact_sync_requests() == 1).await;
     stop(running).await;
 }
 
@@ -2069,6 +2063,36 @@ async fn changes_before_their_message_apply_on_arrival() {
 }
 
 #[tokio::test]
+async fn changes_before_their_message_are_kept_for_a_day() {
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = MemorySecretStore::default();
+    let clock = ManualClock::new(Timestamp::from_millis(NOW));
+    let start_at = |offset| connected_at(dir.path(), &secrets, &clock, offset);
+
+    let mut running = start_at(Duration::ZERO).await;
+    running.network.deliver(changed(1, 100, edit("kept", 150)));
+    running
+        .network
+        .deliver(changed(1, 200, edit("dropped", 250)));
+    assert!(flush(&mut running).await.is_empty());
+    stop(running).await;
+
+    let mut running = start_at(DAY).await;
+    running.network.deliver(incoming(1, 100, "draft"));
+    let kept = message_added(&mut running.events).await;
+    assert_eq!(kept.content, Content::text("kept"));
+    conversation_updated(&mut running.events).await;
+    stop(running).await;
+
+    let mut running = start_at(DAY + Duration::from_millis(1)).await;
+    running.network.deliver(incoming(1, 200, "original"));
+    let unchanged = message_added(&mut running.events).await;
+    assert_eq!(unchanged.content, Content::text("original"));
+    assert!(!unchanged.edited);
+    stop(running).await;
+}
+
+#[tokio::test]
 async fn quotes_of_our_messages_name_no_author() {
     let (_dir, mut running) = ready().await;
     let reply = |author: u128| Content::Text {
@@ -2307,6 +2331,43 @@ async fn only_recent_own_sent_messages_change_for_everyone() {
 }
 
 #[tokio::test]
+async fn own_messages_change_for_everyone_only_within_a_day() {
+    let clock = ManualClock::new(Timestamp::from_millis(NOW));
+    let (_dir, mut running) = ready_at(&clock).await;
+    let chat = open_chat(&mut running, 2).await;
+    let original = sent_text(&mut running, chat, "teh").await;
+    assert_eq!(original.sent_at, Timestamp::from_millis(NOW));
+
+    clock.advance(EDIT_WINDOW);
+    let edit = |body: &str| Command::Edit {
+        id: original.id,
+        body: MessageBody::new(body),
+    };
+    send(&running, edit("the"));
+    message_updated(&mut running.events).await;
+    conversation_updated(&mut running.events).await;
+    until(&running, |network| network.sent().len() == 2).await;
+    let edited_at = NOW + EDIT_WINDOW.as_millis() as u64;
+    assert_eq!(
+        running.network.sent()[1].timestamp,
+        Timestamp::from_millis(edited_at)
+    );
+
+    clock.advance(Duration::from_millis(1));
+    send(&running, edit("then"));
+    send(
+        &running,
+        Command::Delete {
+            id: original.id,
+            everyone: true,
+        },
+    );
+    sync(&mut running).await;
+    assert_eq!(running.network.sends_started(), 2);
+    stop(running).await;
+}
+
+#[tokio::test]
 async fn deleting_for_me_removes_and_syncs() {
     let (_dir, mut running) = ready().await;
     running.network.deliver(incoming(1, 100, "theirs"));
@@ -2373,6 +2434,8 @@ async fn failed_changes_are_reported() {
 
 const NOW: u64 = 1_800_000_000_000;
 
+const DAY: Duration = Duration::from_secs(24 * 3600);
+
 fn timed(options: CoreOptions, clock: &ManualClock) -> CoreOptions {
     CoreOptions {
         clock: Arc::new(clock.clone()),
@@ -2389,6 +2452,20 @@ async fn ready_at(clock: &ManualClock) -> (TempDir, Running) {
     expect_ready(&mut running.events).await;
     expect(&mut running.events, Event::Connected).await;
     (dir, running)
+}
+
+/// Started on `clock`, set to `offset` after [`NOW`], and connected.
+async fn connected_at(
+    dir: &Path,
+    secrets: &MemorySecretStore,
+    clock: &ManualClock,
+    offset: Duration,
+) -> Running {
+    clock.set(Timestamp::from_millis(NOW + offset.as_millis() as u64));
+    let mut running = start_with(dir, secrets, true, timed(fast(), clock), |_| {});
+    expect_ready(&mut running.events).await;
+    expect(&mut running.events, Event::Connected).await;
+    running
 }
 
 fn timed_incoming(from: u128, sent_at: u64, body: &str, seconds: u32) -> Incoming {
