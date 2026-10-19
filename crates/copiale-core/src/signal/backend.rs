@@ -4,7 +4,7 @@ use futures::future::LocalBoxFuture;
 use futures::stream::{LocalBoxStream, Stream};
 use futures::{FutureExt as _, StreamExt as _};
 use presage::Manager;
-use presage::libsignal_service::configuration::SignalServers;
+use presage::libsignal_service::configuration::{ServiceConfiguration, SignalServers};
 use presage::libsignal_service::content::ContentBody;
 use presage::libsignal_service::prelude::ProtobufMessage as _;
 use presage::libsignal_service::proto::sync_message::{self, Content as SyncContent};
@@ -18,6 +18,7 @@ use presage::libsignal_service::protocol::{
     ServiceId as SignalServiceId,
 };
 use presage::libsignal_service::push_service::DEFAULT_DEVICE_ID;
+use presage::libsignal_service::zkgroup::ServerPublicParams;
 use presage::manager::Registered;
 use presage::model::messages::Received;
 use presage::store::{ContentsStore as _, StateStore as _, Store as _, Thread};
@@ -33,8 +34,8 @@ use crate::backend::{
     BackendError, Incoming, Linker, PeerIdentity, Resendable, RetryRequest, SignalBackend,
 };
 use crate::model::{
-    Destination, GroupInfo, GroupMasterKey, IdentityKey, Member, MessageBody, Outgoing, Quote,
-    SafetyNumber, ServiceId, Timestamp,
+    Destination, GroupInfo, GroupMasterKey, GroupMembers, IdentityKey, Member, MessageBody,
+    Outgoing, Quote, SafetyNumber, ServiceId, Timestamp,
 };
 use crate::storage::Database;
 
@@ -138,6 +139,8 @@ impl SignalBackend for PresageBackend {
     ) -> LocalBoxFuture<'static, Result<LocalBoxStream<'static, Incoming>, BackendError>> {
         let mut manager = self.manager.clone();
         let me = manager.registration_data().service_ids.aci();
+        let server = ServiceConfiguration::from(manager.registration_data().signal_servers)
+            .zkgroup_server_public_params;
         let (opened_tx, opened_rx) = oneshot::channel();
         let (items_tx, items_rx) = mpsc::channel(RECEIVE_BUFFER);
         let (stop, stop_rx) = oneshot::channel();
@@ -152,7 +155,7 @@ impl SignalBackend for PresageBackend {
                     return;
                 }
             };
-            relay(stream, me, items_tx, stop_rx).await;
+            relay(stream, me, &server, items_tx, stop_rx).await;
         });
         let receiver = Receiver {
             task,
@@ -392,6 +395,43 @@ impl SignalBackend for PresageBackend {
                 revision: group.revision,
                 members,
             }))
+        }
+        .boxed_local()
+    }
+
+    fn group_members(
+        &mut self,
+        key: GroupMasterKey,
+    ) -> LocalBoxFuture<'static, Result<Option<GroupMembers>, BackendError>> {
+        let manager = self.manager.clone();
+        async move {
+            let group = manager
+                .store()
+                .group(*key.as_bytes())
+                .await
+                .map_err(store_error)?;
+            Ok(group.map(|group| GroupMembers {
+                revision: group.revision,
+                members: group
+                    .members
+                    .iter()
+                    .map(|member| ServiceId::new(member.aci.into()))
+                    .collect(),
+            }))
+        }
+        .boxed_local()
+    }
+
+    fn refresh_group(
+        &mut self,
+        key: GroupMasterKey,
+    ) -> LocalBoxFuture<'static, Result<(), BackendError>> {
+        let manager = self.manager.clone();
+        async move {
+            manager
+                .refresh_group(key.as_bytes())
+                .await
+                .map_err(presage_error)
         }
         .boxed_local()
     }
@@ -672,6 +712,7 @@ const ACK_FLUSH: Duration = Duration::from_millis(250);
 async fn relay(
     stream: impl Stream<Item = Received>,
     me: Aci,
+    server: &ServerPublicParams,
     items: mpsc::Sender<Incoming>,
     mut stop: oneshot::Receiver<()>,
 ) {
@@ -701,7 +742,7 @@ async fn relay(
             break;
         };
         last_read = Some(Instant::now());
-        if let Some(item) = incoming(received, me)
+        if let Some(item) = incoming(received, me, server)
             && items.send(item).await.is_err()
         {
             break;
@@ -757,7 +798,7 @@ fn proto_quote(quote: Quote, me: uuid::Uuid) -> data_message::Quote {
 mod tests {
 
     use super::*;
-    use crate::signal::incoming::tests::{OTHER, SENDER, content, text};
+    use crate::signal::incoming::tests::{OTHER, SENDER, content, server, text};
 
     #[test]
     fn sent_quotes_name_their_author() {
@@ -839,7 +880,13 @@ mod tests {
             (arrived, start.elapsed())
         };
         let ((), (), relayed) = tokio::join!(
-            relay(stream, Aci::from(uuid::Uuid::nil()), items_tx, stop_rx),
+            relay(
+                stream,
+                Aci::from(uuid::Uuid::nil()),
+                server(),
+                items_tx,
+                stop_rx
+            ),
             stopper,
             collect
         );

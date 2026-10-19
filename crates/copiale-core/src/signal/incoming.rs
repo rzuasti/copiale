@@ -15,6 +15,7 @@ use presage::libsignal_service::proto::{
 use presage::libsignal_service::protocol::{
     Aci, ContentHint, IdentityKey as SignalIdentityKey, ServiceId as SignalServiceId,
 };
+use presage::libsignal_service::zkgroup::{NotarySignatureBytes, ServerPublicParams};
 use presage::model::messages::Received;
 
 use crate::backend::{Incoming, RetryRequest, Undecryptable};
@@ -25,8 +26,13 @@ use crate::model::{
 };
 
 /// What the core cares about so far; everything else is dropped, as are
-/// sync messages from anyone but `me`.
-pub(super) fn incoming(received: Received, me: Aci) -> Option<Incoming> {
+/// sync messages from anyone but `me`. Group changes must be signed by
+/// `server`.
+pub(super) fn incoming(
+    received: Received,
+    me: Aci,
+    server: &ServerPublicParams,
+) -> Option<Incoming> {
     match received {
         Received::QueueEmpty => Some(Incoming::QueueEmpty),
         Received::Content(content)
@@ -38,8 +44,8 @@ pub(super) fn incoming(received: Received, me: Aci) -> Option<Incoming> {
         }
         Received::Content(content) => signal(&content)
             .or_else(|| message_change(&content).map(Incoming::Change))
-            .or_else(|| received_message(&content).map(Incoming::Message))
-            .or_else(|| sent_message(&content).map(Incoming::Sent)),
+            .or_else(|| received_message(&content, server).map(Incoming::Message))
+            .or_else(|| sent_message(&content, server).map(Incoming::Sent)),
         Received::Contacts => Some(Incoming::ContactsSynced),
         Received::DecryptionError(failure) => {
             Some(Incoming::Undecryptable(undecryptable(&failure)))
@@ -231,7 +237,7 @@ fn message_author(message: &AddressableMessage) -> Option<ServiceId> {
 }
 
 /// A message from another account, 1:1 or in a group, or a call to it.
-fn received_message(content: &Content) -> Option<IncomingMessage> {
+fn received_message(content: &Content, server: &ServerPublicParams) -> Option<IncomingMessage> {
     let (group, timestamp, message, expire_timer) = match &content.body {
         ContentBody::DataMessage(message) => {
             let group = match &message.group_v2 {
@@ -241,7 +247,7 @@ fn received_message(content: &Content) -> Option<IncomingMessage> {
             let timestamp = message
                 .timestamp
                 .unwrap_or_else(|| client_timestamp(content));
-            let content = data_content(message, group)?;
+            let content = data_content(message, group, Some(server))?;
             (group, timestamp, content, expire_timer(message))
         }
         ContentBody::CallMessage(CallMessage {
@@ -263,14 +269,14 @@ fn received_message(content: &Content) -> Option<IncomingMessage> {
 }
 
 /// A message this account sent from another device, 1:1 or in a group.
-fn sent_message(content: &Content) -> Option<SentMessage> {
+fn sent_message(content: &Content, server: &ServerPublicParams) -> Option<SentMessage> {
     let sent = sync_sent(content)?;
     let message = sent.message.as_ref()?;
     let destination = sent_destination(sent, message)?;
     Some(SentMessage {
         destination,
         timestamp: Timestamp::from_millis(sent.timestamp?),
-        content: data_content(message, group_of(destination))?,
+        content: data_content(message, group_of(destination), Some(server))?,
         expire_timer: expire_timer(message),
     })
 }
@@ -338,7 +344,7 @@ fn message_change(content: &Content) -> Option<MessageChange> {
         }) => {
             let destination = in_conversation(message)?;
             let edit = Change::Edit {
-                content: data_content(message, group_of(destination))?,
+                content: edited_content(message)?,
                 at: Timestamp::from_millis(
                     message
                         .timestamp
@@ -356,7 +362,7 @@ fn message_change(content: &Content) -> Option<MessageChange> {
             {
                 let destination = sent_destination(sent, message)?;
                 let edit = Change::Edit {
-                    content: data_content(message, group_of(destination))?,
+                    content: edited_content(message)?,
                     at: Timestamp::from_millis(message.timestamp.or(sent.timestamp)?),
                 };
                 (destination, None, *target, edit)
@@ -381,17 +387,31 @@ fn message_change(content: &Content) -> Option<MessageChange> {
     })
 }
 
+/// What an edit changes a message to: text only, never a system line.
+fn edited_content(message: &DataMessage) -> Option<model::Content> {
+    match data_content(message, None, None)? {
+        text @ model::Content::Text { .. } => Some(text),
+        _ => None,
+    }
+}
+
 /// What a data message shows; `None` for ones that show nothing, such as
-/// receipts of edits, deletes and votes, which later issues handle.
-fn data_content(message: &DataMessage, group: Option<GroupRef>) -> Option<model::Content> {
-    if let (Some(group), Some(change)) = (
+/// receipts of edits, deletes and votes, which later issues handle. Group
+/// changes are read only with `group` and `server`.
+fn data_content(
+    message: &DataMessage,
+    group: Option<GroupRef>,
+    server: Option<&ServerPublicParams>,
+) -> Option<model::Content> {
+    if let (Some(group), Some(server), Some(change)) = (
         group,
+        server,
         message
             .group_v2
             .as_ref()
             .and_then(|context| context.group_change.as_deref()),
     ) {
-        let updates = group_updates(group.key, change)?;
+        let updates = group_updates(group, change, server)?;
         return (!updates.is_empty()).then_some(model::Content::GroupChanged(updates));
     }
     let flags = message.flags.unwrap_or(0);
@@ -490,11 +510,22 @@ pub(super) fn quote(quote: &data_message::Quote) -> Option<Quote> {
     })
 }
 
-/// The changes in an encrypted group change; `None` if it can't be read.
-fn group_updates(key: GroupMasterKey, change: &[u8]) -> Option<Vec<GroupUpdate>> {
+/// The changes in an encrypted group change; `None` if it can't be read,
+/// isn't signed by `server`, or isn't `group`'s at its revision.
+fn group_updates(
+    group: GroupRef,
+    change: &[u8],
+    server: &ServerPublicParams,
+) -> Option<Vec<GroupUpdate>> {
     let change = proto::GroupChange::decode(change).ok()?;
+    let signed = NotarySignatureBytes::try_from(change.server_signature.as_slice())
+        .is_ok_and(|signature| server.verify_signature(&change.actions, signature).is_ok());
+    if !signed {
+        tracing::warn!("dropped a group change not signed by the server");
+        return None;
+    }
     let params = GroupSecretParams::derive_from_master_key(
-        presage::libsignal_service::prelude::GroupMasterKey::new(*key.as_bytes()),
+        presage::libsignal_service::prelude::GroupMasterKey::new(*group.key.as_bytes()),
     );
     let changes = match GroupOperations::new(params).decrypt_group_change(change) {
         Ok(changes) => changes,
@@ -503,6 +534,10 @@ fn group_updates(key: GroupMasterKey, change: &[u8]) -> Option<Vec<GroupUpdate>>
             return None;
         }
     };
+    if changes.group_id != *group.key.id().as_bytes() || changes.version != group.revision {
+        tracing::warn!("dropped a group change of another group or revision");
+        return None;
+    }
     let editor = changes.editor;
     let mut updates: Vec<_> = changes
         .changes
@@ -581,10 +616,23 @@ pub(super) mod tests {
     use chrono::{TimeZone as _, Utc};
     use presage::libsignal_service::groups_v2::Timer;
     use presage::libsignal_service::proto::{call_message, group_change, sync_message};
+    use std::sync::LazyLock;
+
     use presage::libsignal_service::protocol::DeviceId;
+    use presage::libsignal_service::zkgroup::ServerSecretParams;
     use uuid::Uuid;
 
     use super::*;
+
+    /// The test server, which signs group changes.
+    static SERVER: LazyLock<ServerSecretParams> =
+        LazyLock::new(|| ServerSecretParams::generate([7; 32]));
+    static SERVER_PUBLIC: LazyLock<ServerPublicParams> =
+        LazyLock::new(|| SERVER.get_public_params());
+
+    pub(in crate::signal) fn server() -> &'static ServerPublicParams {
+        &SERVER_PUBLIC
+    }
 
     pub(in crate::signal) const SENDER: Uuid = Uuid::from_u128(0x1234);
     pub(in crate::signal) const OTHER: Uuid = Uuid::from_u128(0x4321);
@@ -612,7 +660,7 @@ pub(super) mod tests {
     }
 
     fn data(message: DataMessage) -> Option<model::Content> {
-        received_message(&content(ContentBody::DataMessage(message))).map(|m| m.content)
+        received_message(&content(ContentBody::DataMessage(message)), server()).map(|m| m.content)
     }
 
     pub(in crate::signal) fn text(body: &str, timestamp: Option<u64>) -> ContentBody {
@@ -654,7 +702,9 @@ pub(super) mod tests {
                 expire_timer: Some(seconds),
                 ..Default::default()
             });
-            received_message(&content(body)).unwrap().expire_timer
+            received_message(&content(body), server())
+                .unwrap()
+                .expire_timer
         };
         assert_eq!(timed(3600), Some(3600));
         assert_eq!(timed(0), None);
@@ -669,12 +719,15 @@ pub(super) mod tests {
             }),
             ..Default::default()
         });
-        assert_eq!(sent_message(&content(body)).unwrap().expire_timer, Some(60));
+        assert_eq!(
+            sent_message(&content(body), server()).unwrap().expire_timer,
+            Some(60)
+        );
     }
 
     #[test]
     fn falls_back_to_client_timestamp() {
-        let message = received_message(&content(text("hi", None))).unwrap();
+        let message = received_message(&content(text("hi", None)), server()).unwrap();
         assert_eq!(message.timestamp, Timestamp::from_millis(1_700_000_000_123));
     }
 
@@ -818,7 +871,7 @@ pub(super) mod tests {
                 }),
                 ..Default::default()
             });
-            received_message(&content(body)).map(|message| message.content)
+            received_message(&content(body), server()).map(|message| message.content)
         };
         assert_eq!(
             call(offer::Type::OfferAudioCall),
@@ -832,20 +885,20 @@ pub(super) mod tests {
             hangup: Some(call_message::Hangup::default()),
             ..Default::default()
         });
-        assert_eq!(received_message(&content(hangup)), None);
+        assert_eq!(received_message(&content(hangup), server()), None);
     }
 
     #[test]
     fn skips_messages_that_show_nothing() {
         let empty = ContentBody::DataMessage(DataMessage::default());
-        assert_eq!(received_message(&content(empty)), None);
+        assert_eq!(received_message(&content(empty), server()), None);
         let delete = DataMessage {
             delete: Some(data_message::Delete::default()),
             ..Default::default()
         };
         assert_eq!(data(delete), None);
         let typing = ContentBody::TypingMessage(TypingMessage::default());
-        assert_eq!(received_message(&content(typing)), None);
+        assert_eq!(received_message(&content(typing), server()), None);
     }
 
     fn group_context(key: Option<Vec<u8>>) -> Option<GroupContextV2> {
@@ -864,7 +917,7 @@ pub(super) mod tests {
             ..Default::default()
         });
 
-        let message = received_message(&content(body)).unwrap();
+        let message = received_message(&content(body), server()).unwrap();
 
         assert_eq!(message.sender, ServiceId::new(SENDER));
         assert_eq!(
@@ -884,13 +937,13 @@ pub(super) mod tests {
                 group_v2: group_context(key),
                 ..Default::default()
             });
-            assert_eq!(received_message(&content(body)), None);
+            assert_eq!(received_message(&content(body), server()), None);
         }
     }
 
-    /// An encrypted group change by `editor` renaming the group and
-    /// removing [`OTHER`].
-    fn encrypted_change(editor: Uuid, title: &str) -> Vec<u8> {
+    /// The actions of a group change by `editor` at revision 4, renaming
+    /// the group and removing [`OTHER`].
+    fn change_actions(editor: Uuid, title: &str) -> group_change::Actions {
         let params = GroupSecretParams::derive_from_master_key(
             presage::libsignal_service::prelude::GroupMasterKey::new(KEY),
         );
@@ -898,7 +951,7 @@ pub(super) mod tests {
             let id = SignalServiceId::from(Aci::from(uuid));
             presage::libsignal_service::zkgroup::serialize(&params.encrypt_service_id(id))
         };
-        let actions = group_change::Actions {
+        group_change::Actions {
             group_id: params.get_group_identifier().to_vec(),
             source_user_id: encrypt(editor),
             version: 4,
@@ -909,27 +962,38 @@ pub(super) mod tests {
                 deleted_user_id: encrypt(OTHER),
             }],
             ..Default::default()
-        };
+        }
+    }
+
+    /// `actions` as a group change signed by the test server.
+    fn signed(actions: &group_change::Actions) -> Vec<u8> {
+        let actions = actions.encode_to_vec();
         proto::GroupChange {
-            actions: actions.encode_to_vec(),
+            server_signature: SERVER.sign([3; 32], &actions).to_vec(),
+            actions,
             ..Default::default()
         }
         .encode_to_vec()
     }
 
-    #[test]
-    fn group_changes_become_updates() {
-        let message = DataMessage {
+    /// A group message at `revision` carrying `change`.
+    fn with_change(revision: u32, change: Vec<u8>) -> DataMessage {
+        DataMessage {
             group_v2: Some(GroupContextV2 {
                 master_key: Some(KEY.to_vec()),
-                revision: Some(4),
-                group_change: Some(encrypted_change(SENDER, "Dev team")),
+                revision: Some(revision),
+                group_change: Some(change),
             }),
             ..Default::default()
-        };
+        }
+    }
+
+    #[test]
+    fn group_changes_become_updates() {
+        let change = signed(&change_actions(SENDER, "Dev team"));
 
         assert_eq!(
-            data(message),
+            data(with_change(4, change)),
             Some(model::Content::GroupChanged(vec![
                 GroupUpdate::Removed(ServiceId::new(OTHER)),
                 GroupUpdate::Title("Dev team".into()),
@@ -939,15 +1003,87 @@ pub(super) mod tests {
 
     #[test]
     fn unreadable_group_changes_are_skipped() {
-        let message = DataMessage {
-            group_v2: Some(GroupContextV2 {
-                master_key: Some(KEY.to_vec()),
-                revision: Some(4),
-                group_change: Some(vec![1, 2, 3]),
+        assert_eq!(data(with_change(4, vec![1, 2, 3])), None);
+    }
+
+    #[test]
+    fn group_changes_not_signed_by_the_server_are_skipped() {
+        let actions = change_actions(SENDER, "Pwned");
+        let unsigned = proto::GroupChange {
+            actions: actions.encode_to_vec(),
+            ..Default::default()
+        };
+        let forged = proto::GroupChange {
+            server_signature: vec![7; 64],
+            ..unsigned.clone()
+        };
+        let other_server = ServerSecretParams::generate([8; 32]);
+        let foreign = proto::GroupChange {
+            server_signature: other_server.sign([3; 32], &unsigned.actions).to_vec(),
+            ..unsigned.clone()
+        };
+        let tampered = proto::GroupChange {
+            actions: change_actions(SENDER, "Pwned!").encode_to_vec(),
+            ..proto::GroupChange::decode(signed(&actions).as_slice()).unwrap()
+        };
+
+        for change in [unsigned, forged, foreign, tampered] {
+            assert_eq!(data(with_change(4, change.encode_to_vec())), None);
+        }
+    }
+
+    #[test]
+    fn group_changes_of_another_revision_or_group_are_skipped() {
+        let change = signed(&change_actions(SENDER, "Dev team"));
+        assert_eq!(data(with_change(5, change)), None);
+
+        let elsewhere = group_change::Actions {
+            group_id: GroupMasterKey::new([8; 32]).id().as_bytes().to_vec(),
+            ..change_actions(SENDER, "Dev team")
+        };
+        assert_eq!(data(with_change(4, signed(&elsewhere))), None);
+    }
+
+    #[test]
+    fn edits_are_text_only() {
+        let edit = |message: DataMessage| {
+            received(ContentBody::EditMessage(EditMessage {
+                target_sent_timestamp: Some(40),
+                data_message: Some(DataMessage {
+                    timestamp: Some(45),
+                    ..message
+                }),
+            }))
+        };
+        let change = DataMessage {
+            body: Some("hi".into()),
+            ..with_change(4, signed(&change_actions(SENDER, "Dev team")))
+        };
+        let timer = DataMessage {
+            flags: Some(data_message::Flags::ExpirationTimerUpdate as u32),
+            expire_timer: Some(60),
+            ..Default::default()
+        };
+        let reaction = DataMessage {
+            reaction: Some(data_message::Reaction {
+                emoji: Some("👍".into()),
+                ..Default::default()
             }),
             ..Default::default()
         };
-        assert_eq!(data(message), None);
+
+        let Some(Incoming::Change(edited)) = edit(change) else {
+            panic!("a text edit in a group");
+        };
+        assert_eq!(
+            edited.change,
+            Change::Edit {
+                content: model::Content::text("hi"),
+                at: Timestamp::from_millis(45),
+            }
+        );
+        assert_eq!(edit(timer), None);
+        assert_eq!(edit(reaction), None);
     }
 
     #[test]
@@ -1009,14 +1145,22 @@ pub(super) mod tests {
     }
 
     fn received(body: ContentBody) -> Option<Incoming> {
-        incoming(Received::Content(Box::new(content(body))), Aci::from(ME))
+        incoming(
+            Received::Content(Box::new(content(body))),
+            Aci::from(ME),
+            server(),
+        )
     }
 
     /// `body` as sent by another of this account's devices.
     fn synced(body: ContentBody) -> Option<Incoming> {
         let mut content = content(body);
         content.metadata.sender = Aci::from(ME).into();
-        incoming(Received::Content(Box::new(content)), Aci::from(ME))
+        incoming(
+            Received::Content(Box::new(content)),
+            Aci::from(ME),
+            server(),
+        )
     }
 
     #[test]
@@ -1447,7 +1591,11 @@ pub(super) mod tests {
             let mut own_pni = content(body.clone());
             own_pni.metadata.sender = Pni::from(ME).into();
             assert_eq!(
-                incoming(Received::Content(Box::new(own_pni)), Aci::from(ME)),
+                incoming(
+                    Received::Content(Box::new(own_pni)),
+                    Aci::from(ME),
+                    server()
+                ),
                 None,
                 "{body:?}"
             );
@@ -1458,11 +1606,11 @@ pub(super) mod tests {
     fn maps_queue_empty_and_contacts() {
         let me = Aci::from(ME);
         assert_eq!(
-            incoming(Received::QueueEmpty, me),
+            incoming(Received::QueueEmpty, me, server()),
             Some(Incoming::QueueEmpty)
         );
         assert_eq!(
-            incoming(Received::Contacts, me),
+            incoming(Received::Contacts, me, server()),
             Some(Incoming::ContactsSynced)
         );
     }
@@ -1495,6 +1643,7 @@ pub(super) mod tests {
         let Some(Incoming::Undecryptable(failed)) = incoming(
             failure(ContentHint::Resendable, Some(vec![4; 32])),
             Aci::from(ME),
+            server(),
         ) else {
             panic!("not mapped");
         };
@@ -1513,6 +1662,7 @@ pub(super) mod tests {
         let Some(Incoming::Undecryptable(failed)) = incoming(
             failure(ContentHint::Implicit, Some(vec![4; 3])),
             Aci::from(ME),
+            server(),
         ) else {
             panic!("not mapped");
         };
@@ -1533,7 +1683,7 @@ pub(super) mod tests {
         };
 
         assert_eq!(
-            incoming(request, Aci::from(ME)),
+            incoming(request, Aci::from(ME), server()),
             Some(Incoming::RetryRequested {
                 sender: ServiceId::new(SENDER),
                 device: 3,
@@ -1594,7 +1744,7 @@ pub(super) mod tests {
             ..Default::default()
         });
 
-        let sent = sent_message(&content(body)).unwrap();
+        let sent = sent_message(&content(body), server()).unwrap();
         assert_eq!(
             sent.destination,
             Destination::Contact(ServiceId::new(RECIPIENT))
@@ -1609,7 +1759,7 @@ pub(super) mod tests {
             ..Default::default()
         });
 
-        let sent = sent_message(&content(body)).unwrap();
+        let sent = sent_message(&content(body), server()).unwrap();
 
         assert_eq!(
             sent.destination,
@@ -1628,6 +1778,6 @@ pub(super) mod tests {
             ..Default::default()
         });
 
-        assert_eq!(sent_message(&content(no_recipient)), None);
+        assert_eq!(sent_message(&content(no_recipient), server()), None);
     }
 }

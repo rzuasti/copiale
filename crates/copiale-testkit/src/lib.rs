@@ -8,9 +8,9 @@ use std::time::Duration;
 
 use copiale_core::storage::{Database, SecretError, SecretStore};
 use copiale_core::{
-    BackendError, Clock, Contact, Destination, GroupInfo, GroupMasterKey, IdentityKey, Incoming,
-    Linker, MessageBody, Outgoing, PeerIdentity, Resendable, RetryRequest, SafetyNumber, ServiceId,
-    SignalBackend, Timestamp,
+    BackendError, Clock, Contact, Destination, GroupInfo, GroupMasterKey, GroupMembers,
+    IdentityKey, Incoming, Linker, MessageBody, Outgoing, PeerIdentity, Resendable, RetryRequest,
+    SafetyNumber, ServiceId, SignalBackend, Timestamp,
 };
 use futures::future::LocalBoxFuture;
 use futures::stream::LocalBoxStream;
@@ -112,7 +112,13 @@ struct State {
     sends_started: usize,
     send_failures: VecDeque<BackendError>,
     contact_sync_requests: usize,
+    /// Stored group states.
     groups: HashMap<GroupMasterKey, GroupInfo>,
+    /// Groups this account isn't a member of.
+    groups_left: HashSet<GroupMasterKey>,
+    /// Group states on the server, stored once fetched.
+    server_groups: HashMap<GroupMasterKey, GroupInfo>,
+    group_fetches: usize,
     /// Profile names, known once fetched.
     profile_names: HashMap<ServiceId, String>,
     profiles_fetched: HashSet<ServiceId>,
@@ -445,6 +451,55 @@ impl SignalBackend for FakeBackend {
         .boxed_local()
     }
 
+    /// The scripted group's members and this account, unless it left.
+    fn group_members(
+        &mut self,
+        key: GroupMasterKey,
+    ) -> LocalBoxFuture<'static, Result<Option<GroupMembers>, BackendError>> {
+        let state = self.state.clone();
+        async move {
+            let state = state.lock().unwrap();
+            let Some(info) = state.groups.get(&key) else {
+                return Ok(None);
+            };
+            let mut members: Vec<_> = info.members.iter().map(|member| member.id).collect();
+            if !state.groups_left.contains(&key) {
+                members.push(service_id(OWN_ID));
+            }
+            Ok(Some(GroupMembers {
+                revision: info.revision,
+                members,
+            }))
+        }
+        .boxed_local()
+    }
+
+    /// Stores the server's state of the group; fails while offline, and
+    /// without one.
+    fn refresh_group(
+        &mut self,
+        key: GroupMasterKey,
+    ) -> LocalBoxFuture<'static, Result<(), BackendError>> {
+        let (state, changes) = (self.state.clone(), self.changes.clone());
+        let offline = self.link.borrow().offline;
+        async move {
+            if offline {
+                return Err(BackendError::network("offline"));
+            }
+            record(&state, &changes, |state| {
+                state.group_fetches += 1;
+                let info = state
+                    .server_groups
+                    .get(&key)
+                    .cloned()
+                    .ok_or_else(|| BackendError::new("not a member"))?;
+                state.groups.insert(key, info);
+                Ok(())
+            })
+        }
+        .boxed_local()
+    }
+
     /// Fails while offline.
     fn fetch_member_profiles(
         &mut self,
@@ -583,6 +638,22 @@ impl FakeNetwork {
     /// contact names, if any.
     pub fn set_group(&self, key: GroupMasterKey, info: GroupInfo) {
         self.state.lock().unwrap().groups.insert(key, info);
+    }
+
+    /// Sets the group state on the server, stored once the backend fetches
+    /// it.
+    pub fn set_server_group(&self, key: GroupMasterKey, info: GroupInfo) {
+        self.state.lock().unwrap().server_groups.insert(key, info);
+    }
+
+    /// Takes this account out of the group's stored state.
+    pub fn leave_group(&self, key: GroupMasterKey) {
+        self.state.lock().unwrap().groups_left.insert(key);
+    }
+
+    /// Groups fetched from the server so far.
+    pub fn group_fetches(&self) -> usize {
+        self.state.lock().unwrap().group_fetches
     }
 
     /// Gives an account a profile name, known once fetched.

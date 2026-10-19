@@ -450,6 +450,15 @@ pub struct GroupInfo {
     pub members: Vec<Member>,
 }
 
+/// Who is in a group, as last fetched.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GroupMembers {
+    pub revision: u32,
+    /// Full members, this account included if it is one; invited ones and
+    /// those asking to join are left out.
+    pub members: Vec<ServiceId>,
+}
+
 /// A group member. `Debug` hides the name.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Member {

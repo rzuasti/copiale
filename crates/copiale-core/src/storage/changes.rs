@@ -199,8 +199,9 @@ pub(super) async fn apply_pending(
     Ok(load_message(tx, message.id).await?.unwrap_or(message))
 }
 
-/// Applies `change` to a stored message; `false` if it doesn't apply, e.g.
-/// an edit of a deleted message or an older edit than the stored one.
+/// Applies `change` to a stored message; `false` if it doesn't apply: an
+/// edit to or of anything but text, e.g. a deleted message or a system
+/// line, or an older edit than the stored one.
 async fn update(
     tx: &mut sqlx::SqliteConnection,
     id: MessageId,
@@ -218,18 +219,21 @@ async fn update(
             .execute(&mut *tx)
             .await
         }
+        Change::Edit { content, .. } if !matches!(content, Content::Text { .. }) => {
+            return Ok(false);
+        }
         Change::Edit { content, at } => {
             let (body, content) = content_columns(content)?;
+            // Only text is edited: plain, or kept as JSON.
             sqlx::query(
                 "UPDATE messages SET body = ?1, content = ?2, edited_at = ?3
-                 WHERE id = ?4 AND coalesce(content, '') != ?5
+                 WHERE id = ?4 AND (content IS NULL OR json_type(content, '$.text') IS NOT NULL)
                    AND (edited_at IS NULL OR edited_at < ?3)",
             )
             .bind(body)
             .bind(content)
             .bind(millis(*at))
             .bind(id.get())
-            .bind(&deleted)
             .execute(&mut *tx)
             .await
         }
@@ -249,7 +253,7 @@ fn json(content: &Content) -> Result<String, StorageError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{GroupMasterKey, GroupRef, MessageBody, Quote};
+    use crate::model::{GroupMasterKey, GroupRef, GroupUpdate, MessageBody, Quote};
     use crate::storage::testing::{at, db, peer};
 
     async fn incoming(db: &Database, from: u128, sent_at: u64, body: &str) -> Option<Message> {
@@ -311,6 +315,43 @@ mod tests {
         assert_eq!(stale, None);
         let stored = db.messages(original.conversation, None, 10).await.unwrap();
         assert_eq!(stored, [again]);
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn only_text_is_edited_and_only_into_text() {
+        let (_dir, db) = db().await;
+        let line = db
+            .add_message(
+                &Destination::Contact(peer(1)),
+                Some(peer(1)),
+                at(100),
+                &Content::TimerChanged(Some(60)),
+                None,
+                Timestamp::from_millis(0),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let text = incoming(&db, 1, 101, "hi").await.unwrap();
+
+        let into_text = db
+            .apply_change(&change(1, 100, edit("removed you", 200)), at(0))
+            .await
+            .unwrap();
+        assert_eq!(into_text, None);
+        let into_line = Change::Edit {
+            content: Content::GroupChanged(vec![GroupUpdate::Left]),
+            at: at(200),
+        };
+        let line_edit = db
+            .apply_change(&change(1, 101, into_line), at(0))
+            .await
+            .unwrap();
+        assert_eq!(line_edit, None);
+
+        let stored = db.messages(text.conversation, None, 10).await.unwrap();
+        assert_eq!(stored, [line, text]);
         db.close().await;
     }
 

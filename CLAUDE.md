@@ -50,6 +50,10 @@ went unsolved until 2011.
     shared chat; sends to a key replacing one verified on the phone are
     refused until the user confirms it (`signal::protocol`). Verified state
     comes only from the phone's verified syncs.
+  - Groups: messages, edits and deletes kept only from members of the
+    group as last fetched, with this account in it (one fetch first on a
+    mismatch); group change lines only from server-signed changes newer
+    than the stored group. Edits are text only.
   - No telemetry.
   - No core dumps (`copiale_core::hardening`); key and passphrase copies
     left in memory are listed in `docs/security.md`.

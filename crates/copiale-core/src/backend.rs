@@ -7,9 +7,9 @@ use futures::stream::LocalBoxStream;
 use tokio::sync::oneshot;
 
 use crate::model::{
-    ChatRef, Destination, GroupId, GroupInfo, GroupMasterKey, IdentityKey, IncomingMessage,
-    MessageChange, MessageRef, Outgoing, ReceiptKind, SafetyNumber, SentMessage, ServiceId,
-    Timestamp,
+    ChatRef, Destination, GroupId, GroupInfo, GroupMasterKey, GroupMembers, IdentityKey,
+    IncomingMessage, MessageChange, MessageRef, Outgoing, ReceiptKind, SafetyNumber, SentMessage,
+    ServiceId, Timestamp,
 };
 use crate::storage::Database;
 
@@ -287,6 +287,20 @@ pub trait SignalBackend {
     /// name yet; [`Self::group`] then has their names. Doesn't borrow the
     /// backend.
     fn fetch_member_profiles(
+        &mut self,
+        key: GroupMasterKey,
+    ) -> LocalBoxFuture<'static, Result<(), BackendError>>;
+
+    /// Who is in the group as last fetched; `None` if the group is unknown.
+    /// Doesn't use the network, nor borrow the backend.
+    fn group_members(
+        &mut self,
+        key: GroupMasterKey,
+    ) -> LocalBoxFuture<'static, Result<Option<GroupMembers>, BackendError>>;
+
+    /// Fetches the group's state from the server, for [`Self::group`] and
+    /// [`Self::group_members`]. Doesn't borrow the backend.
+    fn refresh_group(
         &mut self,
         key: GroupMasterKey,
     ) -> LocalBoxFuture<'static, Result<(), BackendError>>;

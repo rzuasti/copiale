@@ -55,6 +55,10 @@ libsignal-service git hash back to `nix/package.nix`.
     messages not sent by this account's ACI; any account could otherwise
     overwrite contacts and keys or set disappearing timers.
     Upstream PR: [whisperfish/presage#467](https://github.com/whisperfish/presage/pull/467).
+  - `patches/presage-refresh-group.patch`. `Manager::refresh_group`
+    fetches and stores a group's state whatever revision is stored, to
+    check a sender missing from it before dropping their message.
+    Upstream PR: [whisperfish/presage#468](https://github.com/whisperfish/presage/pull/468).
 - **Used via:** `[patch."https://github.com/whisperfish/presage"]` in the
   root `Cargo.toml`.
 

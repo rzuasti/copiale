@@ -30,8 +30,8 @@ pub use dirs::{create_private_dir, runtime_dir};
 pub use model::{
     Account, AccountSettings, Attachment, Change, ChatRef, Contact, Content, ConversationId,
     ConversationSummary, Destination, Direction, Expiry, GroupId, GroupInfo, GroupMasterKey,
-    GroupRef, GroupUpdate, Identity, IdentityKey, IncomingMessage, Member, Message, MessageBody,
-    MessageChange, MessageId, MessagePreview, MessageRef, MessageStatus, Outgoing, Peer,
-    PhoneNumber, Quote, ReceiptKind, SafetyNumber, SentMessage, ServiceId, Timestamp, Unsupported,
-    Verification,
+    GroupMembers, GroupRef, GroupUpdate, Identity, IdentityKey, IncomingMessage, Member, Message,
+    MessageBody, MessageChange, MessageId, MessagePreview, MessageRef, MessageStatus, Outgoing,
+    Peer, PhoneNumber, Quote, ReceiptKind, SafetyNumber, SentMessage, ServiceId, Timestamp,
+    Unsupported, Verification,
 };

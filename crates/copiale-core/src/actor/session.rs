@@ -20,9 +20,9 @@ use crate::backend::{BackendError, Incoming, SignalBackend, Undecryptable};
 use crate::clock::Clock;
 use crate::model::{
     Account, AccountSettings, Change, ChatRef, Content, ConversationId, Destination, GroupId,
-    GroupRef, Identity, IdentityKey, IncomingMessage, Message, MessageBody, MessageChange,
-    MessageId, MessageRef, MessageStatus, Outgoing, Peer, Quote, ReceiptKind, SentMessage,
-    ServiceId, Timestamp, Verification,
+    GroupMasterKey, GroupRef, Identity, IdentityKey, IncomingMessage, Message, MessageBody,
+    MessageChange, MessageId, MessageRef, MessageStatus, Outgoing, Peer, Quote, ReceiptKind,
+    SentMessage, ServiceId, Timestamp, Verification,
 };
 use crate::storage::{Database, StorageError};
 
@@ -794,6 +794,13 @@ impl<'a, B: SignalBackend> Session<'a, B> {
     }
 
     async fn message_received(&mut self, mut message: IncomingMessage) {
+        if let Some(group) = message.group
+            && !self
+                .group_accepts(group, Some(message.sender), &message.content)
+                .await
+        {
+            return;
+        }
         let destination = message
             .group
             .map_or(Destination::Contact(message.sender), Destination::Group);
@@ -813,6 +820,11 @@ impl<'a, B: SignalBackend> Session<'a, B> {
 
     /// Stores our message sent from another device.
     async fn sent_elsewhere(&mut self, mut message: SentMessage) {
+        if let Destination::Group(group) = message.destination
+            && !self.group_accepts(group, None, &message.content).await
+        {
+            return;
+        }
         own_quotes(&mut message.content, self.backend.own_id());
         self.store(
             &message.destination,
@@ -828,6 +840,11 @@ impl<'a, B: SignalBackend> Session<'a, B> {
     }
 
     async fn change_received(&mut self, mut change: MessageChange) {
+        if let Destination::Group(group) = change.destination
+            && !self.in_group(group, change.author).await
+        {
+            return;
+        }
         if let Change::Edit { content, .. } = &mut change.change {
             own_quotes(content, self.backend.own_id());
         }
@@ -1314,6 +1331,70 @@ impl<'a, B: SignalBackend> Session<'a, B> {
             }
             Ok(_) => {}
             Err(error) => self.database_error(error),
+        }
+    }
+
+    /// Whether a message by `author` (`None` for this account) belongs in
+    /// `group`: see [`Self::in_group`]. A group change must also be newer
+    /// than the stored group, so it isn't shown twice.
+    async fn group_accepts(
+        &mut self,
+        group: GroupRef,
+        author: Option<ServiceId>,
+        content: &Content,
+    ) -> bool {
+        if !self.in_group(group, author).await {
+            return false;
+        }
+        if !matches!(content, Content::GroupChanged(_)) {
+            return true;
+        }
+        match self.db.group_revision(group.key).await {
+            Ok(Some(Some(stored))) if stored >= group.revision => {
+                tracing::info!(group = ?group.key.id(), "dropped an old group change");
+                false
+            }
+            Ok(_) => true,
+            Err(error) => {
+                self.database_error(error);
+                false
+            }
+        }
+    }
+
+    /// Whether `author` (`None` for this account) and this account are
+    /// members of `group` as last fetched. If not, fetches it once and
+    /// checks again: the stored state may be older than the message.
+    async fn in_group(&mut self, group: GroupRef, author: Option<ServiceId>) -> bool {
+        let me = self.backend.own_id();
+        let author = author.unwrap_or(me);
+        if self.has_members(group.key, &[author, me]).await {
+            return true;
+        }
+        if self.groups.may_fetch(group.key, Instant::now()) {
+            let timeout = self.core.options.connect_timeout;
+            match timed(timeout, self.backend.refresh_group(group.key)).await {
+                Ok(()) if self.has_members(group.key, &[author, me]).await => return true,
+                Ok(()) => {}
+                Err(error) => tracing::info!(%error, "fetching a group failed"),
+            }
+        }
+        tracing::info!(
+            group = ?group.key.id(),
+            "dropped a group message: we or its author aren't members"
+        );
+        false
+    }
+
+    /// Whether the group's stored state has all of `members`.
+    async fn has_members(&mut self, key: GroupMasterKey, members: &[ServiceId]) -> bool {
+        match self.backend.group_members(key).await {
+            Ok(Some(group)) => members.iter().all(|member| group.members.contains(member)),
+            Ok(None) => false,
+            Err(error) => {
+                tracing::warn!(%error, "reading a group failed");
+                false
+            }
         }
     }
 

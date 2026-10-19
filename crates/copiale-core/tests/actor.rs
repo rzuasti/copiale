@@ -1562,6 +1562,14 @@ fn dev_group(revision: u32) -> GroupInfo {
     }
 }
 
+/// [`dev_group`] with every member named, so reading it needs no profiles.
+fn named_dev_group(revision: u32) -> GroupInfo {
+    GroupInfo {
+        members: vec![member(1, Some("Alice")), member(2, Some("Bob"))],
+        ..dev_group(revision)
+    }
+}
+
 /// Delivers a group message and returns its stored copy and conversation.
 async fn receive_in_group(
     running: &mut Running,
@@ -1631,8 +1639,10 @@ async fn group_is_fetched_again_only_for_a_newer_revision() {
 #[tokio::test]
 async fn same_time_from_two_members_is_two_messages() {
     let (_dir, mut running) = ready().await;
+    running.network.set_group(group_key(1), named_dev_group(0));
 
     let (first, _) = receive_in_group(&mut running, group_ref(1, 0), 1, 100).await;
+    conversation_updated(&mut running.events).await;
     let (second, _) = receive_in_group(&mut running, group_ref(1, 0), 2, 100).await;
 
     assert_eq!(first.conversation, second.conversation);
@@ -1668,6 +1678,7 @@ async fn text_sent_to_a_group_goes_to_the_group() {
 #[tokio::test]
 async fn group_message_sent_from_the_phone_is_stored_as_outgoing() {
     let (_dir, mut running) = ready().await;
+    running.network.set_group(group_key(1), named_dev_group(0));
 
     running.network.deliver(Incoming::Sent(SentMessage {
         destination: Destination::Group(group_ref(1, 0)),
@@ -1685,14 +1696,170 @@ async fn group_message_sent_from_the_phone_is_stored_as_outgoing() {
 }
 
 #[tokio::test]
-async fn unknown_group_keeps_working_without_a_title() {
+async fn messages_of_unknown_groups_are_dropped() {
     let (_dir, mut running) = ready().await;
 
-    let (_, summary) = receive_in_group(&mut running, group_ref(1, 0), 1, 100).await;
-    running.network.deliver(Incoming::QueueEmpty);
+    running
+        .network
+        .deliver(group_incoming(group_ref(1, 0), 1, 100, "hi all"));
+    running.network.deliver(Incoming::Sent(SentMessage {
+        destination: Destination::Group(group_ref(1, 0)),
+        timestamp: Timestamp::from_millis(200),
+        content: Content::text("from my phone"),
+        expire_timer: None,
+    }));
 
-    expect(&mut running.events, Event::Synced).await;
-    assert_eq!(summary.title, None);
+    assert_eq!(flush(&mut running).await, []);
+    // Fetched once in case it's just not stored yet.
+    assert_eq!(running.network.group_fetches(), 1);
+    send(&running, Command::LoadConversations);
+    expect(&mut running.events, Event::Conversations(Vec::new())).await;
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn messages_from_non_members_are_dropped() {
+    let (_dir, mut running) = ready().await;
+    running.network.set_group(group_key(1), named_dev_group(3));
+    running
+        .network
+        .set_server_group(group_key(1), named_dev_group(3));
+
+    running
+        .network
+        .deliver(group_incoming(group_ref(1, 3), 9, 100, "let me in"));
+    running
+        .network
+        .deliver(group_incoming(group_ref(1, 3), 9, 101, "please"));
+
+    assert_eq!(flush(&mut running).await, []);
+    assert_eq!(running.network.group_fetches(), 1);
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn new_members_are_found_by_fetching_the_group() {
+    let (_dir, mut running) = ready().await;
+    running.network.set_group(group_key(1), named_dev_group(3));
+    let joined = GroupInfo {
+        members: vec![
+            member(1, Some("Alice")),
+            member(2, Some("Bob")),
+            member(3, Some("Carol")),
+        ],
+        ..named_dev_group(4)
+    };
+    running.network.set_server_group(group_key(1), joined);
+
+    let (message, _) = receive_in_group(&mut running, group_ref(1, 4), 3, 100).await;
+
+    assert_eq!(message.sender, Some(service_id(3)));
+    assert_eq!(running.network.group_fetches(), 1);
+    let refreshed = conversation_updated(&mut running.events).await;
+    assert_eq!(refreshed.members.len(), 3);
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn removed_members_can_no_longer_post_edit_or_delete() {
+    let (_dir, mut running) = ready().await;
+    running.network.set_group(group_key(1), named_dev_group(3));
+    let (message, _) = receive_in_group(&mut running, group_ref(1, 3), 2, 100).await;
+    conversation_updated(&mut running.events).await;
+    let removed = GroupInfo {
+        members: vec![member(1, Some("Alice"))],
+        ..named_dev_group(4)
+    };
+    running.network.set_group(group_key(1), removed.clone());
+    running.network.set_server_group(group_key(1), removed);
+
+    let in_group = |change| {
+        Incoming::Change(MessageChange {
+            destination: Destination::Group(group_ref(1, 3)),
+            author: Some(service_id(2)),
+            target: Timestamp::from_millis(100),
+            change,
+        })
+    };
+    running.network.deliver(in_group(edit("still here", 150)));
+    running.network.deliver(in_group(Change::Delete));
+    running
+        .network
+        .deliver(group_incoming(group_ref(1, 3), 2, 200, "still here"));
+
+    assert_eq!(flush(&mut running).await, []);
+    send(
+        &running,
+        Command::LoadMessages {
+            conversation: message.conversation,
+            before: None,
+            limit: 10,
+        },
+    );
+    expect(
+        &mut running.events,
+        Event::Messages {
+            conversation: message.conversation,
+            before: None,
+            messages: vec![message],
+        },
+    )
+    .await;
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn groups_this_account_left_get_no_messages() {
+    let (_dir, mut running) = ready().await;
+    running.network.set_group(group_key(1), named_dev_group(3));
+    running.network.leave_group(group_key(1));
+
+    running
+        .network
+        .deliver(group_incoming(group_ref(1, 3), 1, 100, "hi all"));
+    running.network.deliver(Incoming::Sent(SentMessage {
+        destination: Destination::Group(group_ref(1, 3)),
+        timestamp: Timestamp::from_millis(200),
+        content: Content::text("from my phone"),
+        expire_timer: None,
+    }));
+
+    assert_eq!(flush(&mut running).await, []);
+    send(&running, Command::LoadConversations);
+    expect(&mut running.events, Event::Conversations(Vec::new())).await;
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn group_changes_are_shown_once() {
+    let (_dir, mut running) = ready().await;
+    running.network.set_group(group_key(1), named_dev_group(3));
+    let renamed = |revision| {
+        Incoming::Message(IncomingMessage {
+            sender: service_id(1),
+            group: Some(group_ref(1, revision)),
+            timestamp: Timestamp::from_millis(100 + u64::from(revision)),
+            content: Content::GroupChanged(vec![GroupUpdate::Title("Dev".into())]),
+            expire_timer: None,
+        })
+    };
+
+    running.network.deliver(renamed(3));
+    let line = message_added(&mut running.events).await;
+    assert!(matches!(line.content, Content::GroupChanged(_)));
+    conversation_updated(&mut running.events).await;
+    conversation_updated(&mut running.events).await;
+
+    // Replayed, at the stored revision.
+    running.network.deliver(renamed(3));
+    assert_eq!(flush(&mut running).await, []);
+
+    running.network.set_group(group_key(1), named_dev_group(4));
+    running.network.deliver(renamed(4));
+    assert!(matches!(
+        message_added(&mut running.events).await.content,
+        Content::GroupChanged(_)
+    ));
     stop(running).await;
 }
 
@@ -1729,6 +1896,7 @@ async fn synced_contacts_refresh_group_members() {
 #[tokio::test]
 async fn system_lines_and_reactions_arrive_read_but_calls_do_not() {
     let (_dir, mut running) = ready().await;
+    running.network.set_group(group_key(1), named_dev_group(0));
     let deliver = |content: Content, sent_at: u64| {
         Incoming::Message(IncomingMessage {
             sender: service_id(1),
@@ -1746,6 +1914,8 @@ async fn system_lines_and_reactions_arrive_read_but_calls_do_not() {
     let update = message_added(&mut running.events).await;
     assert!(update.read);
     assert_eq!(conversation_updated(&mut running.events).await.unread, 0);
+    // The group's state, stored.
+    conversation_updated(&mut running.events).await;
 
     running.network.deliver(deliver(
         Content::Reaction {
