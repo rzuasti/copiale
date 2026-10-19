@@ -1,7 +1,7 @@
-From ce4dcd2bb4869da0883d093ee7f8b36471a2fe24 Mon Sep 17 00:00:00 2001
+From b55709bed07287fefc1c7714d9697b0bd3a25610 Mon Sep 17 00:00:00 2001
 From: Ricardo Zuasti <rzuasti@pm.me>
 Date: Mon, 19 Oct 2026 10:28:46 -0400
-Subject: [PATCH] feat: retry requests for messages that fail to decrypt
+Subject: [PATCH 1/2] feat: retry requests for messages that fail to decrypt
 
 Signal clients recover messages that fail to decrypt with retry
 requests (DecryptionErrorMessage): the sender resends the message, and
@@ -32,7 +32,7 @@ Assisted-by: Claude Opus 5.5
  3 files changed, 436 insertions(+), 78 deletions(-)
 
 diff --git a/src/cipher.rs b/src/cipher.rs
-index ab291bf..fc225c0 100644
+index ab291bf92..fc225c09c 100644
 --- a/src/cipher.rs
 +++ b/src/cipher.rs
 @@ -7,7 +7,8 @@ use libsignal_protocol::{
@@ -437,7 +437,7 @@ index ab291bf..fc225c0 100644
  
  #[allow(clippy::too_many_arguments)]
 diff --git a/src/push_service/error.rs b/src/push_service/error.rs
-index a678785..50d8e40 100644
+index a67878584..50d8e40c1 100644
 --- a/src/push_service/error.rs
 +++ b/src/push_service/error.rs
 @@ -8,7 +8,7 @@ use serde::Deserialize;
@@ -460,7 +460,7 @@ index a678785..50d8e40 100644
      InvalidDeviceId(#[from] libsignal_core::InvalidDeviceId),
  
 diff --git a/src/sender.rs b/src/sender.rs
-index 3d68e86..acc308e 100644
+index 3d68e863b..acc308e51 100644
 --- a/src/sender.rs
 +++ b/src/sender.rs
 @@ -3,9 +3,9 @@ use std::{collections::HashSet, time::SystemTime};
@@ -700,6 +700,121 @@ index 3d68e86..acc308e 100644
  
          Ok(message)
      }
+-- 
+2.55.0
+
+
+From 7190afc770e576bd5e0aae64ee45930d9219c02e Mon Sep 17 00:00:00 2001
+From: Ricardo Zuasti <rzuasti@pm.me>
+Date: Mon, 19 Oct 2026 16:42:24 -0400
+Subject: [PATCH 2/2] test: cover building retry requests from decryption
+ failures
+
+Also formats encrypt_plaintext.
+
+Assisted-by: Claude Opus 5.5
+---
+ src/cipher.rs | 83 +++++++++++++++++++++++++++++++++++++++++++++++----
+ 1 file changed, 78 insertions(+), 5 deletions(-)
+
+diff --git a/src/cipher.rs b/src/cipher.rs
+index fc225c09c..591bfe0c2 100644
+--- a/src/cipher.rs
++++ b/src/cipher.rs
+@@ -725,11 +725,11 @@ where
+             .load_session(address)
+             .await?
+             .ok_or_else(|| {
+-                SignalProtocolError::SessionNotFound(SessionNotFound::new(
+-                    address.clone(),
+-                    "encrypt_plaintext",
+-                ))
+-            })?;
++            SignalProtocolError::SessionNotFound(SessionNotFound::new(
++                address.clone(),
++                "encrypt_plaintext",
++            ))
++        })?;
+         let destination_registration_id =
+             session_record.remote_registration_id()?;
+ 
+@@ -1142,3 +1142,76 @@ async fn sealed_sender_decrypt_with_validated_usmc(
+         message,
+     })
+ }
++
++#[cfg(test)]
++mod tests {
++    use libsignal_protocol::Aci;
++
++    use super::*;
++
++    fn failed(
++        ciphertext: &[u8],
++        message_type: CiphertextMessageType,
++    ) -> FailedMessage<'_> {
++        FailedMessage {
++            sender: Aci::from(Uuid::from_u128(1)).into(),
++            sender_device: DeviceId::new(2).unwrap(),
++            ciphertext,
++            message_type,
++            timestamp: 1234,
++            content_hint: ContentHint::Resendable,
++            group_id: Some(vec![7; 32]),
++        }
++    }
++
++    fn decrypt_error() -> SignalProtocolError {
++        SignalProtocolError::InvalidState("decrypt", "test".into())
++    }
++
++    #[test]
++    fn failures_carry_a_retry_request() {
++        let error = failed(&[], CiphertextMessageType::SenderKey)
++            .into_error(decrypt_error());
++
++        let ServiceError::DecryptionFailed(failure) = error else {
++            panic!("expected DecryptionFailed, got {error:?}");
++        };
++        assert_eq!(failure.sender, Aci::from(Uuid::from_u128(1)));
++        assert_eq!(failure.sender_device, DeviceId::new(2).unwrap());
++        assert_eq!(failure.timestamp, 1234);
++        assert_eq!(failure.content_hint, ContentHint::Resendable);
++        assert_eq!(failure.group_id, Some(vec![7; 32]));
++        let request = &failure.retry_request;
++        assert_eq!(request.timestamp(), Timestamp::from_epoch_millis(1234));
++        assert_eq!(request.device_id(), 2);
++        assert!(request.ratchet_key().is_none(), "sender key message");
++    }
++
++    #[test]
++    fn unparseable_messages_ask_without_a_ratchet_key() {
++        let error = failed(b"garbage", CiphertextMessageType::Whisper)
++            .into_error(decrypt_error());
++
++        let ServiceError::DecryptionFailed(failure) = error else {
++            panic!("expected DecryptionFailed, got {error:?}");
++        };
++        assert!(failure.retry_request.ratchet_key().is_none());
++        assert_eq!(failure.retry_request.device_id(), 2);
++    }
++
++    #[test]
++    fn duplicates_and_plaintext_ask_for_nothing() {
++        let duplicate = failed(&[], CiphertextMessageType::SenderKey)
++            .into_error(SignalProtocolError::DuplicatedMessage(1, 2));
++        let plaintext = failed(&[], CiphertextMessageType::Plaintext)
++            .into_error(decrypt_error());
++
++        assert!(matches!(
++            duplicate,
++            ServiceError::SignalProtocolError(
++                SignalProtocolError::DuplicatedMessage(1, 2)
++            )
++        ));
++        assert!(matches!(plaintext, ServiceError::SignalProtocolError(_)));
++    }
++}
 -- 
 2.55.0
 
