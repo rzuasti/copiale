@@ -22,5 +22,5 @@ pub use settings_panel::{
     Activation, FIELDS, Field, FontEntry, FontPicker, FontRole, MAX_FONTS, Section, SettingsPanel,
     Value,
 };
-pub use time::Clock;
+pub use time::LocalClock;
 pub use view::{ChatView, FocusSearch, NewChat, init};

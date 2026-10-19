@@ -5,7 +5,7 @@ use std::ops::Range;
 
 use copiale_core::Account;
 use copiale_core::config::{
-    Choice, Clock, Config, Density, MessageStyle, NotificationContent, Setting, ThemeMode,
+    Choice, Config, Density, MessageStyle, NotificationContent, Setting, ThemeMode, TimeFormat,
     TimestampVisibility, Typography, WindowConfig,
 };
 
@@ -317,7 +317,7 @@ impl Field {
             Self::Density => Setting::Density(nth::<Density>(ix)?),
             Self::MessageStyle => Setting::MessageStyle(nth::<MessageStyle>(ix)?),
             Self::Timestamps => Setting::Timestamps(nth::<TimestampVisibility>(ix)?),
-            Self::Clock => Setting::Clock(nth::<Clock>(ix)?),
+            Self::Clock => Setting::Clock(nth::<TimeFormat>(ix)?),
             Self::NotificationContent => {
                 Setting::NotificationContent(nth::<NotificationContent>(ix)?)
             }

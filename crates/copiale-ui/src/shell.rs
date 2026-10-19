@@ -492,7 +492,7 @@ impl Shell {
 impl Shell {
     /// See-through where the settings' opacity is below 1, blurred if asked.
     fn sync_background(&mut self, window: &Window, cx: &App) {
-        let settings = Settings::get(cx).window;
+        let settings = &Settings::get(cx).window;
         let wanted = match (settings.opacity < 1., settings.blur) {
             (false, _) => WindowBackgroundAppearance::Opaque,
             (true, false) => WindowBackgroundAppearance::Transparent,

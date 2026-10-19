@@ -7,12 +7,12 @@ use copiale_core::Timestamp;
 
 /// Converts timestamps to local time: the system's, or a fixed one in tests.
 #[derive(Clone, Copy, Debug)]
-pub struct Clock {
+pub struct LocalClock {
     fixed: Option<(FixedOffset, Timestamp)>,
     twelve_hour: bool,
 }
 
-impl Clock {
+impl LocalClock {
     pub fn system() -> Self {
         Self {
             fixed: None,
@@ -139,8 +139,8 @@ mod tests {
     const MINUTE: u64 = 60_000;
     const DAY: u64 = 1440 * MINUTE;
 
-    fn clock() -> Clock {
-        Clock::fixed(
+    fn clock() -> LocalClock {
+        LocalClock::fixed(
             FixedOffset::east_opt(2 * 3600).unwrap(),
             Timestamp::from_millis(NOW),
         )

@@ -120,9 +120,10 @@ impl Theme {
 /// Makes `theme` active, with the settings' fonts and opacity, and redraws
 /// all windows.
 pub fn apply(theme: &Theme, cx: &mut App) {
-    let settings = Settings::get(cx);
-    let fonts = Fonts::resolve(&settings.typography, cx);
-    let palette = theme.colors.translucent(settings.window.opacity as f32);
+    let opacity = Settings::get(cx).window.opacity as f32;
+    let typography = Settings::get(cx).typography.clone();
+    let fonts = Fonts::resolve(&typography, cx);
+    let palette = theme.colors.translucent(opacity);
     let config = Rc::new(component_config(theme, &palette, &fonts));
     cx.set_global(palette);
     component::Theme::update(cx, |kit| kit.apply_config(&config));

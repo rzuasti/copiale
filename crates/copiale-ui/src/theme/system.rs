@@ -78,7 +78,7 @@ fn refresh(cx: &mut App) {
     let wanted = Applied {
         mode: settings.appearance.theme,
         scheme: followed.scheme,
-        typography: settings.typography,
+        typography: settings.typography.clone(),
         opacity: settings.window.opacity,
     };
     if followed.applied.as_ref() == Some(&wanted) {

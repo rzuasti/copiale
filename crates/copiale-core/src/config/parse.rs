@@ -114,7 +114,7 @@ impl<'a> Reader<'a> {
 mod tests {
     use super::*;
     use crate::config::{
-        Clock, Density, MessageStyle, NotificationContent, ThemeMode, TimestampVisibility,
+        Density, MessageStyle, NotificationContent, ThemeMode, TimeFormat, TimestampVisibility,
     };
 
     fn settings(loaded: &Loaded) -> Vec<Option<&str>> {
@@ -174,7 +174,7 @@ mod tests {
         assert_eq!(config.layout.density, Density::Compact);
         assert_eq!(config.layout.message_style, MessageStyle::Bubbles);
         assert_eq!(config.layout.timestamps, TimestampVisibility::Hover);
-        assert_eq!(config.layout.clock, Clock::H12);
+        assert_eq!(config.layout.clock, TimeFormat::H12);
         assert!(config.layout.avatars);
         assert_eq!(config.window.opacity, 0.85);
         assert!(config.window.blur);

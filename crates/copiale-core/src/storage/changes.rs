@@ -244,28 +244,9 @@ fn json(content: &Content) -> Result<String, StorageError> {
 
 #[cfg(test)]
 mod tests {
-    use tempfile::TempDir;
-    use uuid::Uuid;
-
     use super::*;
-    use crate::model::{GroupMasterKey, GroupRef, MessageBody, Quote, ServiceId};
-    use crate::storage::DatabaseKey;
-
-    async fn db() -> (TempDir, Database) {
-        let dir = tempfile::tempdir().unwrap();
-        let db = Database::open(&dir.path().join("test.db"), &DatabaseKey::generate())
-            .await
-            .unwrap();
-        (dir, db)
-    }
-
-    fn peer(n: u128) -> ServiceId {
-        ServiceId::new(Uuid::from_u128(n))
-    }
-
-    fn at(millis: u64) -> Timestamp {
-        Timestamp::from_millis(millis)
-    }
+    use crate::model::{GroupMasterKey, GroupRef, MessageBody, Quote};
+    use crate::storage::testing::{at, db, peer};
 
     async fn incoming(db: &Database, from: u128, sent_at: u64, body: &str) -> Option<Message> {
         db.add_message(

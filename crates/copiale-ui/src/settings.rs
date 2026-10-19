@@ -1,6 +1,7 @@
 //! User settings from `config.toml`, applied live.
 
 use std::path::Path;
+use std::sync::LazyLock;
 
 use copiale_core::config::{Config, ConfigEvent, ConfigFile, ConfigSync, Setting};
 use futures::StreamExt as _;
@@ -15,10 +16,10 @@ impl Global for Settings {}
 
 impl Settings {
     /// The settings in effect.
-    pub fn get(cx: &App) -> Config {
+    pub fn get(cx: &App) -> &Config {
+        static DEFAULT: LazyLock<Config> = LazyLock::new(Config::default);
         cx.try_global::<Self>()
-            .map(|settings| settings.0.clone())
-            .unwrap_or_default()
+            .map_or(&DEFAULT, |settings| &settings.0)
     }
 
     /// Where settings are saved, once loaded.
@@ -114,7 +115,7 @@ pub fn apply(event: ConfigEvent, cx: &mut App) {
 
 /// Applies a change without saving it, e.g. to preview it.
 pub fn preview(setting: &Setting, cx: &mut App) {
-    let mut config = Settings::get(cx);
+    let mut config = Settings::get(cx).clone();
     config.set(setting);
     cx.set_global(Settings(config));
 }

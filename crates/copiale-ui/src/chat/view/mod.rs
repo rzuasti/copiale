@@ -27,7 +27,7 @@ use super::layout::Layout;
 use super::model::{Chat, Compose, Effects, LogChange, Overlay, title};
 use super::notices::Notices;
 use super::settings_panel::SettingsPanel;
-use super::time::Clock;
+use super::time::LocalClock;
 use crate::kinetic::{self, Kinetic};
 use crate::notifier::Notifier;
 use crate::settings::Settings;
@@ -237,15 +237,15 @@ impl ChatView {
                 view.notifier.apply(action);
             }
             view.chat
-                .set_twelve_hour(settings.layout.clock == config::Clock::H12);
+                .set_twelve_hour(settings.layout.clock == config::TimeFormat::H12);
             // Fonts, spacing and timestamps change row heights.
             view.log.remeasure();
             cx.notify();
         })];
         core.send(Command::LoadConversations);
         let focus = cx.focus_handle();
-        let mut chat = Chat::new(Clock::system());
-        chat.set_twelve_hour(Settings::get(cx).layout.clock == config::Clock::H12);
+        let mut chat = Chat::new(LocalClock::system());
+        chat.set_twelve_hour(Settings::get(cx).layout.clock == config::TimeFormat::H12);
         let part = |render, cx: &mut Context<Self>| {
             let view = cx.weak_entity();
             cx.new(|_| Part {
@@ -257,17 +257,15 @@ impl ChatView {
         };
         let log_part = part(|view, _, cx| view.render_log(cx), cx);
         let list_part = part(|view, window, cx| view.render_sidebar(window, cx), cx);
-        let minutes = cx.spawn(async move |view, cx| {
-            loop {
-                let into_minute = Timestamp::now().as_millis() % 60_000;
-                // A little late, so the labels have changed by then.
-                let delay = Duration::from_millis(60_000 - into_minute + 10);
-                cx.background_executor().timer(delay).await;
-                if view.update(cx, |_, cx| cx.notify()).is_err() {
-                    break;
-                }
-            }
-        });
+        let minutes = Self::redraw_after(
+            |_| {
+                Some(Duration::from_millis(
+                    60_000 - Timestamp::now().as_millis() % 60_000,
+                ))
+            },
+            |_, cx| cx.notify(),
+            cx,
+        );
         Self {
             core,
             chat,
@@ -487,41 +485,46 @@ impl ChatView {
 
     /// Redraws as countdowns change, while any run in the open conversation.
     fn tick_timers(&mut self, cx: &mut Context<Self>) {
-        self.timers = Some(cx.spawn(async move |view, cx| {
-            loop {
-                let Ok(Some(delay)) = view.read_with(cx, |view, _| view.chat.timers_change_in())
-                else {
-                    break;
-                };
-                // A little late, so the label has changed by then.
-                cx.background_executor()
-                    .timer(delay + Duration::from_millis(10))
-                    .await;
-                if view.update(cx, |_, cx| cx.notify()).is_err() {
-                    break;
-                }
-            }
-        }));
+        self.timers = Some(Self::redraw_after(
+            |view| view.chat.timers_change_in(),
+            |_, cx| cx.notify(),
+            cx,
+        ));
     }
 
     /// Redraws as typing indicators expire.
     fn expire_typing(&mut self, cx: &mut Context<Self>) {
-        let Some(delay) = self.chat.typing_changes_in() else {
-            self.typing_expiry = None;
-            return;
-        };
-        self.typing_expiry = Some(cx.spawn(async move |view, cx| {
-            // A little late, so it has expired by then.
-            cx.background_executor()
-                .timer(delay + Duration::from_millis(10))
-                .await;
-            view.update(cx, |view, cx| {
+        self.typing_expiry = Some(Self::redraw_after(
+            |view| view.chat.typing_changes_in(),
+            |view, cx| {
                 view.sync_typing_row(cx);
                 cx.notify();
-                view.expire_typing(cx);
-            })
-            .ok();
-        }));
+            },
+            cx,
+        ));
+    }
+
+    /// Waits each delay `next` gives, then runs `redraw`; stops when it
+    /// gives `None` or the view is gone.
+    fn redraw_after(
+        next: impl Fn(&Self) -> Option<Duration> + 'static,
+        redraw: impl Fn(&mut Self, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
+        cx.spawn(async move |view, cx| {
+            loop {
+                let Ok(Some(delay)) = view.read_with(cx, |view, _| next(view)) else {
+                    break;
+                };
+                // A little late, so labels have changed by then.
+                cx.background_executor()
+                    .timer(delay + Duration::from_millis(10))
+                    .await;
+                if view.update(cx, |view, cx| redraw(view, cx)).is_err() {
+                    break;
+                }
+            }
+        })
     }
 
     /// Tells the core whether we're typing; stops after [`TYPING_IDLE`]
@@ -540,23 +543,14 @@ impl ChatView {
     }
 
     fn start_countdown(&mut self, cx: &mut Context<Self>) {
-        self.countdown = Some(cx.spawn(async move |view, cx| {
-            loop {
-                let Ok(Some(delay)) = view.read_with(cx, |view, _| {
-                    let chat = &view.chat;
-                    chat.connection_label_changes_in(chat.clock().now())
-                }) else {
-                    break;
-                };
-                // A little late, so the label has changed by then.
-                cx.background_executor()
-                    .timer(delay + Duration::from_millis(10))
-                    .await;
-                if view.update(cx, |_, cx| cx.notify()).is_err() {
-                    break;
-                }
-            }
-        }));
+        self.countdown = Some(Self::redraw_after(
+            |view| {
+                let chat = &view.chat;
+                chat.connection_label_changes_in(chat.clock().now())
+            },
+            |_, cx| cx.notify(),
+            cx,
+        ));
     }
 
     pub fn open(&mut self, id: ConversationId, window: &mut Window, cx: &mut Context<Self>) {

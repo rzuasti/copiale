@@ -223,30 +223,11 @@ impl Database {
 
 #[cfg(test)]
 mod tests {
-    use tempfile::TempDir;
-    use uuid::Uuid;
-
     use super::*;
     use crate::model::{
         Content, Destination, GroupInfo, GroupMasterKey, GroupRef, Member, MessageStatus,
     };
-    use crate::storage::DatabaseKey;
-
-    async fn db() -> (TempDir, Database) {
-        let dir = tempfile::tempdir().unwrap();
-        let db = Database::open(&dir.path().join("test.db"), &DatabaseKey::generate())
-            .await
-            .unwrap();
-        (dir, db)
-    }
-
-    fn peer(n: u128) -> ServiceId {
-        ServiceId::new(Uuid::from_u128(n))
-    }
-
-    fn at(millis: u64) -> Timestamp {
-        Timestamp::from_millis(millis)
-    }
+    use crate::storage::testing::{at, db, peer};
 
     /// A sent message of ours, at `sent_at`.
     async fn sent(db: &Database, destination: Destination, sent_at: u64) -> Message {

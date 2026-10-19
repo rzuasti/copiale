@@ -13,6 +13,8 @@ mod key;
 mod messages;
 mod receipts;
 mod secrets;
+#[cfg(test)]
+mod testing;
 
 use std::path::{Path, PathBuf};
 
@@ -161,7 +163,7 @@ impl Storage {
         if self.paths.database.exists() {
             return Err(StorageError::DatabaseExists);
         }
-        ensure_private_dir(self.paths.dir())?;
+        crate::create_private_dir(self.paths.dir())?;
         let key_file = KeyFile::new(self.kdf);
         let key = key_file.derive(passphrase)?;
         key_file.write(&self.paths.key_file)?;
@@ -199,18 +201,7 @@ impl Storage {
 
     /// Opens the database, creating it if needed, and runs migrations.
     pub async fn open(&self, key: &DatabaseKey) -> Result<Database, StorageError> {
-        ensure_private_dir(self.paths.dir())?;
+        crate::create_private_dir(self.paths.dir())?;
         Database::open(&self.paths.database, key).await
     }
-}
-
-/// Creates `dir` if needed and restricts it to the current user.
-fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dir)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
-    }
-    Ok(())
 }

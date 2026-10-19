@@ -126,24 +126,11 @@ mod tests {
     use presage::libsignal_service::Profile;
     use presage::libsignal_service::prelude::{ProfileKey, phonenumber};
     use presage::model::contacts::Contact as StoredContact;
-    use tempfile::TempDir;
     use uuid::Uuid;
 
     use super::*;
     use crate::model::{Content, Destination};
-    use crate::storage::DatabaseKey;
-
-    async fn db() -> (TempDir, Database) {
-        let dir = tempfile::tempdir().unwrap();
-        let db = Database::open(&dir.path().join("test.db"), &DatabaseKey::generate())
-            .await
-            .unwrap();
-        (dir, db)
-    }
-
-    fn peer(n: u128) -> ServiceId {
-        ServiceId::new(Uuid::from_u128(n))
-    }
+    use crate::storage::testing::{db, peer};
 
     async fn save(db: &Database, n: u128, name: &str, phone: Option<&str>) {
         let contact = StoredContact {

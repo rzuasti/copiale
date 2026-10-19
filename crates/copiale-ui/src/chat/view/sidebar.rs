@@ -211,7 +211,7 @@ impl ChatView {
                 .map(|at| self.chat.clock().age(at))
                 .unwrap_or_default()
         };
-        let layout = Settings::get(cx).layout;
+        let layout = &Settings::get(cx).layout;
         let avatar = layout.avatars.then(|| {
             let palette = cx.palette();
             let color = match summary.peer {

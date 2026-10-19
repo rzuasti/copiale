@@ -45,10 +45,10 @@ impl ChatView {
 
     /// `Enter` or a click on a row's value.
     fn activate_setting(&mut self, field: Field, window: &mut Window, cx: &mut Context<Self>) {
-        match field.activate(&Settings::get(cx)) {
+        match field.activate(Settings::get(cx)) {
             Activation::Change(setting) => settings::change(setting, cx),
             Activation::PickFont(role) => {
-                self.settings_panel.pick_font(role, &Settings::get(cx));
+                self.settings_panel.pick_font(role, Settings::get(cx));
                 Self::ready_query(&self.inputs().font, window, cx);
             }
             Activation::ConfirmUnlink => {
@@ -68,7 +68,7 @@ impl ChatView {
     }
 
     fn change_setting(&mut self, field: Field, step: i32, cx: &mut Context<Self>) {
-        if let Some(setting) = field.step(&Settings::get(cx), step) {
+        if let Some(setting) = field.step(Settings::get(cx), step) {
             settings::change(setting, cx);
         }
         cx.notify();
@@ -164,7 +164,7 @@ impl ChatView {
         if self.settings_panel.confirming_unlink() {
             return self.render_unlink_confirm(cx);
         }
-        let config = Settings::get(cx);
+        let config = Settings::get(cx).clone();
         let mono = cx.theme().mono_font_family.clone();
         let muted = cx.palette().text_muted;
         let border = cx.palette().border;

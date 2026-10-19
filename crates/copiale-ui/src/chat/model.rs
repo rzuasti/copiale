@@ -14,7 +14,7 @@ use copiale_core::{
 use super::content::{placeholders, quote_line, system_lines};
 use super::new_chat::{Candidate, candidates};
 use super::palette::{self, Entry, PaletteAction};
-use super::time::{Clock, countdown, countdown_changes_in};
+use super::time::{LocalClock, countdown, countdown_changes_in};
 
 /// Messages loaded per page.
 pub const PAGE: u32 = 100;
@@ -135,7 +135,7 @@ pub struct Prefix {
 
 #[derive(Debug)]
 pub struct Chat {
-    clock: Clock,
+    clock: LocalClock,
     /// Most recently active first.
     conversations: Vec<ConversationSummary>,
     search: String,
@@ -215,7 +215,7 @@ impl Log {
         }
     }
 
-    fn regroup(&mut self, clock: &Clock) {
+    fn regroup(&mut self, clock: &LocalClock) {
         self.starts.clear();
         for (ix, message) in self.messages.iter().enumerate() {
             let start = match ix.checked_sub(1) {
@@ -231,7 +231,7 @@ impl Log {
 
 /// Whether `next` joins `previous`'s group: same author, same day, close in
 /// time.
-fn continues(clock: &Clock, previous: &Message, next: &Message) -> bool {
+fn continues(clock: &LocalClock, previous: &Message, next: &Message) -> bool {
     !previous.content.is_system()
         && !next.content.is_system()
         && previous.direction == next.direction
@@ -245,7 +245,7 @@ fn continues(clock: &Clock, previous: &Message, next: &Message) -> bool {
 }
 
 impl Chat {
-    pub fn new(clock: Clock) -> Self {
+    pub fn new(clock: LocalClock) -> Self {
         Self {
             clock,
             conversations: Vec::new(),
@@ -264,7 +264,7 @@ impl Chat {
         }
     }
 
-    pub fn clock(&self) -> &Clock {
+    pub fn clock(&self) -> &LocalClock {
         &self.clock
     }
 
@@ -769,8 +769,6 @@ impl Chat {
         })
     }
 
-    /// The command sending `text` to the open conversation; `None` if
-    /// there's nothing to send.
     /// Who is typing in the open conversation, as a line to show.
     pub fn typing_label(&self) -> Option<String> {
         let open = self.open_id()?;
@@ -1226,7 +1224,7 @@ mod tests {
     const MINUTE: u64 = 60_000;
 
     fn chat() -> Chat {
-        Chat::new(Clock::fixed(
+        Chat::new(LocalClock::fixed(
             FixedOffset::east_opt(2 * 3600).unwrap(),
             Timestamp::from_millis(NOW),
         ))
@@ -1841,7 +1839,7 @@ mod tests {
         assert_eq!(chat.typing_label().as_deref(), Some("Alice is typing…"));
         assert_eq!(chat.typing_changes_in(), Some(TYPING_TIMEOUT));
 
-        chat.clock = Clock::fixed(
+        chat.clock = LocalClock::fixed(
             FixedOffset::east_opt(2 * 3600).unwrap(),
             Timestamp::from_millis(NOW + TYPING_TIMEOUT.as_millis() as u64),
         );

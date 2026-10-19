@@ -58,7 +58,7 @@ pub struct Layout {
     pub density: Density,
     pub message_style: MessageStyle,
     pub timestamps: TimestampVisibility,
-    pub clock: Clock,
+    pub clock: TimeFormat,
     pub avatars: bool,
 }
 
@@ -131,7 +131,7 @@ choice!(
 choice!(Density { Compact = "compact", #[default] Cozy = "cozy", Roomy = "roomy" });
 choice!(MessageStyle { #[default] Log = "log", Blocks = "blocks", Bubbles = "bubbles" });
 choice!(TimestampVisibility { #[default] Always = "always", Hover = "hover", Never = "never" });
-choice!(Clock { #[default] H24 = "24h", H12 = "12h" });
+choice!(TimeFormat { #[default] H24 = "24h", H12 = "12h" });
 choice!(
     /// What notifications reveal.
     NotificationContent { Off = "off", #[default] Name = "name", Message = "message" }
@@ -218,7 +218,7 @@ settings! {
     Density(Density): layout.density,
     MessageStyle(MessageStyle): layout.message_style,
     Timestamps(TimestampVisibility): layout.timestamps,
-    Clock(Clock): layout.clock,
+    Clock(TimeFormat): layout.clock,
     Avatars(bool): layout.avatars,
     Opacity(f64): window.opacity in WindowConfig::OPACITY_RANGE,
     Blur(bool): window.blur,

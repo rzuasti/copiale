@@ -4,8 +4,8 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use copiale_core::config::{
-    Clock, Config, ConfigError, ConfigEvent, ConfigFile, ConfigSync, Density, Loaded, MessageStyle,
-    NotificationContent, Setting, ThemeMode, TimestampVisibility,
+    Config, ConfigError, ConfigEvent, ConfigFile, ConfigSync, Density, Loaded, MessageStyle,
+    NotificationContent, Setting, ThemeMode, TimeFormat, TimestampVisibility,
 };
 
 /// Generous: file watching on a loaded machine can be slow.
@@ -49,7 +49,7 @@ fn set_matches_writing_and_reloading() {
         Setting::Density(Density::Compact),
         Setting::MessageStyle(MessageStyle::Bubbles),
         Setting::Timestamps(TimestampVisibility::Hover),
-        Setting::Clock(Clock::H12),
+        Setting::Clock(TimeFormat::H12),
         Setting::Avatars(true),
         Setting::Opacity(0.8),
         Setting::Blur(true),

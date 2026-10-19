@@ -37,7 +37,7 @@ pub struct Instance {
 
 /// Becomes the running instance, unless another process already is.
 pub fn claim(dir: &Path) -> io::Result<Claim> {
-    create_private_dir(dir)?;
+    copiale_core::create_private_dir(dir)?;
     let lock = OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -193,16 +193,6 @@ fn name(_: &Path) -> io::Result<Name<'static>> {
     format!("{}-{user}", copiale_core::APP_ID)
         .to_ns_name::<GenericNamespaced>()
         .map(Name::into_owned)
-}
-
-fn create_private_dir(dir: &Path) -> io::Result<()> {
-    std::fs::create_dir_all(dir)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]

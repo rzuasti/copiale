@@ -5,7 +5,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use copiale_core::config::{
-    Clock, Config, ConfigFile, Density, MessageStyle, NotificationContent, Setting, ThemeMode,
+    Config, ConfigFile, Density, MessageStyle, NotificationContent, Setting, ThemeMode, TimeFormat,
 };
 use copiale_core::{
     Account, AccountSettings, Attachment, BackendError, Command, Contact, Content, ConversationId,
@@ -1583,7 +1583,7 @@ fn settings_open_from_the_keyboard_and_close(cx: &mut TestAppContext) {
 }
 
 fn config(cx: &mut TestAppContext) -> Config {
-    cx.update(|cx| Settings::get(cx))
+    cx.update(|cx| Settings::get(cx).clone())
 }
 
 fn chat_view<T>(ui: &Ui, cx: &mut TestAppContext, f: impl FnOnce(&ChatView) -> T) -> T {
@@ -1747,7 +1747,7 @@ fn layout_settings_change_the_log(cx: &mut TestAppContext) {
         chat_view(&ui, cx, |view| view.chat().row(0).unwrap().prefix.time)
     };
     assert!(!time(cx).ends_with('M'));
-    cx.update(|cx| settings::change(Setting::Clock(Clock::H12), cx));
+    cx.update(|cx| settings::change(Setting::Clock(TimeFormat::H12), cx));
     assert!(time(cx).ends_with("AM") || time(cx).ends_with("PM"));
 }
 

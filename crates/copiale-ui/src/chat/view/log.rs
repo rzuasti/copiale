@@ -184,7 +184,7 @@ impl ChatView {
     fn render_row(&self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if let Some(row) = self.chat.row(ix) {
             let hovered = self.hovered == Some(row.message.id);
-            let layout = Settings::get(cx).layout;
+            let layout = &Settings::get(cx).layout;
             let style = LogStyle {
                 message_style: layout.message_style,
                 spacing: Spacing::for_density(layout.density),

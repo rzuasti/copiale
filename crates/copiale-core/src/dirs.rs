@@ -1,6 +1,6 @@
 //! Platform directories for [`crate::APP_ID`].
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use directories::ProjectDirs;
 
@@ -18,4 +18,15 @@ pub fn runtime_dir() -> Option<PathBuf> {
             .unwrap_or_else(|| dirs.data_local_dir())
             .to_path_buf(),
     )
+}
+
+/// Creates `dir` if needed and restricts it to the current user.
+pub fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
 }

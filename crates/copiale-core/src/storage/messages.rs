@@ -14,16 +14,15 @@ use crate::model::{
     MessageStatus, Peer, ServiceId, Timestamp,
 };
 
-/// Summary columns: id, peer, group ID, group title, last_activity,
-/// unread, last message direction and body, and the peer's contact and
-/// profile names (from presage's tables). A macro so queries stay string
-/// literals, which sqlx requires.
+/// [`SummaryRow`] columns; the peer's names come from presage's tables. A
+/// macro so queries stay string literals, which sqlx requires.
 macro_rules! summary_query {
     () => {
         "SELECT c.id, c.peer, c.group_id, c.group_title, c.last_activity,
-                (SELECT count(*) FROM messages u WHERE u.conversation_id = c.id AND u.read = 0),
+                (SELECT count(*) FROM messages u WHERE u.conversation_id = c.id AND u.read = 0)
+                    AS unread,
                 m.outgoing, m.body, m.content,
-                ct.name, p.given_name, p.family_name
+                ct.name AS contact_name, p.given_name, p.family_name
          FROM conversations c
          LEFT JOIN messages m ON m.id = (
              SELECT id FROM messages WHERE conversation_id = c.id
@@ -34,7 +33,7 @@ macro_rules! summary_query {
     };
 }
 
-/// Message columns, in [`MessageRow`] order.
+/// [`MessageRow`] columns.
 macro_rules! message_columns {
     () => {
         "id, conversation_id, outgoing, author, sent_at, received_at, body, content, read, status, \
@@ -43,36 +42,42 @@ macro_rules! message_columns {
 }
 pub(super) use message_columns;
 
-type SummaryRow = (
-    i64,
-    Option<Vec<u8>>,
-    Option<Vec<u8>>,
-    Option<String>,
-    Option<i64>,
-    i64,
-    Option<bool>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-);
-pub(super) type MessageRow = (
-    i64,
-    i64,
-    bool,
-    Vec<u8>,
-    i64,
-    i64,
-    String,
-    Option<String>,
-    bool,
-    Option<String>,
-    Option<String>,
-    Option<i64>,
-    Option<i64>,
-    Option<i64>,
-);
+#[derive(sqlx::FromRow)]
+struct SummaryRow {
+    id: i64,
+    peer: Option<Vec<u8>>,
+    group_id: Option<Vec<u8>>,
+    group_title: Option<String>,
+    last_activity: Option<i64>,
+    unread: i64,
+    /// The last message's; `None` without one.
+    outgoing: Option<bool>,
+    body: Option<String>,
+    content: Option<String>,
+    contact_name: Option<String>,
+    given_name: Option<String>,
+    family_name: Option<String>,
+}
+
+#[derive(sqlx::FromRow)]
+pub(super) struct MessageRow {
+    id: i64,
+    conversation_id: i64,
+    outgoing: bool,
+    /// Empty for this account.
+    author: Vec<u8>,
+    sent_at: i64,
+    received_at: i64,
+    body: String,
+    content: Option<String>,
+    read: bool,
+    status: Option<String>,
+    delivery: Option<String>,
+    edited_at: Option<i64>,
+    expires_in: Option<i64>,
+    expires_at: Option<i64>,
+}
+
 type DestinationRow = (Option<Vec<u8>>, Option<Vec<u8>>, Option<i64>);
 
 impl Database {
@@ -178,14 +183,7 @@ impl Database {
         &self,
         conversation: ConversationId,
     ) -> Result<Option<Destination>, StorageError> {
-        let row: Option<DestinationRow> = sqlx::query_as(
-            "SELECT peer, group_master_key, group_revision FROM conversations WHERE id = ?",
-        )
-        .bind(conversation.get())
-        .fetch_optional(&self.app)
-        .await
-        .map_err(database_error)?;
-        row.map(destination).transpose()
+        load_destination(&self.app, conversation.get()).await
     }
 
     /// Sets a pending message's status, sent or failed; returns it, or
@@ -230,15 +228,11 @@ impl Database {
         let Some(message) = row.map(message).transpose()? else {
             return Ok(None);
         };
-        let row: DestinationRow = sqlx::query_as(
-            "SELECT peer, group_master_key, group_revision FROM conversations WHERE id = ?",
-        )
-        .bind(message.conversation.get())
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(database_error)?;
+        let destination = load_destination(&mut *tx, message.conversation.get())
+            .await?
+            .ok_or_else(|| database_error(sqlx::Error::RowNotFound))?;
         tx.commit().await.map_err(database_error)?;
-        Ok(Some((destination(row)?, message)))
+        Ok(Some((destination, message)))
     }
 
     /// Marks messages left pending, e.g. by a quit mid-send, failed;
@@ -333,7 +327,7 @@ impl Database {
         let mut members = self.all_members().await?;
         rows.into_iter()
             .map(|row| {
-                let members = members.remove(&row.0).unwrap_or_default();
+                let members = members.remove(&row.id).unwrap_or_default();
                 summary(row, members)
             })
             .collect()
@@ -350,7 +344,7 @@ impl Database {
             .map_err(database_error)?;
         match row {
             Some(row) => {
-                let members = self.members(row.0).await?;
+                let members = self.members(row.id).await?;
                 Ok(Some(summary(row, members)?))
             }
             None => Ok(None),
@@ -485,48 +479,34 @@ impl Database {
 
 /// A conversation's summary from its row and, for a group, its members.
 fn summary(row: SummaryRow, members: Vec<Member>) -> Result<ConversationSummary, StorageError> {
-    let (
-        id,
-        peer,
-        group_id,
-        group_title,
-        last_activity,
-        unread,
-        outgoing,
-        body,
-        content,
-        contact_name,
-        given_name,
-        family_name,
-    ) = row;
-    let last_message = match outgoing.zip(body) {
+    let last_message = match row.outgoing.zip(row.body) {
         Some((outgoing, body)) => Some(MessagePreview {
             direction: direction(outgoing),
-            content: content_from(body, content)?,
+            content: content_from(body, row.content)?,
         }),
         None => None,
     };
-    let (peer, title, members) = match (peer, group_id) {
+    let (peer, title, members) = match (row.peer, row.group_id) {
         (Some(peer), _) => {
             let peer = service_id(&peer)?;
-            let title = display_name(contact_name, given_name, family_name);
+            let title = display_name(row.contact_name, row.given_name, row.family_name);
             (Peer::Contact(peer), title, Vec::new())
         }
         (None, Some(group_id)) => {
             let bytes = <[u8; 32]>::try_from(group_id.as_slice())
                 .map_err(|_| StorageError::Database("invalid group ID".into()))?;
-            let title = group_title.filter(|title| !title.trim().is_empty());
+            let title = row.group_title.filter(|title| !title.trim().is_empty());
             (Peer::Group(GroupId::new(bytes)), title, members)
         }
         (None, None) => return Err(StorageError::Database("conversation without peer".into())),
     };
     Ok(ConversationSummary {
-        id: ConversationId::new(id),
+        id: ConversationId::new(row.id),
         peer,
         title,
         members,
-        last_activity: last_activity.map(timestamp),
-        unread: u32::try_from(unread).unwrap_or(u32::MAX),
+        last_activity: row.last_activity.map(timestamp),
+        unread: u32::try_from(row.unread).unwrap_or(u32::MAX),
         last_message,
     })
 }
@@ -673,6 +653,22 @@ fn content_from(body: String, json: Option<String>) -> Result<Content, StorageEr
     }
 }
 
+/// Where messages in conversation `id` go; `None` if there's no such
+/// conversation.
+async fn load_destination(
+    executor: impl sqlx::SqliteExecutor<'_>,
+    id: i64,
+) -> Result<Option<Destination>, StorageError> {
+    let row: Option<DestinationRow> = sqlx::query_as(
+        "SELECT peer, group_master_key, group_revision FROM conversations WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_optional(executor)
+    .await
+    .map_err(database_error)?;
+    row.map(destination).transpose()
+}
+
 fn destination(row: DestinationRow) -> Result<Destination, StorageError> {
     match row {
         (Some(peer), _, _) => Ok(Destination::Contact(service_id(&peer)?)),
@@ -691,46 +687,30 @@ fn master_key(bytes: &[u8]) -> Result<GroupMasterKey, StorageError> {
 }
 
 pub(super) fn message(row: MessageRow) -> Result<Message, StorageError> {
-    let (
-        id,
-        conversation,
-        outgoing,
-        author,
-        sent_at,
-        received_at,
-        body,
-        content,
-        read,
-        status,
-        delivery,
-        edited_at,
-        expires_in,
-        expires_at,
-    ) = row;
-    let status = match (status.as_deref(), delivery.as_deref()) {
+    let status = match (row.status.as_deref(), row.delivery.as_deref()) {
         (Some("sent"), Some("delivered")) => Some(MessageStatus::Delivered),
         (Some("sent"), Some("read")) => Some(MessageStatus::Read),
         (status, _) => status.map(parse_status).transpose()?,
     };
-    let sender = if author.is_empty() {
+    let sender = if row.author.is_empty() {
         None
     } else {
-        Some(service_id(&author)?)
+        Some(service_id(&row.author)?)
     };
     Ok(Message {
-        id: MessageId::new(id),
-        conversation: ConversationId::new(conversation),
-        direction: direction(outgoing),
+        id: MessageId::new(row.id),
+        conversation: ConversationId::new(row.conversation_id),
+        direction: direction(row.outgoing),
         sender,
-        sent_at: timestamp(sent_at),
-        received_at: timestamp(received_at),
-        content: content_from(body, content)?,
-        edited: edited_at.is_some(),
-        read,
+        sent_at: timestamp(row.sent_at),
+        received_at: timestamp(row.received_at),
+        content: content_from(row.body, row.content)?,
+        edited: row.edited_at.is_some(),
+        read: row.read,
         status,
-        expiry: expires_in.map(|timer| Expiry {
+        expiry: row.expires_in.map(|timer| Expiry {
             timer: u32::try_from(timer).unwrap_or(u32::MAX),
-            at: expires_at.map(timestamp),
+            at: row.expires_at.map(timestamp),
         }),
     })
 }
@@ -783,23 +763,10 @@ pub(super) fn timestamp(millis: i64) -> Timestamp {
 
 #[cfg(test)]
 mod tests {
-    use tempfile::TempDir;
-
     use super::*;
     use crate::model::{Attachment, GroupUpdate, Unsupported};
     use crate::storage::DatabaseKey;
-
-    async fn db() -> (TempDir, Database) {
-        let dir = tempfile::tempdir().unwrap();
-        let db = Database::open(&dir.path().join("test.db"), &DatabaseKey::generate())
-            .await
-            .unwrap();
-        (dir, db)
-    }
-
-    fn peer(n: u128) -> ServiceId {
-        ServiceId::new(Uuid::from_u128(n))
-    }
+    use crate::storage::testing::{at, db, peer};
 
     async fn add(
         db: &Database,
@@ -1367,10 +1334,6 @@ mod tests {
             .unwrap();
         assert_eq!(mine.status, None, "system lines have no send status");
         db.close().await;
-    }
-
-    fn at(millis: u64) -> Timestamp {
-        Timestamp::from_millis(millis)
     }
 
     async fn timed(
