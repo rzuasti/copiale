@@ -169,6 +169,8 @@ pub enum Content {
     Deleted,
     /// Couldn't be decrypted; replaced if the sender resends it.
     Undecryptable,
+    /// The author's identity key, so their safety number, changed.
+    SafetyNumberChanged,
 }
 
 impl Content {
@@ -190,7 +192,10 @@ impl Content {
 
     /// Shown as a system line rather than a message from someone.
     pub fn is_system(&self) -> bool {
-        matches!(self, Self::GroupChanged(_) | Self::TimerChanged(_))
+        matches!(
+            self,
+            Self::GroupChanged(_) | Self::TimerChanged(_) | Self::SafetyNumberChanged
+        )
     }
 
     /// Arrives read: system lines, reactions and placeholders for what
@@ -223,6 +228,7 @@ impl fmt::Debug for Content {
             Self::TimerChanged(seconds) => f.debug_tuple("TimerChanged").field(seconds).finish(),
             Self::Deleted => f.write_str("Deleted"),
             Self::Undecryptable => f.write_str("Undecryptable"),
+            Self::SafetyNumberChanged => f.write_str("SafetyNumberChanged"),
         }
     }
 }
@@ -480,6 +486,81 @@ impl fmt::Debug for Contact {
     }
 }
 
+/// An account's public identity key, as Signal encodes it. `Debug` hides
+/// it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct IdentityKey(Vec<u8>);
+
+impl IdentityKey {
+    pub fn new(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for IdentityKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("IdentityKey(…)")
+    }
+}
+
+/// The 60 digits two accounts compare to check that nobody sits between
+/// them. `Debug` hides them.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SafetyNumber(String);
+
+impl SafetyNumber {
+    pub fn new(digits: impl Into<String>) -> Self {
+        Self(digits.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Blocks of five digits, as Signal shows them.
+    pub fn blocks(&self) -> Vec<&str> {
+        let mut blocks = Vec::new();
+        let mut rest = self.0.as_str();
+        while !rest.is_empty() {
+            let (block, tail) = rest.split_at(rest.len().min(5));
+            blocks.push(block);
+            rest = tail;
+        }
+        blocks
+    }
+}
+
+impl fmt::Debug for SafetyNumber {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SafetyNumber(…)")
+    }
+}
+
+/// Whether the user checked an account's safety number, on the phone.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Verification {
+    #[default]
+    Unverified,
+    /// Verified, for the key sessions with them use.
+    Verified,
+    /// Verified, but their key changed since: sending to them waits until
+    /// the user confirms the new one.
+    Changed,
+}
+
+/// An account's safety number with this one, and whether it's verified.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Identity {
+    pub peer: ServiceId,
+    /// `None` until a session with them exists.
+    pub safety_number: Option<SafetyNumber>,
+    pub verification: Verification,
+}
+
 /// Local ID of a conversation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ConversationId(i64);
@@ -676,6 +757,29 @@ mod tests {
             name: Some("Alice Secret".into()),
         };
         assert!(!format!("{member:?}").contains("Alice"));
+    }
+
+    #[test]
+    fn identity_key_and_safety_number_debug_show_nothing() {
+        assert_eq!(
+            format!("{:?}", IdentityKey::new(vec![5, 1, 2])),
+            "IdentityKey(…)"
+        );
+        assert_eq!(
+            format!("{:?}", SafetyNumber::new("123456789012")),
+            "SafetyNumber(…)"
+        );
+    }
+
+    #[test]
+    fn safety_numbers_show_in_blocks_of_five() {
+        let digits: String = (0..60).map(|n| char::from(b'0' + n % 10)).collect();
+        let blocks = SafetyNumber::new(digits).blocks().len();
+        assert_eq!(blocks, 12);
+        assert_eq!(
+            SafetyNumber::new("012345678901").blocks(),
+            ["01234", "56789", "01"]
+        );
     }
 
     #[test]

@@ -70,6 +70,7 @@ actions!(
         SearchPrevious,
         SearchNext,
         HideWindow,
+        ConfirmSafetyNumber,
     ]
 );
 
@@ -86,6 +87,8 @@ const SEARCHING: &str = "Searching";
 const SETTINGS: &str = "Settings";
 /// Key context of the unlink confirmation.
 const CONFIRM_UNLINK: &str = "ConfirmUnlink";
+/// Key context of the safety number card.
+const SAFETY_NUMBER: &str = "SafetyNumber";
 
 /// Registers the chat key bindings. Composer bindings act on the input
 /// itself, ahead of its own, and pass keys on when they don't apply.
@@ -121,6 +124,8 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("backspace", DeleteSelected, selecting),
         KeyBinding::new("escape", Cancel, selecting),
         KeyBinding::new("escape", Cancel, Some(CONFIRM_UNLINK)),
+        KeyBinding::new("escape", Cancel, Some(SAFETY_NUMBER)),
+        KeyBinding::new("enter", ConfirmSafetyNumber, Some(SAFETY_NUMBER)),
         KeyBinding::new("e", DeleteForEveryone, confirming),
         KeyBinding::new("m", DeleteForMe, confirming),
         KeyBinding::new("escape", Cancel, confirming),
@@ -153,6 +158,8 @@ pub struct ChatView {
     settings_scroll: ScrollHandle,
     /// Held while asking whether to unlink.
     confirm_focus: FocusHandle,
+    /// Held while a safety number shows.
+    identity_focus: FocusHandle,
     /// Device name and privacy settings, once the core reports them.
     account: Option<Account>,
     layout: Layout,
@@ -284,6 +291,7 @@ impl ChatView {
             settings_panel: SettingsPanel::default(),
             settings_scroll: ScrollHandle::new(),
             confirm_focus: cx.focus_handle(),
+            identity_focus: cx.focus_handle(),
             account: None,
             layout: Layout::default(),
             drawn: false,

@@ -715,7 +715,7 @@ pub(super) fn message(row: MessageRow) -> Result<Message, StorageError> {
     })
 }
 
-fn service_id(peer: &[u8]) -> Result<ServiceId, StorageError> {
+pub(super) fn service_id(peer: &[u8]) -> Result<ServiceId, StorageError> {
     Uuid::from_slice(peer)
         .map(ServiceId::new)
         .map_err(|_| StorageError::Database("invalid service ID".into()))

@@ -3,8 +3,8 @@
 
 use std::ops::Range;
 
-use copiale_core::ConversationId;
 use copiale_core::config::ThemeMode;
+use copiale_core::{ConversationId, ServiceId};
 
 use crate::fuzzy::fuzzy_match;
 
@@ -15,6 +15,8 @@ pub const MAX_CHATS: usize = 5;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PaletteAction {
     Open(ConversationId),
+    /// Shows an account's safety number.
+    SafetyNumber(ServiceId),
     NewChat,
     Settings,
     Theme(ThemeMode),
@@ -40,15 +42,19 @@ pub struct Entry {
     pub highlights: Vec<Range<usize>>,
 }
 
-/// `chats` (id and title, most recently active first), then commands,
-/// matching `query`, best first.
+/// `chats` (id and title, most recently active first), then commands for
+/// the open chat (`contextual`), then the rest, matching `query`, best
+/// first.
 pub(super) fn entries(
     chats: impl IntoIterator<Item = (ConversationId, String)>,
+    contextual: impl IntoIterator<Item = (PaletteAction, String)>,
     query: &str,
 ) -> Vec<Entry> {
-    let commands = COMMANDS
-        .iter()
-        .map(|(action, label)| (*action, (*label).to_owned()));
+    let commands = contextual.into_iter().chain(
+        COMMANDS
+            .iter()
+            .map(|(action, label)| (*action, (*label).to_owned())),
+    );
     let mut matched: Vec<_> = chats
         .into_iter()
         .map(|(id, title)| (PaletteAction::Open(id), title))
@@ -94,7 +100,7 @@ mod tests {
 
     #[test]
     fn empty_query_lists_recent_chats_then_commands() {
-        let entries = entries(chats(&["Alice", "Bob", "C", "D", "E", "F"]), "");
+        let entries = entries(chats(&["Alice", "Bob", "C", "D", "E", "F"]), [], "");
         assert_eq!(
             labels(&entries),
             [
@@ -119,15 +125,30 @@ mod tests {
 
     #[test]
     fn query_ranks_chats_and_commands_together() {
-        let entries = entries(chats(&["Bob", "Theo"]), "the");
+        let entries = entries(chats(&["Bob", "Theo"]), [], "the");
         assert_eq!(
             labels(&entries),
             ["Theo", "Theme: system", "Theme: dark", "Theme: light"]
         );
         assert_eq!(entries[0].highlights, vec![0..3]);
 
-        let entries = super::entries(chats(&["Bob", "Quinn"]), "q");
+        let entries = super::entries(chats(&["Bob", "Quinn"]), [], "q");
         assert_eq!(labels(&entries), ["Quinn", "Quit"]);
-        assert!(super::entries(chats(&["Bob"]), "xyz").is_empty());
+        assert!(super::entries(chats(&["Bob"]), [], "xyz").is_empty());
+    }
+
+    #[test]
+    fn commands_for_the_open_chat_come_first() {
+        let peer = ServiceId::new(uuid::Uuid::from_u128(1));
+        let safety = (
+            PaletteAction::SafetyNumber(peer),
+            "Safety number".to_owned(),
+        );
+        let entries = entries(chats(&["Bob"]), [safety.clone()], "");
+        assert_eq!(&labels(&entries)[..3], ["Bob", "Safety number", "New chat"]);
+
+        let entries = super::entries(chats(&["Bob"]), [safety], "safety");
+        assert_eq!(labels(&entries), ["Safety number"]);
+        assert_eq!(entries[0].action, PaletteAction::SafetyNumber(peer));
     }
 }

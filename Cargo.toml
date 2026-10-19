@@ -15,6 +15,8 @@ publish = false
 argon2 = { version = "0.6", features = ["zeroize"] }
 # Same version and runtime as GPUI's.
 ashpd = { version = "0.13", default-features = false, features = ["async-io", "settings"] }
+# Implements libsignal's store traits, which use it.
+async-trait = "0.1"
 chrono = "0.4"
 copiale-core = { path = "crates/copiale-core" }
 copiale-testkit = { path = "crates/copiale-testkit" }

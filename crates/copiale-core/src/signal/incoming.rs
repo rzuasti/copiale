@@ -12,14 +12,16 @@ use presage::libsignal_service::proto::{
     EditMessage, GroupContextV2, ReceiptMessage, SyncMessage, TypingMessage, addressable_message,
     attachment_pointer, conversation_identifier, data_message, receipt_message, typing_message,
 };
-use presage::libsignal_service::protocol::{Aci, ContentHint, ServiceId as SignalServiceId};
+use presage::libsignal_service::protocol::{
+    Aci, ContentHint, IdentityKey as SignalIdentityKey, ServiceId as SignalServiceId,
+};
 use presage::model::messages::Received;
 
 use crate::backend::{Incoming, RetryRequest, Undecryptable};
 use crate::model::{
     self, Attachment, Change, ChatRef, Destination, GroupId, GroupMasterKey, GroupRef, GroupUpdate,
-    IncomingMessage, MessageBody, MessageChange, MessageRef, Quote, ReceiptKind, SentMessage,
-    ServiceId, Timestamp, Unsupported,
+    IdentityKey, IncomingMessage, MessageBody, MessageChange, MessageRef, Quote, ReceiptKind,
+    SentMessage, ServiceId, Timestamp, Unsupported,
 };
 
 /// What the core cares about so far; everything else is dropped, as are
@@ -76,7 +78,8 @@ fn undecryptable(failure: &DecryptionFailure) -> Undecryptable {
     }
 }
 
-/// Receipts, typing, and reads and settings synced from other devices.
+/// Receipts, typing, and reads, settings and verifications synced from
+/// other devices.
 fn signal(content: &Content) -> Option<Incoming> {
     let sender = ServiceId::new(content.metadata.sender.raw_uuid());
     match &content.body {
@@ -169,6 +172,28 @@ fn signal(content: &Content) -> Option<Incoming> {
             read_receipts: configuration.read_receipts,
             typing_indicators: configuration.typing_indicators,
         }),
+        ContentBody::SynchronizeMessage(SyncMessage {
+            content: Some(SyncContent::Verified(verified)),
+            ..
+        }) => {
+            let peer = service_id(
+                verified.destination_aci_binary.as_deref(),
+                verified.destination_aci.as_deref(),
+            )?;
+            let key = SignalIdentityKey::decode(verified.identity_key.as_deref()?).ok()?;
+            let verified = match proto::verified::State::try_from(verified.state.unwrap_or(0)) {
+                Ok(proto::verified::State::Verified) => true,
+                Ok(proto::verified::State::Default) => false,
+                // The phone's own mark of a verified key that changed; the
+                // change shows here as well.
+                Ok(proto::verified::State::Unverified) | Err(_) => return None,
+            };
+            Some(Incoming::Verified {
+                peer,
+                key: IdentityKey::new(key.serialize().into_vec()),
+                verified,
+            })
+        }
         _ => None,
     }
 }
@@ -1096,6 +1121,49 @@ pub(super) mod tests {
                 read_receipts: Some(true),
                 typing_indicators: Some(false),
             })
+        );
+    }
+
+    fn verified(state: proto::verified::State, key: Option<Vec<u8>>) -> Option<Incoming> {
+        synced(ContentBody::SynchronizeMessage(SyncMessage {
+            content: Some(SyncContent::Verified(proto::Verified {
+                destination_aci_binary: Some(OTHER.as_bytes().to_vec()),
+                identity_key: key,
+                state: Some(state.into()),
+                ..Default::default()
+            })),
+            ..Default::default()
+        }))
+    }
+
+    #[test]
+    fn maps_verifications_from_the_phone() {
+        use presage::libsignal_service::protocol::IdentityKeyPair;
+
+        let key = IdentityKeyPair::generate(&mut rand::rng())
+            .identity_key()
+            .serialize();
+        let with_key = |state| verified(state, Some(key.to_vec()));
+
+        let expected = |verified| Incoming::Verified {
+            peer: ServiceId::new(OTHER),
+            key: IdentityKey::new(key.to_vec()),
+            verified,
+        };
+        assert_eq!(
+            with_key(proto::verified::State::Verified),
+            Some(expected(true))
+        );
+        assert_eq!(
+            with_key(proto::verified::State::Default),
+            Some(expected(false))
+        );
+        assert_eq!(with_key(proto::verified::State::Unverified), None);
+        assert_eq!(verified(proto::verified::State::Verified, None), None);
+        assert_eq!(
+            verified(proto::verified::State::Verified, Some(vec![5, 1])),
+            None,
+            "not a key"
         );
     }
 

@@ -38,8 +38,9 @@ impl Database {
 
         initialize_sqlcipher().await?;
         verify_key(&options).await?;
-        // Identity changes are shown to the user, not blocked, as in
-        // Signal's own clients.
+        // Changed identity keys are accepted, as in Signal's clients; the
+        // ACI protocol store (`signal::protocol`) notes each change and
+        // refuses to send to a verified key's replacement.
         let presage = SqliteStore::open_with_options(options.clone(), OnNewIdentity::Trust)
             .await
             .map_err(|error| StorageError::Database(error.to_string()))?;

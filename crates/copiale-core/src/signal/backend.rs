@@ -14,11 +14,14 @@ use presage::libsignal_service::proto::{
     data_message, receipt_message, typing_message,
 };
 use presage::libsignal_service::protocol::{
-    Aci, DecryptionErrorMessage, ServiceId as SignalServiceId,
+    Aci, DecryptionErrorMessage, Fingerprint, IdentityKeyStore as _, ProtocolAddress,
+    ServiceId as SignalServiceId,
 };
+use presage::libsignal_service::push_service::DEFAULT_DEVICE_ID;
 use presage::manager::Registered;
 use presage::model::messages::Received;
-use presage::store::{ContentsStore as _, StateStore as _, Thread};
+use presage::store::{ContentsStore as _, StateStore as _, Store as _, Thread};
+use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant};
@@ -26,10 +29,12 @@ use tokio::time::{Duration, Instant};
 use super::errors::{presage_error, store_error};
 use super::incoming::incoming;
 use super::store::AppStore;
-use crate::backend::{BackendError, Incoming, Linker, Resendable, RetryRequest, SignalBackend};
+use crate::backend::{
+    BackendError, Incoming, Linker, PeerIdentity, Resendable, RetryRequest, SignalBackend,
+};
 use crate::model::{
-    Destination, GroupInfo, GroupMasterKey, Member, MessageBody, Outgoing, Quote, ServiceId,
-    Timestamp,
+    Destination, GroupInfo, GroupMasterKey, IdentityKey, Member, MessageBody, Outgoing, Quote,
+    SafetyNumber, ServiceId, Timestamp,
 };
 use crate::storage::Database;
 
@@ -41,14 +46,19 @@ impl Linker for PresageLinker {
     type Backend = PresageBackend;
 
     async fn load(&mut self, db: &Database) -> Result<Option<PresageBackend>, BackendError> {
-        let store = AppStore::new(db.presage_store().clone());
+        let (identity_changes_tx, identity_changes) = unbounded_channel();
+        let store = AppStore::new(
+            db.presage_store().clone(),
+            db.verified_keys(),
+            identity_changes_tx,
+        );
         if !store.is_registered().await {
             return Ok(None);
         }
         let manager = Manager::load_registered(store)
             .await
             .map_err(presage_error)?;
-        Ok(Some(PresageBackend::new(manager)))
+        Ok(Some(PresageBackend::new(manager, identity_changes)))
     }
 
     async fn link(
@@ -57,7 +67,12 @@ impl Linker for PresageLinker {
         device_name: &str,
         url: oneshot::Sender<String>,
     ) -> Result<PresageBackend, BackendError> {
-        let store = AppStore::new(db.presage_store().clone());
+        let (identity_changes_tx, identity_changes) = unbounded_channel();
+        let store = AppStore::new(
+            db.presage_store().clone(),
+            db.verified_keys(),
+            identity_changes_tx,
+        );
         let (url_tx, url_rx) = futures::channel::oneshot::channel();
         let link = Manager::link_secondary_device(
             store,
@@ -73,7 +88,7 @@ impl Linker for PresageLinker {
         let (manager, ()) = futures::join!(link, forward_url);
         let manager = manager.map_err(presage_error)?;
         tracing::info!("linked as a secondary device");
-        Ok(PresageBackend::new(manager))
+        Ok(PresageBackend::new(manager, identity_changes))
     }
 }
 
@@ -81,6 +96,8 @@ impl Linker for PresageLinker {
 pub struct PresageBackend {
     manager: Manager<AppStore, Registered>,
     receiver: Option<Receiver>,
+    /// Until [`SignalBackend::identity_changes`] takes it.
+    identity_changes: Option<UnboundedReceiver<ServiceId>>,
 }
 
 /// The task receiving on the open connection.
@@ -91,10 +108,14 @@ struct Receiver {
 }
 
 impl PresageBackend {
-    fn new(manager: Manager<AppStore, Registered>) -> Self {
+    fn new(
+        manager: Manager<AppStore, Registered>,
+        identity_changes: UnboundedReceiver<ServiceId>,
+    ) -> Self {
         Self {
             manager,
             receiver: None,
+            identity_changes: Some(identity_changes),
         }
     }
 }
@@ -451,6 +472,51 @@ impl SignalBackend for PresageBackend {
         .boxed_local()
     }
 
+    /// The key presage's store holds for the peer's ACI, and the safety
+    /// number from it as Signal's clients compute it.
+    fn identity(
+        &mut self,
+        peer: ServiceId,
+    ) -> LocalBoxFuture<'static, Result<Option<PeerIdentity>, BackendError>> {
+        let manager = self.manager.clone();
+        async move {
+            let store = manager.store().aci_protocol_store();
+            let address = ProtocolAddress::new(
+                Aci::from(peer.uuid()).service_id_string(),
+                *DEFAULT_DEVICE_ID,
+            );
+            let Some(key) = store.get_identity(&address).await.map_err(store_error)? else {
+                return Ok(None);
+            };
+            let own = store.get_identity_key_pair().await.map_err(store_error)?;
+            let me = manager.registration_data().service_ids.aci;
+            let fingerprint = Fingerprint::new(
+                FINGERPRINT_VERSION,
+                FINGERPRINT_ITERATIONS,
+                me.as_bytes(),
+                own.identity_key(),
+                peer.uuid().as_bytes(),
+                &key,
+            )
+            .and_then(|fingerprint| fingerprint.display_string())
+            .map_err(|error| BackendError::new(format!("computing a safety number: {error}")))?;
+            Ok(Some(PeerIdentity {
+                key: IdentityKey::new(key.serialize().into_vec()),
+                safety_number: SafetyNumber::new(fingerprint),
+            }))
+        }
+        .boxed_local()
+    }
+
+    fn identity_changes(&mut self) -> LocalBoxStream<'static, ServiceId> {
+        match self.identity_changes.take() {
+            Some(mut changes) => {
+                futures::stream::poll_fn(move |cx| changes.poll_recv(cx)).boxed_local()
+            }
+            None => futures::stream::empty().boxed_local(),
+        }
+    }
+
     fn own_id(&self) -> ServiceId {
         ServiceId::new(self.manager.registration_data().service_ids.aci)
     }
@@ -650,6 +716,10 @@ async fn relay(
     }
 }
 
+/// Safety numbers as Signal's clients compute them: from ACIs, version 2.
+const FINGERPRINT_VERSION: u32 = 2;
+const FINGERPRINT_ITERATIONS: u32 = 5200;
+
 /// Most profiles one [`SignalBackend::fetch_member_profiles`] call fetches.
 const MAX_PROFILE_FETCHES: usize = 100;
 
@@ -734,7 +804,8 @@ mod tests {
         let db = Database::open(&dir.path().join("test.db"), &key)
             .await
             .unwrap();
-        let store = AppStore::new(db.presage_store().clone());
+        let (changes, _) = unbounded_channel();
+        let store = AppStore::new(db.presage_store().clone(), db.verified_keys(), changes);
         let thread = Thread::Contact(Aci::from(SENDER).into());
 
         store

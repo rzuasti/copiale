@@ -18,8 +18,8 @@ use tokio::task::LocalSet;
 use crate::backend::{BackendError, Linker};
 use crate::clock::{Clock, SystemClock};
 use crate::model::{
-    Account, Contact, ConversationId, ConversationSummary, Message, MessageBody, MessageId,
-    ServiceId,
+    Account, Contact, ConversationId, ConversationSummary, Identity, Message, MessageBody,
+    MessageId, ServiceId,
 };
 use crate::storage::{Passphrase, SecretStore, Storage};
 
@@ -91,6 +91,15 @@ pub enum Command {
         conversation: ConversationId,
         typing: bool,
     },
+    /// Answered with [`Event::Identity`].
+    LoadIdentity(ServiceId),
+    /// Accepts the changed safety number of an account verified on the
+    /// phone ([`Verification::Changed`]): it counts as unverified, and
+    /// sending to it works again. [`Event::Identity`] and
+    /// [`Event::UnconfirmedIdentities`] follow.
+    ///
+    /// [`Verification::Changed`]: crate::model::Verification::Changed
+    ConfirmIdentity(ServiceId),
     /// Removes this device from the account, unless the phone already did,
     /// then deletes all local data (database, salt, keychain key; not the
     /// config) and starts over: [`Event::Unlinking`], then
@@ -177,6 +186,14 @@ pub enum Event {
         message: Message,
         error: BackendError,
     },
+    /// An account's safety number and verification. Answers
+    /// [`Command::LoadIdentity`]; also sent when they change.
+    Identity(Identity),
+    /// Accounts verified on the phone whose identity key changed since:
+    /// sending to them fails, with [`BackendError::is_untrusted_identity`],
+    /// until [`Command::ConfirmIdentity`]. Sent when the list changes, and
+    /// once ready unless it's empty.
+    UnconfirmedIdentities(Vec<ServiceId>),
     /// The server rejected this device's credentials, as once the phone
     /// unlinks it. The core stops reconnecting: offer [`Command::Unlink`],
     /// or [`Command::Reconnect`] in case it was a glitch.

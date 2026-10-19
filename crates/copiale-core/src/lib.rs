@@ -22,14 +22,16 @@ pub use actor::{
     StorageFailure, TYPING_TIMEOUT, spawn, spawn_with_options,
 };
 pub use backend::{
-    BackendError, Incoming, Linker, Resendable, RetryRequest, SignalBackend, Undecryptable,
+    BackendError, Incoming, Linker, PeerIdentity, Resendable, RetryRequest, SignalBackend,
+    Undecryptable,
 };
 pub use clock::{Clock, SystemClock};
 pub use dirs::{create_private_dir, runtime_dir};
 pub use model::{
     Account, AccountSettings, Attachment, Change, ChatRef, Contact, Content, ConversationId,
     ConversationSummary, Destination, Direction, Expiry, GroupId, GroupInfo, GroupMasterKey,
-    GroupRef, GroupUpdate, IncomingMessage, Member, Message, MessageBody, MessageChange, MessageId,
-    MessagePreview, MessageRef, MessageStatus, Outgoing, Peer, PhoneNumber, Quote, ReceiptKind,
-    SentMessage, ServiceId, Timestamp, Unsupported,
+    GroupRef, GroupUpdate, Identity, IdentityKey, IncomingMessage, Member, Message, MessageBody,
+    MessageChange, MessageId, MessagePreview, MessageRef, MessageStatus, Outgoing, Peer,
+    PhoneNumber, Quote, ReceiptKind, SafetyNumber, SentMessage, ServiceId, Timestamp, Unsupported,
+    Verification,
 };

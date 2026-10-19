@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use futures::future::LocalBoxFuture;
-use futures::stream::LocalBoxStream;
+use futures::stream::{Fuse, LocalBoxStream};
 use futures::{FutureExt as _, StreamExt as _};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::time::Instant;
@@ -20,8 +20,9 @@ use crate::backend::{BackendError, Incoming, SignalBackend, Undecryptable};
 use crate::clock::Clock;
 use crate::model::{
     Account, AccountSettings, Change, ChatRef, Content, ConversationId, Destination, GroupId,
-    GroupRef, IncomingMessage, Message, MessageBody, MessageChange, MessageId, MessageRef,
-    MessageStatus, Outgoing, Quote, ReceiptKind, SentMessage, ServiceId, Timestamp,
+    GroupRef, Identity, IdentityKey, IncomingMessage, Message, MessageBody, MessageChange,
+    MessageId, MessageRef, MessageStatus, Outgoing, Peer, Quote, ReceiptKind, SentMessage,
+    ServiceId, Timestamp, Verification,
 };
 use crate::storage::{Database, StorageError};
 
@@ -81,10 +82,14 @@ struct Session<'a, B> {
     drain_by: Option<Instant>,
     /// Set once the server rejected our credentials.
     revoked: bool,
+    /// Accounts whose identity key changed, from the backend.
+    identity_changes: Fuse<LocalBoxStream<'static, ServiceId>>,
+    /// Verified accounts whose identity key changed since, by ID.
+    unconfirmed: Vec<ServiceId>,
 }
 
 impl<'a, B: SignalBackend> Session<'a, B> {
-    fn new(core: &'a mut Core, db: &'a Database, backend: B) -> Self {
+    fn new(core: &'a mut Core, db: &'a Database, mut backend: B) -> Self {
         let (contacts_asked_tx, contacts_asked_rx) = unbounded_channel();
         let options = &core.options;
         Self {
@@ -109,6 +114,8 @@ impl<'a, B: SignalBackend> Session<'a, B> {
             stopping: false,
             drain_by: None,
             revoked: false,
+            identity_changes: backend.identity_changes().fuse(),
+            unconfirmed: Vec::new(),
             core,
             db,
             backend,
@@ -151,6 +158,7 @@ impl<'a, B: SignalBackend> Session<'a, B> {
             }
         }
         self.send_account();
+        self.check_unconfirmed().await;
     }
 
     async fn run(mut self) -> Served {
@@ -175,6 +183,10 @@ impl<'a, B: SignalBackend> Session<'a, B> {
                 },
                 update = self.groups.next() => {
                     self.group_update(update).await;
+                    None
+                }
+                Some(peer) = self.identity_changes.next() => {
+                    self.identity_changed(peer).await;
                     None
                 }
                 Some(asked) = self.contacts_asked_rx.recv() => {
@@ -241,6 +253,8 @@ impl<'a, B: SignalBackend> Session<'a, B> {
                 limit,
             }) => self.load_messages(conversation, before, limit).await,
             Some(Command::MarkRead(conversation)) => self.mark_read(conversation).await,
+            Some(Command::LoadIdentity(peer)) => self.load_identity(peer).await,
+            Some(Command::ConfirmIdentity(peer)) => self.confirm_identity(peer).await,
             Some(Command::Typing {
                 conversation,
                 typing,
@@ -254,6 +268,10 @@ impl<'a, B: SignalBackend> Session<'a, B> {
 
     /// Handles an item from the connection.
     async fn receive(&mut self, item: Incoming) {
+        // Changes noticed while decrypting `item` come first.
+        while let Some(Some(peer)) = self.identity_changes.next().now_or_never() {
+            self.identity_changed(peer).await;
+        }
         match item {
             Incoming::QueueEmpty => self.synced(),
             Incoming::Message(message) => self.message_received(message).await,
@@ -278,6 +296,11 @@ impl<'a, B: SignalBackend> Session<'a, B> {
                 read_receipts,
                 typing_indicators,
             } => self.settings_synced(read_receipts, typing_indicators).await,
+            Incoming::Verified {
+                peer,
+                key,
+                verified,
+            } => self.verified_synced(peer, key, verified).await,
             Incoming::ContactsSynced => self.contacts_synced().await,
             Incoming::Undecryptable(failure) => self.undecryptable(failure).await,
             Incoming::RetryRequested {
@@ -527,6 +550,11 @@ impl<'a, B: SignalBackend> Session<'a, B> {
         };
         self.emit(Event::MessageAdded(message.clone()));
         self.send_conversation(conversation).await;
+        if self.awaits_confirmation(conversation).await {
+            return self
+                .send_finished(message.id, Err(BackendError::untrusted_identity()))
+                .await;
+        }
         let outgoing = text_of(&message.content);
         self.outbox.push(
             message.id,
@@ -541,6 +569,11 @@ impl<'a, B: SignalBackend> Session<'a, B> {
         match self.db.retry_send(id).await {
             Ok(Some((destination, message))) => {
                 self.emit(Event::MessageUpdated(message.clone()));
+                if self.awaits_confirmation(message.conversation).await {
+                    return self
+                        .send_finished(message.id, Err(BackendError::untrusted_identity()))
+                        .await;
+                }
                 let outgoing = text_of(&message.content);
                 self.outbox.push(
                     message.id,
@@ -593,6 +626,9 @@ impl<'a, B: SignalBackend> Session<'a, B> {
         if !self.apply_own_change(&change).await {
             return;
         }
+        if self.awaits_confirmation(message.conversation).await {
+            return self.change_refused(id);
+        }
         let outgoing = Outgoing::Edit {
             target: message.sent_at,
             body,
@@ -615,6 +651,9 @@ impl<'a, B: SignalBackend> Session<'a, B> {
                 change: Change::Delete,
             };
             if self.apply_own_change(&change).await {
+                if self.awaits_confirmation(message.conversation).await {
+                    return self.change_refused(id);
+                }
                 let outgoing = Outgoing::Delete {
                     target: message.sent_at,
                 };
@@ -983,6 +1022,160 @@ impl<'a, B: SignalBackend> Session<'a, B> {
         }
     }
 
+    // Identities.
+
+    /// Notes `peer`'s new identity key in the chats with them.
+    async fn identity_changed(&mut self, peer: ServiceId) {
+        if peer == self.backend.own_id() {
+            return;
+        }
+        match self.db.add_safety_number_changed(peer, self.now()).await {
+            Ok(lines) => {
+                for line in lines {
+                    let conversation = line.conversation;
+                    self.emit(Event::MessageAdded(line));
+                    self.send_conversation(conversation).await;
+                }
+            }
+            Err(error) => self.database_error(error),
+        }
+        self.identity_updated(peer).await;
+    }
+
+    async fn verified_synced(&mut self, peer: ServiceId, key: IdentityKey, verified: bool) {
+        match self.db.set_verified(peer, verified.then_some(&key)).await {
+            Ok(true) => {
+                tracing::info!(?peer, verified, "verification synced");
+                self.identity_updated(peer).await;
+            }
+            Ok(false) => {}
+            Err(error) => self.database_error(error),
+        }
+    }
+
+    /// Accepts `peer`'s changed key: they count as unverified.
+    async fn confirm_identity(&mut self, peer: ServiceId) {
+        let changed = self
+            .identity(peer)
+            .await
+            .is_some_and(|identity| identity.verification == Verification::Changed);
+        if !changed {
+            tracing::debug!(?peer, "no changed safety number to confirm");
+            return;
+        }
+        match self.db.set_verified(peer, None).await {
+            Ok(_) => {
+                tracing::info!(?peer, "changed safety number confirmed");
+                self.identity_updated(peer).await;
+            }
+            Err(error) => self.database_error(error),
+        }
+    }
+
+    async fn load_identity(&mut self, peer: ServiceId) {
+        if let Some(identity) = self.identity(peer).await {
+            self.emit(Event::Identity(identity));
+        }
+    }
+
+    /// Reports `peer`'s identity, and which await confirmation, after a
+    /// change.
+    async fn identity_updated(&mut self, peer: ServiceId) {
+        self.load_identity(peer).await;
+        self.check_unconfirmed().await;
+    }
+
+    /// `peer`'s safety number and verification; `None` if unreadable.
+    async fn identity(&mut self, peer: ServiceId) -> Option<Identity> {
+        let current = match self.backend.identity(peer).await {
+            Ok(current) => current,
+            Err(error) => {
+                tracing::warn!(%error, "reading an identity failed");
+                return None;
+            }
+        };
+        let verified = match self.db.verified_key(peer).await {
+            Ok(verified) => verified,
+            Err(error) => {
+                self.database_error(error);
+                return None;
+            }
+        };
+        let key = current.as_ref().map(|current| &current.key);
+        Some(Identity {
+            peer,
+            verification: verification(verified.as_ref(), key),
+            safety_number: current.map(|current| current.safety_number),
+        })
+    }
+
+    /// Finds the verified identities that changed; reports them if that
+    /// list changed. Unreadable ones keep their state.
+    async fn check_unconfirmed(&mut self) {
+        let verified = match self.db.verified().await {
+            Ok(verified) => verified,
+            Err(error) => return self.database_error(error),
+        };
+        let mut unconfirmed = Vec::new();
+        for (peer, key) in verified {
+            let changed = match self.backend.identity(peer).await {
+                Ok(current) => {
+                    let current = current.as_ref().map(|current| &current.key);
+                    verification(Some(&key), current) == Verification::Changed
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "reading an identity failed");
+                    self.unconfirmed.contains(&peer)
+                }
+            };
+            if changed {
+                unconfirmed.push(peer);
+            }
+        }
+        if unconfirmed != self.unconfirmed {
+            self.unconfirmed.clone_from(&unconfirmed);
+            self.emit(Event::UnconfirmedIdentities(unconfirmed));
+        }
+    }
+
+    /// Whether `conversation` has a recipient whose changed safety number
+    /// awaits confirmation, so sending there fails.
+    async fn awaits_confirmation(&self, conversation: ConversationId) -> bool {
+        if self.unconfirmed.is_empty() {
+            return false;
+        }
+        let summary = match self.db.conversation(conversation).await {
+            Ok(Some(summary)) => summary,
+            Ok(None) => return false,
+            Err(error) => {
+                self.database_error(error);
+                return false;
+            }
+        };
+        let blocked = match summary.peer {
+            Peer::Contact(peer) => self.unconfirmed.contains(&peer),
+            Peer::Group(_) => summary
+                .members
+                .iter()
+                .any(|member| self.unconfirmed.contains(&member.id)),
+        };
+        if blocked {
+            tracing::info!(
+                conversation = conversation.get(),
+                "not sending until a changed safety number is confirmed"
+            );
+        }
+        blocked
+    }
+
+    /// An edit or delete not sent, for an unconfirmed safety number.
+    fn change_refused(&self, id: MessageId) {
+        self.emit(Event::ChangeFailed {
+            id,
+            error: BackendError::untrusted_identity(),
+        });
+    }
+
     // Helpers.
 
     /// Keeps a send to resend on request, and forgets old ones.
@@ -1331,6 +1524,16 @@ fn due(clock: &dyn Clock, at: Option<Timestamp>) -> LocalBoxFuture<'static, ()> 
     match at {
         Some(at) => clock.sleep_until(at),
         None => std::future::pending().boxed_local(),
+    }
+}
+
+/// An identity's verification: `verified` is the key verified on the
+/// phone, `current` the one sessions use.
+fn verification(verified: Option<&IdentityKey>, current: Option<&IdentityKey>) -> Verification {
+    match (verified, current) {
+        (None, _) => Verification::Unverified,
+        (Some(verified), Some(current)) if verified != current => Verification::Changed,
+        (Some(_), _) => Verification::Verified,
     }
 }
 

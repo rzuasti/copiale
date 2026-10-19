@@ -9,6 +9,8 @@ publish.workspace = true
 
 [dependencies]
 argon2.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
 directories.workspace = true
 futures.workspace = true
 gethostname.workspace = true
@@ -33,7 +35,6 @@ zeroize.workspace = true
 libc.workspace = true
 
 [dev-dependencies]
-chrono.workspace = true
 copiale-testkit.workspace = true
 log.workspace = true
 # Builds handshake errors in tests; same major as libsignal-service uses.

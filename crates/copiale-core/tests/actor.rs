@@ -9,14 +9,14 @@ use copiale_core::storage::{KdfParams, Passphrase, Storage, StoragePaths};
 use copiale_core::{
     Account, AccountSettings, BackendError, Change, ChatRef, Command, Contact, Content,
     ConversationId, ConversationSummary, CoreHandle, CoreOptions, Destination, Direction,
-    EDIT_WINDOW, Event, Events, Expiry, GroupId, GroupInfo, GroupRef, GroupUpdate, Incoming,
-    IncomingMessage, Member, Message, MessageBody, MessageChange, MessagePreview, MessageRef,
-    MessageStatus, Outgoing, Peer, PhoneNumber, Quote, ReceiptKind, RetryRequest, SentMessage,
-    StorageFailure, Timestamp, Undecryptable,
+    EDIT_WINDOW, Event, Events, Expiry, GroupId, GroupInfo, GroupRef, GroupUpdate, Identity,
+    Incoming, IncomingMessage, Member, Message, MessageBody, MessageChange, MessagePreview,
+    MessageRef, MessageStatus, Outgoing, Peer, PhoneNumber, Quote, ReceiptKind, RetryRequest,
+    SentMessage, StorageFailure, Timestamp, Undecryptable, Verification,
 };
 use copiale_testkit::{
     DEVICE_NAME, FAKE_LINK_URL, FakeNetwork, FakePhone, ManualClock, MemorySecretStore, OWN_ID,
-    SentText, fake_backend, fake_linker, group_key, service_id, text,
+    SentText, fake_backend, fake_linker, group_key, identity_key, safety_number, service_id, text,
 };
 use tempfile::TempDir;
 
@@ -2930,5 +2930,258 @@ async fn sends_are_resent_only_for_a_day() {
         .map(|(_, sent)| sent.outgoing)
         .collect();
     assert_eq!(resent, [text("recent")]);
+    stop(running).await;
+}
+
+// Safety numbers
+
+fn verified(peer: u128, key: u8, verified: bool) -> Incoming {
+    Incoming::Verified {
+        peer: service_id(peer),
+        key: identity_key(key),
+        verified,
+    }
+}
+
+fn identity(peer: u128, key: Option<u8>, verification: Verification) -> Event {
+    Event::Identity(Identity {
+        peer: service_id(peer),
+        safety_number: key.map(|key| safety_number(&identity_key(key))),
+        verification,
+    })
+}
+
+/// A group of Alice (1) and Carol (3), known from a message by Alice.
+async fn named_group(running: &mut Running) -> ConversationId {
+    let info = GroupInfo {
+        title: "Dev".into(),
+        revision: 3,
+        members: vec![member(1, Some("Alice")), member(3, Some("Carol"))],
+    };
+    running.network.set_group(group_key(1), info);
+    let (_, summary) = receive_in_group(running, group_ref(1, 3), 1, 100).await;
+    conversation_updated(&mut running.events).await;
+    summary.id
+}
+
+/// Conversations of the next `count` lines noting a changed safety number.
+async fn safety_number_lines(events: &mut Events, count: usize) -> Vec<ConversationId> {
+    let mut conversations = Vec::new();
+    for _ in 0..count {
+        let line = message_added(events).await;
+        assert_eq!(line.content, Content::SafetyNumberChanged);
+        assert_eq!(line.sender, Some(service_id(1)));
+        assert!(line.read);
+        assert_eq!(conversation_updated(events).await.id, line.conversation);
+        conversations.push(line.conversation);
+    }
+    conversations.sort();
+    conversations
+}
+
+#[tokio::test]
+async fn changed_safety_numbers_are_noted_in_every_shared_chat() {
+    let (_dir, mut running) = ready().await;
+    let group = named_group(&mut running).await;
+    let chat = open_chat(&mut running, 1).await;
+    open_chat(&mut running, 2).await;
+    running.network.set_identity(service_id(1), identity_key(1));
+
+    running
+        .network
+        .change_identity(service_id(1), identity_key(2));
+
+    let mut shared = vec![group, chat];
+    shared.sort();
+    assert_eq!(safety_number_lines(&mut running.events, 2).await, shared);
+    expect(
+        &mut running.events,
+        identity(1, Some(2), Verification::Unverified),
+    )
+    .await;
+    // Not verified, so sending goes on.
+    send_text(&running, chat, "still here");
+    pending_added(&mut running.events).await;
+    let sent = message_updated(&mut running.events).await;
+    assert_eq!(sent.status, Some(MessageStatus::Sent));
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn own_identity_changes_are_not_noted() {
+    let (_dir, mut running) = ready().await;
+    open_chat(&mut running, OWN_ID).await;
+
+    running
+        .network
+        .change_identity(service_id(OWN_ID), identity_key(2));
+
+    assert!(flush(&mut running).await.is_empty());
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn sending_to_a_changed_verified_identity_waits_for_confirmation() {
+    let (_dir, mut running) = ready().await;
+    let group = named_group(&mut running).await;
+    let chat = open_chat(&mut running, 1).await;
+    let elsewhere = open_chat(&mut running, 2).await;
+    send_text(&running, chat, "first");
+    let first = pending_added(&mut running.events).await;
+    message_updated(&mut running.events).await;
+    running.network.set_identity(service_id(1), identity_key(1));
+    running.network.deliver(verified(1, 1, true));
+    expect(
+        &mut running.events,
+        identity(1, Some(1), Verification::Verified),
+    )
+    .await;
+    assert!(flush(&mut running).await.is_empty());
+
+    running
+        .network
+        .change_identity(service_id(1), identity_key(2));
+    safety_number_lines(&mut running.events, 2).await;
+    expect(
+        &mut running.events,
+        identity(1, Some(2), Verification::Changed),
+    )
+    .await;
+    expect(
+        &mut running.events,
+        Event::UnconfirmedIdentities(vec![service_id(1)]),
+    )
+    .await;
+
+    let mut failed = Vec::new();
+    for conversation in [chat, group] {
+        send_text(&running, conversation, "hello?");
+        let pending = pending_added(&mut running.events).await;
+        let (message, error) = send_failed(&mut running.events).await;
+        assert_eq!(message.id, pending.id);
+        assert_eq!(message.status, Some(MessageStatus::Failed));
+        assert!(error.is_untrusted_identity());
+        failed.push(pending.id);
+    }
+    send(
+        &running,
+        Command::Edit {
+            id: first.id,
+            body: MessageBody::new("first!"),
+        },
+    );
+    message_updated(&mut running.events).await;
+    conversation_updated(&mut running.events).await;
+    expect(
+        &mut running.events,
+        Event::ChangeFailed {
+            id: first.id,
+            error: BackendError::untrusted_identity(),
+        },
+    )
+    .await;
+    assert_eq!(running.network.sent().len(), 1, "only the first message");
+    send_text(&running, elsewhere, "unaffected");
+    pending_added(&mut running.events).await;
+    message_updated(&mut running.events).await;
+    assert_eq!(running.network.sent().len(), 2);
+
+    send(&running, Command::ConfirmIdentity(service_id(1)));
+    expect(
+        &mut running.events,
+        identity(1, Some(2), Verification::Unverified),
+    )
+    .await;
+    expect(
+        &mut running.events,
+        Event::UnconfirmedIdentities(Vec::new()),
+    )
+    .await;
+    for id in failed {
+        send(&running, Command::RetrySend(id));
+        message_updated(&mut running.events).await;
+        let sent = message_updated(&mut running.events).await;
+        assert_eq!(sent.status, Some(MessageStatus::Sent));
+    }
+    assert_eq!(running.network.sent().len(), 4);
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn phone_verifications_apply_and_only_changes_need_confirming() {
+    let (_dir, mut running) = ready().await;
+    running.network.set_identity(service_id(1), identity_key(1));
+    send(&running, Command::LoadIdentity(service_id(1)));
+    expect(
+        &mut running.events,
+        identity(1, Some(1), Verification::Unverified),
+    )
+    .await;
+    send(&running, Command::LoadIdentity(service_id(2)));
+    expect(
+        &mut running.events,
+        identity(2, None, Verification::Unverified),
+    )
+    .await;
+
+    running.network.deliver(verified(1, 1, true));
+    expect(
+        &mut running.events,
+        identity(1, Some(1), Verification::Verified),
+    )
+    .await;
+    // Verified for a key no session uses yet.
+    running.network.deliver(verified(2, 7, true));
+    expect(
+        &mut running.events,
+        identity(2, None, Verification::Verified),
+    )
+    .await;
+    send(&running, Command::ConfirmIdentity(service_id(1)));
+    send(&running, Command::LoadIdentity(service_id(1)));
+    expect(
+        &mut running.events,
+        identity(1, Some(1), Verification::Verified),
+    )
+    .await;
+
+    running.network.deliver(verified(1, 1, true));
+    running.network.deliver(verified(1, 1, false));
+    expect(
+        &mut running.events,
+        identity(1, Some(1), Verification::Unverified),
+    )
+    .await;
+    assert!(flush(&mut running).await.is_empty());
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn unconfirmed_identities_are_reported_once_ready() {
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = MemorySecretStore::default();
+    let mut running = start(dir.path(), &secrets, true);
+    expect_ready(&mut running.events).await;
+    expect(&mut running.events, Event::Connected).await;
+    running.network.set_identity(service_id(1), identity_key(1));
+    running.network.deliver(verified(1, 1, true));
+    expect(
+        &mut running.events,
+        identity(1, Some(1), Verification::Verified),
+    )
+    .await;
+    stop(running).await;
+
+    let mut running = start_with(dir.path(), &secrets, true, fast(), |network| {
+        network.set_identity(service_id(1), identity_key(2));
+    });
+
+    expect_ready(&mut running.events).await;
+    expect(
+        &mut running.events,
+        Event::UnconfirmedIdentities(vec![service_id(1)]),
+    )
+    .await;
+    expect(&mut running.events, Event::Connected).await;
     stop(running).await;
 }

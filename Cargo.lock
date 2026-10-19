@@ -1314,6 +1314,7 @@ name = "copiale-core"
 version = "0.1.0"
 dependencies = [
  "argon2 0.6.0",
+ "async-trait",
  "chrono",
  "copiale-testkit",
  "directories",

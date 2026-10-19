@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use copiale_core::{
     BackendError, Command, Contact, Content, ConversationId, ConversationSummary, DELETE_WINDOW,
-    Direction, EDIT_WINDOW, Event, Message, MessageBody, MessageId, MessageStatus, Peer, ServiceId,
-    TYPING_TIMEOUT, Timestamp,
+    Direction, EDIT_WINDOW, Event, Identity, Message, MessageBody, MessageId, MessageStatus, Peer,
+    ServiceId, TYPING_TIMEOUT, Timestamp, Verification,
 };
 
 use super::content::{placeholders, quote_line, system_lines};
@@ -116,6 +116,8 @@ pub enum Overlay {
     NewChat,
     Palette,
     Settings,
+    /// An account's safety number.
+    SafetyNumber(ServiceId),
 }
 
 /// A picker's query and highlighted entry.
@@ -159,6 +161,10 @@ pub struct Chat {
     /// The last failure to read or write local data, until dismissed: what
     /// it was storing may be lost.
     storage_error: Option<String>,
+    /// Safety numbers and verifications, as loaded.
+    identities: HashMap<ServiceId, Identity>,
+    /// Verified accounts whose changed safety number awaits confirmation.
+    unconfirmed: Vec<ServiceId>,
 }
 
 #[derive(Debug)]
@@ -261,6 +267,8 @@ impl Chat {
             pending_peer: None,
             requested_open: None,
             storage_error: None,
+            identities: HashMap::new(),
+            unconfirmed: Vec::new(),
         }
     }
 
@@ -553,6 +561,10 @@ impl Chat {
                 }
             }
             Event::DatabaseError(error) => self.storage_error = Some(error.clone()),
+            Event::Identity(identity) => {
+                self.identities.insert(identity.peer, identity.clone());
+            }
+            Event::UnconfirmedIdentities(peers) => self.unconfirmed.clone_from(peers),
             Event::Connected => self.connection = Connection::Syncing,
             Event::Synced => self.connection = Connection::Online,
             Event::Disconnected { retry_in, .. } => {
@@ -692,7 +704,121 @@ impl Chat {
             .iter()
             .filter(|summary| self.listed(summary) && Some(summary.id) != self.open_id())
             .map(|summary| (summary.id, title(summary)));
-        palette::entries(chats, &self.picker.query)
+        palette::entries(chats, self.safety_number_entries(), &self.picker.query)
+    }
+
+    /// The open 1:1 chat's safety number, or in a group, those of members
+    /// whose change awaits confirmation, as palette entries.
+    fn safety_number_entries(&self) -> Vec<(PaletteAction, String)> {
+        let Some(summary) = self.open_conversation() else {
+            return Vec::new();
+        };
+        match summary.peer {
+            Peer::Contact(peer) => {
+                vec![(PaletteAction::SafetyNumber(peer), "Safety number".into())]
+            }
+            Peer::Group(_) => self
+                .unconfirmed_here()
+                .into_iter()
+                .map(|peer| {
+                    let label = format!("Safety number: {}", self.peer_name(peer));
+                    (PaletteAction::SafetyNumber(peer), label)
+                })
+                .collect(),
+        }
+    }
+
+    /// Shows `peer`'s safety number, once loaded.
+    pub fn show_safety_number(&mut self, peer: ServiceId) -> Command {
+        self.open_overlay(Overlay::SafetyNumber(peer));
+        Command::LoadIdentity(peer)
+    }
+
+    /// The name of the account whose safety number shows, and its
+    /// identity once loaded.
+    pub fn shown_identity(&self) -> Option<(String, Option<&Identity>)> {
+        let Some(Overlay::SafetyNumber(peer)) = self.overlay else {
+            return None;
+        };
+        Some((self.peer_name(peer), self.identities.get(&peer)))
+    }
+
+    /// Confirms the shown safety number, if it changed since verified, and
+    /// closes it.
+    pub fn confirm_identity(&mut self) -> Option<Command> {
+        let Some(Overlay::SafetyNumber(peer)) = self.overlay else {
+            return None;
+        };
+        let identity = self.identities.get(&peer)?;
+        if identity.verification != Verification::Changed {
+            return None;
+        }
+        self.overlay = None;
+        Some(Command::ConfirmIdentity(peer))
+    }
+
+    /// Why sending in the open chat fails, if a safety number there awaits
+    /// confirmation, and whose to show first.
+    pub fn identity_banner(&self) -> Option<(String, ServiceId)> {
+        let unconfirmed = self.unconfirmed_here();
+        let text = match unconfirmed.as_slice() {
+            [] => return None,
+            [one] => format!(
+                "{}'s safety number changed since you verified it; confirm it to send",
+                self.peer_name(*one)
+            ),
+            more => format!(
+                "{} members' safety numbers changed since you verified them; confirm them to \
+                 send",
+                more.len()
+            ),
+        };
+        Some((text, unconfirmed[0]))
+    }
+
+    /// The open chat's accounts whose changed safety number awaits
+    /// confirmation.
+    fn unconfirmed_here(&self) -> Vec<ServiceId> {
+        let Some(summary) = self.open_conversation() else {
+            return Vec::new();
+        };
+        let unconfirmed = |id: &ServiceId| self.unconfirmed.contains(id);
+        match summary.peer {
+            Peer::Contact(peer) => [peer].into_iter().filter(unconfirmed).collect(),
+            Peer::Group(_) => summary
+                .members
+                .iter()
+                .map(|member| member.id)
+                .filter(unconfirmed)
+                .collect(),
+        }
+    }
+
+    /// An account's contact name, or name in the open group, or a stand-in.
+    fn peer_name(&self, peer: ServiceId) -> String {
+        let chat = self
+            .conversations
+            .iter()
+            .find(|summary| summary.peer == Peer::Contact(peer))
+            .and_then(|summary| summary.title.clone());
+        let member = || {
+            self.open_conversation()?
+                .members
+                .iter()
+                .find(|member| member.id == peer)?
+                .name
+                .clone()
+        };
+        let contact = || {
+            self.contacts
+                .iter()
+                .find(|contact| contact.id == peer)?
+                .name
+                .clone()
+        };
+        chat.or_else(member)
+            .or_else(contact)
+            .unwrap_or_else(|| unknown(peer))
     }
 
     /// Picks entry `ix`, or the highlighted one, and closes the palette.
@@ -1215,7 +1341,9 @@ fn unknown(peer: ServiceId) -> String {
 #[cfg(test)]
 mod tests {
     use chrono::FixedOffset;
-    use copiale_core::{Attachment, Content, Expiry, GroupMasterKey, GroupUpdate, Member};
+    use copiale_core::{
+        Attachment, Content, Expiry, GroupMasterKey, GroupUpdate, Member, SafetyNumber,
+    };
     use uuid::Uuid;
 
     use super::*;
@@ -2347,7 +2475,10 @@ mod tests {
 
         chat.toggle_palette();
         assert_eq!(chat.overlay(), Some(Overlay::Palette));
-        assert_eq!(&palette_labels(&chat)[..3], ["Bob", "Carol", "New chat"]);
+        assert_eq!(
+            &palette_labels(&chat)[..4],
+            ["Bob", "Carol", "Safety number", "New chat"]
+        );
         assert_eq!(chat.picker_selected(), Some(0));
 
         chat.set_picker_query("car");
@@ -2411,5 +2542,91 @@ mod tests {
             chat.apply(&Event::ConversationUpdated(summary(id, NOW, 0, None)), true);
         }
         assert!(!chat.has_unread());
+    }
+
+    fn identity(n: u128, verification: Verification) -> Event {
+        Event::Identity(Identity {
+            peer: peer(n),
+            safety_number: Some(SafetyNumber::new("1".repeat(60))),
+            verification,
+        })
+    }
+
+    fn safety_entries(chat: &Chat) -> Vec<String> {
+        chat.palette_entries()
+            .into_iter()
+            .filter(|entry| matches!(entry.action, PaletteAction::SafetyNumber(_)))
+            .map(|entry| entry.label)
+            .collect()
+    }
+
+    #[test]
+    fn changed_safety_numbers_show_a_banner_until_confirmed() {
+        let mut chat = opened(Vec::new());
+        assert_eq!(chat.identity_banner(), None);
+        chat.toggle_palette();
+        assert_eq!(safety_entries(&chat), ["Safety number"]);
+        chat.close_overlay();
+
+        chat.apply(&Event::UnconfirmedIdentities(vec![peer(1)]), true);
+        let banner = "Alice's safety number changed since you verified it; confirm it to send";
+        assert_eq!(chat.identity_banner(), Some((banner.into(), peer(1))));
+
+        let command = chat.show_safety_number(peer(1));
+        assert!(matches!(command, Command::LoadIdentity(id) if id == peer(1)));
+        assert_eq!(chat.overlay(), Some(Overlay::SafetyNumber(peer(1))));
+        assert_eq!(chat.shown_identity(), Some(("Alice".into(), None)));
+        assert!(chat.confirm_identity().is_none(), "not loaded yet");
+        chat.apply(&identity(1, Verification::Changed), true);
+        let (_, shown) = chat.shown_identity().unwrap();
+        assert_eq!(shown.unwrap().verification, Verification::Changed);
+        let command = chat.confirm_identity();
+        assert!(matches!(command, Some(Command::ConfirmIdentity(id)) if id == peer(1)));
+        assert_eq!(chat.overlay(), None);
+
+        chat.apply(&Event::UnconfirmedIdentities(Vec::new()), true);
+        assert_eq!(chat.identity_banner(), None);
+    }
+
+    #[test]
+    fn only_changed_safety_numbers_can_be_confirmed() {
+        let mut chat = opened(Vec::new());
+        chat.show_safety_number(peer(1));
+        for verification in [Verification::Unverified, Verification::Verified] {
+            chat.apply(&identity(1, verification), true);
+            assert!(chat.confirm_identity().is_none());
+        }
+        assert_eq!(chat.overlay(), Some(Overlay::SafetyNumber(peer(1))));
+    }
+
+    #[test]
+    fn groups_offer_the_safety_numbers_awaiting_confirmation() {
+        let mut chat = chat();
+        let member = |n: u128, name: Option<&str>| Member {
+            id: peer(n),
+            name: name.map(Into::into),
+        };
+        let group = ConversationSummary {
+            peer: Peer::Group(GroupMasterKey::new([5; 32]).id()),
+            members: vec![member(2, Some("Bob")), member(3, None)],
+            ..summary(5, NOW, 0, Some("Dev"))
+        };
+        chat.apply(&Event::Conversations(vec![group]), true);
+        chat.open(ConversationId::new(5));
+        chat.toggle_palette();
+        assert!(safety_entries(&chat).is_empty());
+
+        chat.apply(&Event::UnconfirmedIdentities(vec![peer(2), peer(9)]), true);
+        let banner = "Bob's safety number changed since you verified it; confirm it to send";
+        assert_eq!(chat.identity_banner(), Some((banner.into(), peer(2))));
+
+        chat.apply(&Event::UnconfirmedIdentities(vec![peer(2), peer(3)]), true);
+        let banner =
+            "2 members' safety numbers changed since you verified them; confirm them to send";
+        assert_eq!(chat.identity_banner(), Some((banner.into(), peer(2))));
+        assert_eq!(
+            safety_entries(&chat),
+            ["Safety number: Bob", "Safety number: Unknown (0003)"]
+        );
     }
 }

@@ -7,8 +7,9 @@ use futures::stream::LocalBoxStream;
 use tokio::sync::oneshot;
 
 use crate::model::{
-    ChatRef, Destination, GroupId, GroupInfo, GroupMasterKey, IncomingMessage, MessageChange,
-    MessageRef, Outgoing, ReceiptKind, SentMessage, ServiceId, Timestamp,
+    ChatRef, Destination, GroupId, GroupInfo, GroupMasterKey, IdentityKey, IncomingMessage,
+    MessageChange, MessageRef, Outgoing, ReceiptKind, SafetyNumber, SentMessage, ServiceId,
+    Timestamp,
 };
 use crate::storage::Database;
 
@@ -48,6 +49,13 @@ pub enum Incoming {
         group: Option<GroupId>,
         typing: bool,
     },
+    /// The phone marked `peer`'s identity `key` verified, or `peer`
+    /// unverified.
+    Verified {
+        peer: ServiceId,
+        key: IdentityKey,
+        verified: bool,
+    },
     /// Settings synced from the phone; `None` fields are unchanged.
     Settings {
         read_receipts: Option<bool>,
@@ -66,6 +74,14 @@ pub enum Incoming {
         sent_at: Timestamp,
         session_reset: bool,
     },
+}
+
+/// An account's identity key as sessions with it use it, and its safety
+/// number with this account.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PeerIdentity {
+    pub key: IdentityKey,
+    pub safety_number: SafetyNumber,
 }
 
 /// A message that couldn't be decrypted.
@@ -145,6 +161,7 @@ enum ErrorKind {
     Other,
     Network,
     Unauthorized,
+    UntrustedIdentity,
 }
 
 impl BackendError {
@@ -172,12 +189,25 @@ impl BackendError {
         }
     }
 
+    /// A recipient's verified identity key changed: sending to them waits
+    /// until the user confirms the new one.
+    pub fn untrusted_identity() -> Self {
+        Self {
+            message: "safety number changed; confirm it to send".into(),
+            kind: ErrorKind::UntrustedIdentity,
+        }
+    }
+
     pub fn is_network(&self) -> bool {
         self.kind == ErrorKind::Network
     }
 
     pub fn is_unauthorized(&self) -> bool {
         self.kind == ErrorKind::Unauthorized
+    }
+
+    pub fn is_untrusted_identity(&self) -> bool {
+        self.kind == ErrorKind::UntrustedIdentity
     }
 }
 
@@ -272,6 +302,17 @@ pub trait SignalBackend {
         &mut self,
         destination: Destination,
     ) -> LocalBoxFuture<'static, Result<Option<u32>, BackendError>>;
+
+    /// `peer`'s identity, once a session with them exists. Doesn't use the
+    /// network, nor borrow the backend.
+    fn identity(
+        &mut self,
+        peer: ServiceId,
+    ) -> LocalBoxFuture<'static, Result<Option<PeerIdentity>, BackendError>>;
+
+    /// Accounts whose identity key changed, as sessions with them saw it,
+    /// while receiving or sending; only the first call gets them.
+    fn identity_changes(&mut self) -> LocalBoxStream<'static, ServiceId>;
 
     /// This account's ID, e.g. the peer of Note to Self.
     fn own_id(&self) -> ServiceId;

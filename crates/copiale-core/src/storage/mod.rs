@@ -9,6 +9,7 @@
 mod changes;
 mod contacts;
 mod database;
+mod identities;
 mod key;
 mod messages;
 mod receipts;
@@ -20,6 +21,7 @@ mod testing;
 use std::path::{Path, PathBuf};
 
 pub use database::Database;
+pub(crate) use identities::VerifiedKeys;
 pub use key::{DatabaseKey, KdfParams, Passphrase};
 pub use secrets::{OsKeychain, SecretError, SecretStore};
 

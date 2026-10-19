@@ -46,6 +46,10 @@ went unsolved until 2011.
     keychain. See `docs/spike-sqlcipher-results.md`.
   - Messages live in app tables only; presage's message saving is disabled
     through a delegating `Store` wrapper.
+  - Identity keys: changes are accepted, as in Signal, and noted in every
+    shared chat; sends to a key replacing one verified on the phone are
+    refused until the user confirms it (`signal::protocol`). Verified state
+    comes only from the phone's verified syncs.
   - No telemetry.
   - No core dumps (`copiale_core::hardening`); key and passphrase copies
     left in memory are listed in `docs/security.md`.

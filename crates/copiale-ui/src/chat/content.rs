@@ -32,7 +32,9 @@ pub fn placeholders(content: &Content) -> Vec<String> {
         }
         Content::Deleted => vec!["this message was deleted".into()],
         Content::Undecryptable => vec!["this message couldn't be decrypted".into()],
-        Content::GroupChanged(_) | Content::TimerChanged(_) => Vec::new(),
+        Content::GroupChanged(_) | Content::TimerChanged(_) | Content::SafetyNumberChanged => {
+            Vec::new()
+        }
     }
 }
 
@@ -104,8 +106,8 @@ fn label(attachment: &Attachment) -> Option<(&'static str, &'static str)> {
     }
 }
 
-/// System lines for a group or timer change by `actor`; empty for other
-/// content. `name` names other accounts.
+/// System lines for a group, timer or safety number change by `actor`;
+/// empty for other content. `name` names other accounts.
 pub fn system_lines(
     content: &Content,
     actor: &str,
@@ -117,6 +119,7 @@ pub fn system_lines(
             .map(|update| group_line(update, actor, &name))
             .collect(),
         Content::TimerChanged(seconds) => vec![timer_line(*seconds, actor)],
+        Content::SafetyNumberChanged => vec![format!("your safety number with {actor} changed")],
         _ => Vec::new(),
     }
 }
@@ -371,5 +374,14 @@ mod tests {
             system_lines(&Content::TimerChanged(Some(86_400)), "you", named),
             ["you set disappearing messages to 1 day"]
         );
+    }
+
+    #[test]
+    fn safety_number_changes_name_the_account() {
+        assert_eq!(
+            system_lines(&Content::SafetyNumberChanged, "Alice", named),
+            ["your safety number with Alice changed"]
+        );
+        assert!(placeholders(&Content::SafetyNumberChanged).is_empty());
     }
 }

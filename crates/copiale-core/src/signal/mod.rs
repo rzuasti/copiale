@@ -9,6 +9,7 @@
 mod backend;
 mod errors;
 mod incoming;
+mod protocol;
 mod store;
 
 pub use backend::{PresageBackend, PresageLinker};

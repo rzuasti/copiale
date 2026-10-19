@@ -8,8 +8,9 @@ use std::time::Duration;
 
 use copiale_core::storage::{Database, SecretError, SecretStore};
 use copiale_core::{
-    BackendError, Clock, Contact, Destination, GroupInfo, GroupMasterKey, Incoming, Linker,
-    MessageBody, Outgoing, Resendable, RetryRequest, ServiceId, SignalBackend, Timestamp,
+    BackendError, Clock, Contact, Destination, GroupInfo, GroupMasterKey, IdentityKey, Incoming,
+    Linker, MessageBody, Outgoing, PeerIdentity, Resendable, RetryRequest, SafetyNumber, ServiceId,
+    SignalBackend, Timestamp,
 };
 use futures::future::LocalBoxFuture;
 use futures::stream::LocalBoxStream;
@@ -34,17 +35,35 @@ pub fn fake_backend() -> (FakeBackend, FakeNetwork) {
     let (link, _) = watch::channel(Link::default());
     let link = Arc::new(link);
     let changes = Arc::new(watch::Sender::new(0));
+    let (identity_changes_tx, identity_changes) = unbounded_channel();
     let backend = FakeBackend {
         state: state.clone(),
         link: link.clone(),
         changes: changes.clone(),
+        identity_changes: Some(identity_changes),
     };
     let network = FakeNetwork {
         state,
         link,
         changes,
+        identity_changes: identity_changes_tx,
     };
     (backend, network)
+}
+
+/// Deterministic identity key for fixtures.
+pub fn identity_key(n: u8) -> IdentityKey {
+    IdentityKey::new(vec![5, n])
+}
+
+/// The safety number the [`FakeBackend`] reports for a key.
+pub fn safety_number(key: &IdentityKey) -> SafetyNumber {
+    let seed: u32 = key.as_bytes().iter().map(|byte| u32::from(*byte)).sum();
+    SafetyNumber::new(
+        (0..60)
+            .map(|ix| char::from(b'0' + ((seed + ix) % 10) as u8))
+            .collect::<String>(),
+    )
 }
 
 /// The fake account's own ID.
@@ -116,6 +135,8 @@ struct State {
     expire_timers: Vec<(Destination, u32)>,
     /// Set when linked; [`DEVICE_NAME`] for an account linked before.
     device_name: Option<String>,
+    /// Identity keys sessions use, by account.
+    identities: HashMap<ServiceId, IdentityKey>,
 }
 
 type DeletedForMe = (Destination, Vec<(Option<ServiceId>, Timestamp)>);
@@ -127,6 +148,8 @@ pub struct FakeBackend {
     link: Arc<watch::Sender<Link>>,
     /// Counts what the backend recorded; see [`FakeNetwork::wait_until`].
     changes: Arc<watch::Sender<u64>>,
+    /// Until [`SignalBackend::identity_changes`] takes it.
+    identity_changes: Option<UnboundedReceiver<ServiceId>>,
 }
 
 impl FakeBackend {
@@ -318,6 +341,31 @@ impl SignalBackend for FakeBackend {
         self.sync_request(|state| state.contact_sync_requests += 1)
     }
 
+    /// The scripted key, with [`safety_number`].
+    fn identity(
+        &mut self,
+        peer: ServiceId,
+    ) -> LocalBoxFuture<'static, Result<Option<PeerIdentity>, BackendError>> {
+        let key = self.state.lock().unwrap().identities.get(&peer).cloned();
+        let identity = key.map(|key| PeerIdentity {
+            safety_number: safety_number(&key),
+            key,
+        });
+        async move { Ok(identity) }.boxed_local()
+    }
+
+    /// Changes from [`FakeNetwork::change_identity`].
+    fn identity_changes(&mut self) -> LocalBoxStream<'static, ServiceId> {
+        match self.identity_changes.take() {
+            Some(changes) => futures::stream::unfold(changes, |mut changes| async move {
+                let peer = changes.recv().await?;
+                Some((peer, changes))
+            })
+            .boxed_local(),
+            None => futures::stream::empty().boxed_local(),
+        }
+    }
+
     fn own_id(&self) -> ServiceId {
         service_id(OWN_ID)
     }
@@ -434,6 +482,7 @@ pub struct FakeNetwork {
     state: Arc<Mutex<State>>,
     link: Arc<watch::Sender<Link>>,
     changes: Arc<watch::Sender<u64>>,
+    identity_changes: UnboundedSender<ServiceId>,
 }
 
 impl FakeNetwork {
@@ -628,6 +677,19 @@ impl FakeNetwork {
             store.save_contact(&stored).await.expect("contact saved");
         }
         self.deliver(Incoming::ContactsSynced);
+    }
+
+    /// Sets the identity key sessions with `peer` use, as their first
+    /// session does: no change is reported.
+    pub fn set_identity(&self, peer: ServiceId, key: IdentityKey) {
+        self.state.lock().unwrap().identities.insert(peer, key);
+    }
+
+    /// Replaces `peer`'s identity key and reports the change, as a session
+    /// with their new key does.
+    pub fn change_identity(&self, peer: ServiceId, key: IdentityKey) {
+        self.set_identity(peer, key);
+        self.identity_changes.send(peer).ok();
     }
 
     /// Sets the conversation's disappearing messages timer in seconds;

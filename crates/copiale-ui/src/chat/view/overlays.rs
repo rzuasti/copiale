@@ -1,13 +1,15 @@
-//! The new chat picker, the palette and the unlink confirmation.
+//! The new chat picker, the palette, safety numbers and the unlink
+//! confirmation.
 
 use std::ops::Range;
 
-use copiale_core::Command;
 use copiale_core::config::Setting;
+use copiale_core::{Command, ServiceId, Verification};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
 use gpui_kit::component::list::ListItem;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     Action, AnyElement, App, Context, Entity, HighlightStyle, Hsla, InteractiveElement as _,
     IntoElement, MouseButton, ParentElement as _, SharedString, Styled as _, StyledText,
@@ -21,8 +23,8 @@ use crate::settings::{self, Settings};
 use crate::theme::ActivePalette as _;
 
 use super::{
-    CONFIRM_UNLINK, Cancel, ChatView, NewChat, OpenSettings, PICKING, PickNext, PickPrevious,
-    key_hint,
+    CONFIRM_UNLINK, Cancel, ChatView, ConfirmSafetyNumber, NewChat, OpenSettings, PICKING,
+    PickNext, PickPrevious, SAFETY_NUMBER, key_hint,
 };
 
 impl ChatView {
@@ -81,6 +83,7 @@ impl ChatView {
         };
         match action {
             PaletteAction::Open(id) => self.open(id, window, cx),
+            PaletteAction::SafetyNumber(peer) => self.show_safety_number(peer, window, cx),
             PaletteAction::NewChat => self.start_new_chat(&NewChat, window, cx),
             PaletteAction::Settings => self.open_settings(&OpenSettings, window, cx),
             PaletteAction::Theme(mode) => {
@@ -101,6 +104,7 @@ impl ChatView {
             Overlay::NewChat => ("new-chat", self.render_new_chat(cx)),
             Overlay::Palette => ("palette", self.render_palette(window, cx)),
             Overlay::Settings => ("settings", self.render_settings(window, cx)),
+            Overlay::SafetyNumber(_) => ("safety-number", self.render_safety_number(cx)),
         };
         let width = match self.chat.overlay() {
             Some(Overlay::Settings) => px(560.),
@@ -228,6 +232,7 @@ impl ChatView {
             .map(|(ix, entry)| {
                 let (glyph, hint) = match entry.action {
                     PaletteAction::Open(_) => ("#", None),
+                    PaletteAction::SafetyNumber(_) => (">", None),
                     PaletteAction::NewChat => (">", key_hint(&NewChat, window)),
                     PaletteAction::Settings => (">", key_hint(&OpenSettings, window)),
                     PaletteAction::Theme(mode) => (">", (mode == theme).then(|| "current".into())),
@@ -252,6 +257,115 @@ impl ChatView {
             })
             .collect();
         self.picker(&self.inputs().palette, rows, "No matches", cx)
+    }
+
+    /// Shows `peer`'s safety number; `Enter` confirms a change, `Esc`
+    /// closes.
+    pub(super) fn show_safety_number(
+        &mut self,
+        peer: ServiceId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let command = self.chat.show_safety_number(peer);
+        self.core.send(command);
+        window.focus(&self.identity_focus, cx);
+        cx.notify();
+    }
+
+    fn confirm_safety_number(
+        &mut self,
+        _: &ConfirmSafetyNumber,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let command = self.chat.confirm_identity();
+        if command.is_some() {
+            self.send(command);
+            self.restore_focus(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// The digits in rows of four blocks, and whether they're verified.
+    fn render_safety_number(&self, cx: &mut Context<Self>) -> gpui_kit::Div {
+        let muted = cx.palette().text_muted;
+        let mono = cx.theme().mono_font_family.clone();
+        let (name, identity) = self.chat.shown_identity().unwrap_or_default();
+        let verification = identity.map(|identity| identity.verification);
+        let digits = match identity.map(|identity| identity.safety_number.as_ref()) {
+            Some(Some(number)) => v_flex()
+                .id("safety-number-digits")
+                .gap_1()
+                .font_family(mono.clone())
+                .text_lg()
+                .children(number.blocks().chunks(4).map(|row| {
+                    h_flex()
+                        .gap_3()
+                        .children(row.iter().map(|block| div().child(block.to_string())))
+                }))
+                .test_support()
+                .into_any_element(),
+            Some(None) => div()
+                .text_sm()
+                .text_color(muted)
+                .child(format!(
+                    "No safety number yet: it appears once you and {name} have exchanged \
+                     messages."
+                ))
+                .into_any_element(),
+            None => div().into_any_element(),
+        };
+        let status = match verification {
+            Some(Verification::Verified) => "Verified on your phone.".to_string(),
+            Some(Verification::Unverified) => format!(
+                "Not verified. Compare it with {name}'s in person or on a call, then mark it \
+                 verified on your phone."
+            ),
+            Some(Verification::Changed) => format!(
+                "{name}'s safety number changed since you verified it. Compare the new one with \
+                 theirs; confirming it lets you send to them again."
+            ),
+            None => String::new(),
+        };
+        let changed = verification == Some(Verification::Changed);
+        let hint = if changed {
+            "enter confirm · esc close"
+        } else {
+            "esc close"
+        };
+        v_flex()
+            .key_context(SAFETY_NUMBER)
+            .track_focus(&self.identity_focus)
+            .on_action(cx.listener(|view, _: &Cancel, window, cx| view.close_overlay(window, cx)))
+            .on_action(cx.listener(Self::confirm_safety_number))
+            .p_4()
+            .gap_3()
+            .child(div().text_lg().child(format!("Safety number with {name}")))
+            .child(digits)
+            .child(div().text_sm().text_color(muted).child(status))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .when(changed, |row| {
+                        row.child(
+                            Button::new("confirm-safety-number")
+                                .primary()
+                                .label("Confirm")
+                                .on_click(cx.listener(|view, _, window, cx| {
+                                    view.confirm_safety_number(&ConfirmSafetyNumber, window, cx)
+                                })),
+                        )
+                    })
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .font_family(mono)
+                            .text_xs()
+                            .text_color(muted)
+                            .child(hint),
+                    ),
+            )
     }
 
     /// Asks before unlinking; `Tab` reaches the buttons, `Esc` goes back.

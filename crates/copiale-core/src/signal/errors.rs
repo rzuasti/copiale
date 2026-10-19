@@ -1,5 +1,6 @@
 //! presage errors as [`BackendError`]s.
 
+use presage::libsignal_service::protocol::SignalProtocolError;
 use presage::libsignal_service::push_service::ServiceError;
 use presage::libsignal_service::sender::MessageSenderError;
 
@@ -9,7 +10,8 @@ pub(super) fn store_error(error: impl std::error::Error) -> BackendError {
     BackendError::new(error.to_string())
 }
 
-/// Marks rejected credentials and connection failures.
+/// Marks rejected credentials, connection failures and sends refused to a
+/// changed verified identity.
 pub(super) fn presage_error<S: std::error::Error>(error: presage::Error<S>) -> BackendError {
     let service = match &error {
         presage::Error::ServiceError(error) => Some(error),
@@ -19,6 +21,15 @@ pub(super) fn presage_error<S: std::error::Error>(error: presage::Error<S>) -> B
         },
         _ => None,
     };
+    if let presage::Error::MessageSenderError(error) = &error
+        && matches!(
+            **error,
+            MessageSenderError::UntrustedIdentity { .. }
+                | MessageSenderError::ProtocolError(SignalProtocolError::UntrustedIdentity(_))
+        )
+    {
+        return BackendError::untrusted_identity();
+    }
     let local = matches!(
         error,
         presage::Error::IoError(_) | presage::Error::Timeout(_)
@@ -85,6 +96,32 @@ mod tests {
         assert!(
             !presage_error(Error::from(MessageSenderError::MaximumRetriesLimitExceeded))
                 .is_network()
+        );
+    }
+
+    #[test]
+    fn refused_identities_are_untrusted_identity_errors() {
+        use presage::libsignal_service::protocol::{Aci, DeviceId, ProtocolAddress};
+
+        type Error = presage::Error<std::io::Error>;
+        let aci = Aci::from(uuid::Uuid::from_u128(7));
+        let address =
+            ProtocolAddress::new(aci.service_id_string(), DeviceId::try_from(1u32).unwrap());
+        let bundle = MessageSenderError::UntrustedIdentity {
+            address: aci.into(),
+        };
+        let session =
+            MessageSenderError::ProtocolError(SignalProtocolError::UntrustedIdentity(address));
+
+        for error in [bundle, session] {
+            assert_eq!(
+                presage_error(Error::from(error)),
+                BackendError::untrusted_identity()
+            );
+        }
+        assert!(
+            !presage_error(Error::from(MessageSenderError::NoMessagesToSend))
+                .is_untrusted_identity()
         );
     }
 }

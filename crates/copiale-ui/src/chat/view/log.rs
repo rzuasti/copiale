@@ -127,6 +127,27 @@ impl ChatView {
                     .on_action(cx.listener(Self::delete_for_everyone))
                     .on_action(cx.listener(Self::delete_for_me))
                     .on_action(cx.listener(Self::cancel))
+                    .children(self.chat.identity_banner().map(|(banner, peer)| {
+                        h_flex()
+                            .id("identity-banner")
+                            .gap_2()
+                            .font_family(cx.theme().mono_font_family.clone())
+                            .text_size(PREFIX_SIZE)
+                            .text_color(cx.palette().danger)
+                            .child(div().flex_1().min_w_0().child(banner))
+                            .child(
+                                div()
+                                    .id("review-safety-number")
+                                    .cursor_pointer()
+                                    .text_color(cx.palette().action)
+                                    .child("review")
+                                    .on_click(cx.listener(move |view, _, window, cx| {
+                                        view.show_safety_number(peer, window, cx)
+                                    }))
+                                    .test_support(),
+                            )
+                            .test_support()
+                    }))
                     .children(self.chat.compose_banner().map(|banner| {
                         h_flex()
                             .id("compose")

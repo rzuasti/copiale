@@ -9,9 +9,9 @@ use copiale_core::config::{
 };
 use copiale_core::{
     Account, AccountSettings, Attachment, BackendError, Command, Contact, Content, ConversationId,
-    ConversationSummary, Direction, Event, Expiry, GroupMasterKey, GroupUpdate, Member, Message,
-    MessageBody, MessageId, MessageStatus, Peer, Quote, ServiceId, StorageFailure, Timestamp,
-    Unsupported,
+    ConversationSummary, Direction, Event, Expiry, GroupMasterKey, GroupUpdate, Identity, Member,
+    Message, MessageBody, MessageId, MessageStatus, Peer, Quote, SafetyNumber, ServiceId,
+    StorageFailure, Timestamp, Unsupported, Verification,
 };
 use copiale_ui::chat::{
     COMPACT_BELOW, ChatView, Compose, Field, Layout, Notice, NoticeAction, NoticeKey, Overlay,
@@ -1538,6 +1538,65 @@ fn palette_runs_commands(cx: &mut TestAppContext) {
     ui.press("up", cx);
     ui.press("enter", cx);
     assert_eq!(overlay(&ui, cx), Some(Overlay::Settings));
+}
+
+fn alice_identity(verification: Verification) -> Event {
+    Event::Identity(Identity {
+        peer: peer(1),
+        safety_number: Some(SafetyNumber::new("0123456789".repeat(6))),
+        verification,
+    })
+}
+
+#[gpui_kit::test]
+fn changed_safety_number_is_reviewed_and_confirmed(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.open_alice(cx);
+    assert!(!ui.shows("identity-banner", cx));
+
+    ui.event(Event::UnconfirmedIdentities(vec![peer(1)]), cx);
+    assert!(ui.shows("identity-banner", cx));
+    ui.click("review-safety-number", cx);
+    assert_eq!(overlay(&ui, cx), Some(Overlay::SafetyNumber(peer(1))));
+    assert!(matches!(
+        ui.core.take().as_slice(),
+        [Command::LoadIdentity(id)] if *id == peer(1)
+    ));
+    ui.event(alice_identity(Verification::Changed), cx);
+    assert!(ui.shows("safety-number-digits", cx));
+    assert!(ui.shows("confirm-safety-number", cx));
+
+    ui.press("enter", cx);
+    assert!(matches!(
+        ui.core.take().as_slice(),
+        [Command::ConfirmIdentity(id)] if *id == peer(1)
+    ));
+    assert_eq!(overlay(&ui, cx), None);
+    assert!(composer_focused(&ui, cx));
+    ui.event(Event::UnconfirmedIdentities(Vec::new()), cx);
+    assert!(!ui.shows("identity-banner", cx));
+}
+
+#[gpui_kit::test]
+fn palette_shows_the_safety_number_until_escape(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.open_alice(cx);
+
+    ui.press("ctrl-k", cx);
+    ui.type_text("safety", cx);
+    ui.frame(cx);
+    ui.press("enter", cx);
+    assert_eq!(overlay(&ui, cx), Some(Overlay::SafetyNumber(peer(1))));
+    ui.core.take();
+    ui.event(alice_identity(Verification::Verified), cx);
+    assert!(ui.shows("safety-number-digits", cx));
+    assert!(!ui.shows("confirm-safety-number", cx));
+
+    ui.press("enter", cx);
+    assert!(ui.core.take().is_empty(), "nothing to confirm");
+    ui.press("escape", cx);
+    assert_eq!(overlay(&ui, cx), None);
+    assert!(composer_focused(&ui, cx));
 }
 
 #[gpui_kit::test]

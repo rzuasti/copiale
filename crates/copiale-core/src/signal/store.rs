@@ -15,17 +15,33 @@ use presage::model::contacts::Contact;
 use presage::model::groups::Group;
 use presage::store::{ContentsStore, StateStore, StickerPack, Store, Thread};
 use presage_store_sqlite::{SqliteStore, SqliteStoreError};
+use tokio::sync::mpsc::UnboundedSender;
+
+use super::protocol::AciStore;
+use crate::model;
+use crate::storage::VerifiedKeys;
 
 /// Delegates to [`SqliteStore`], except that [`ContentsStore::save_message`]
-/// stores nothing.
+/// stores nothing and the ACI protocol store is an [`AciStore`].
 #[derive(Clone)]
 pub(crate) struct AppStore {
     inner: SqliteStore,
+    verified: VerifiedKeys,
+    /// For the ACI protocol store to report identity key changes.
+    identity_changes: UnboundedSender<model::ServiceId>,
 }
 
 impl AppStore {
-    pub(crate) fn new(inner: SqliteStore) -> Self {
-        Self { inner }
+    pub(crate) fn new(
+        inner: SqliteStore,
+        verified: VerifiedKeys,
+        identity_changes: UnboundedSender<model::ServiceId>,
+    ) -> Self {
+        Self {
+            inner,
+            verified,
+            identity_changes,
+        }
     }
 }
 
@@ -313,7 +329,7 @@ impl ContentsStore for AppStore {
 
 impl Store for AppStore {
     type Error = Error;
-    type AciStore = <SqliteStore as Store>::AciStore;
+    type AciStore = AciStore;
     type PniStore = <SqliteStore as Store>::PniStore;
 
     fn clear(&mut self) -> impl Future<Output = Result<(), Error>> + Send {
@@ -321,7 +337,11 @@ impl Store for AppStore {
     }
 
     fn aci_protocol_store(&self) -> Self::AciStore {
-        self.inner.aci_protocol_store()
+        AciStore::new(
+            self.inner.aci_protocol_store(),
+            self.verified.clone(),
+            self.identity_changes.clone(),
+        )
     }
 
     fn pni_protocol_store(&self) -> Self::PniStore {
