@@ -107,7 +107,8 @@ impl Database {
 
     /// Marks messages read on another device at `at` read here, with
     /// everything before them in their conversation, starting the countdown
-    /// of disappearing ones; returns the newly read ones.
+    /// of disappearing ones, not before each was sent; returns the newly
+    /// read ones.
     pub(crate) async fn mark_read_elsewhere(
         &self,
         read: &[(ServiceId, Timestamp)],
@@ -125,7 +126,7 @@ impl Database {
                 continue;
             };
             let rows: Vec<MessageRow> = sqlx::query_as(concat!(
-                "UPDATE messages SET read = 1, expires_at = ?3 + expires_in * 1000
+                "UPDATE messages SET read = 1, expires_at = MAX(?3, sent_at) + expires_in * 1000
                  WHERE conversation_id = ?1 AND read = 0 AND sent_at <= ?2
                  RETURNING ",
                 message_columns!()
@@ -429,6 +430,33 @@ mod tests {
         assert_eq!(
             read[0].expiry.and_then(|expiry| expiry.at),
             Some(at(65_000))
+        );
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn reads_elsewhere_dont_start_countdowns_before_sending() {
+        let (_dir, db) = db().await;
+        db.add_message(
+            &Destination::Contact(peer(1)),
+            Some(peer(1)),
+            at(10_000),
+            &Content::text("in"),
+            Some(60),
+            at(20_000),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        let read = db
+            .mark_read_elsewhere(&[(peer(1), at(10_000))], at(0))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            read[0].expiry.and_then(|expiry| expiry.at),
+            Some(at(70_000))
         );
         db.close().await;
     }

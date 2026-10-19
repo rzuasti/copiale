@@ -43,20 +43,25 @@ libsignal-service git hash back to `nix/package.nix`.
   pins: its `Cargo.toml`, `src/` and the repository's `LICENSE.md`.
   `presage-store-sqlite` still comes from git, and builds against this
   copy.
-- **Patch:** `patches/presage-retry-requests.patch`, on top of
-  libsignal-service's. `Received::DecryptionError` carries the failure, for
-  `Manager::send_retry_request`; retry requests arrive as
-  `Received::RetryRequest`, archiving the session they show broken; sends
-  return what went out (`SentContent`), to resend with
-  `Manager::resend_content`; `Manager::send_null_message` starts a new
-  session. Not upstream yet.
+- **Patches**, applied in this order:
+  - `patches/presage-retry-requests.patch`, on top of libsignal-service's.
+    `Received::DecryptionError` carries the failure, for
+    `Manager::send_retry_request`; retry requests arrive as
+    `Received::RetryRequest`, archiving the session they show broken; sends
+    return what went out (`SentContent`), to resend with
+    `Manager::resend_content`; `Manager::send_null_message` starts a new
+    session. Not upstream yet.
+  - `patches/presage-sync-sender.patch`. The receive loop drops sync
+    messages not sent by this account's ACI; any account could otherwise
+    overwrite contacts and keys or set disappearing timers.
+    Upstream PR: [whisperfish/presage#467](https://github.com/whisperfish/presage/pull/467).
 - **Used via:** `[patch."https://github.com/whisperfish/presage"]` in the
   root `Cargo.toml`.
 
 To re-vendor at a new revision: take that revision's `presage/` crate,
-apply the patch with `git apply`, copy it here with `LICENSE.md`, and
+apply the patches with `git apply`, copy it here with `LICENSE.md`, and
 update the pins of `presage` and `presage-store-sqlite` in `Cargo.toml`.
 
-To drop it once upstream has the change: remove the patch entry and this
+To drop it once upstream has the changes: remove the patch entry and this
 directory, then key the presage git hash in `nix/package.nix` by
 `presage-0.8.0-dev` again rather than `presage-store-sqlite-0.8.0-dev`.

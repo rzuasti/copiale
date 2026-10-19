@@ -116,6 +116,7 @@ impl SignalBackend for PresageBackend {
         &mut self,
     ) -> LocalBoxFuture<'static, Result<LocalBoxStream<'static, Incoming>, BackendError>> {
         let mut manager = self.manager.clone();
+        let me = manager.registration_data().service_ids.aci();
         let (opened_tx, opened_rx) = oneshot::channel();
         let (items_tx, items_rx) = mpsc::channel(RECEIVE_BUFFER);
         let (stop, stop_rx) = oneshot::channel();
@@ -130,7 +131,7 @@ impl SignalBackend for PresageBackend {
                     return;
                 }
             };
-            relay(stream, items_tx, stop_rx).await;
+            relay(stream, me, items_tx, stop_rx).await;
         });
         let receiver = Receiver {
             task,
@@ -604,6 +605,7 @@ const ACK_FLUSH: Duration = Duration::from_millis(250);
 /// decrypting them, and cancelling a decryption may lose the message.
 async fn relay(
     stream: impl Stream<Item = Received>,
+    me: Aci,
     items: mpsc::Sender<Incoming>,
     mut stop: oneshot::Receiver<()>,
 ) {
@@ -633,7 +635,7 @@ async fn relay(
             break;
         };
         last_read = Some(Instant::now());
-        if let Some(item) = incoming(received)
+        if let Some(item) = incoming(received, me)
             && items.send(item).await.is_err()
         {
             break;
@@ -765,7 +767,11 @@ mod tests {
             }
             (arrived, start.elapsed())
         };
-        let ((), (), relayed) = tokio::join!(relay(stream, items_tx, stop_rx), stopper, collect);
+        let ((), (), relayed) = tokio::join!(
+            relay(stream, Aci::from(uuid::Uuid::nil()), items_tx, stop_rx),
+            stopper,
+            collect
+        );
         relayed
     }
 

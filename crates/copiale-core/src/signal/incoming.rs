@@ -22,10 +22,18 @@ use crate::model::{
     ServiceId, Timestamp, Unsupported,
 };
 
-/// What the core cares about so far; everything else is dropped.
-pub(super) fn incoming(received: Received) -> Option<Incoming> {
+/// What the core cares about so far; everything else is dropped, as are
+/// sync messages from anyone but `me`.
+pub(super) fn incoming(received: Received, me: Aci) -> Option<Incoming> {
     match received {
         Received::QueueEmpty => Some(Incoming::QueueEmpty),
+        Received::Content(content)
+            if matches!(content.body, ContentBody::SynchronizeMessage(_))
+                && content.metadata.sender != me =>
+        {
+            tracing::warn!("dropped a sync message not sent by this account");
+            None
+        }
         Received::Content(content) => signal(&content)
             .or_else(|| message_change(&content).map(Incoming::Change))
             .or_else(|| received_message(&content).map(Incoming::Message))
@@ -555,6 +563,8 @@ pub(super) mod tests {
 
     pub(in crate::signal) const SENDER: Uuid = Uuid::from_u128(0x1234);
     pub(in crate::signal) const OTHER: Uuid = Uuid::from_u128(0x4321);
+    /// This account.
+    const ME: Uuid = Uuid::from_u128(0x99);
     const KEY: [u8; 32] = [9; 32];
 
     pub(in crate::signal) fn content(body: ContentBody) -> Content {
@@ -562,7 +572,7 @@ pub(super) mod tests {
         Content {
             metadata: presage::libsignal_service::content::Metadata {
                 sender: Aci::from(SENDER).into(),
-                destination: Aci::from(Uuid::from_u128(0x99)).into(),
+                destination: Aci::from(ME).into(),
                 sender_device: DeviceId::try_from(1u32).unwrap(),
                 pni_verified: None,
                 client_timestamp: at,
@@ -599,10 +609,8 @@ pub(super) mod tests {
 
     #[test]
     fn maps_one_to_one_text() {
-        let received = Received::Content(Box::new(content(text("hi", Some(42)))));
-
         assert_eq!(
-            incoming(received),
+            received(text("hi", Some(42))),
             Some(Incoming::Message(IncomingMessage {
                 sender: ServiceId::new(SENDER),
                 group: None,
@@ -976,7 +984,14 @@ pub(super) mod tests {
     }
 
     fn received(body: ContentBody) -> Option<Incoming> {
-        incoming(Received::Content(Box::new(content(body))))
+        incoming(Received::Content(Box::new(content(body))), Aci::from(ME))
+    }
+
+    /// `body` as sent by another of this account's devices.
+    fn synced(body: ContentBody) -> Option<Incoming> {
+        let mut content = content(body);
+        content.metadata.sender = Aci::from(ME).into();
+        incoming(Received::Content(Box::new(content)), Aci::from(ME))
     }
 
     #[test]
@@ -1041,7 +1056,7 @@ pub(super) mod tests {
 
     #[test]
     fn maps_reads_and_settings_from_other_devices() {
-        let read = received(ContentBody::SynchronizeMessage(SyncMessage {
+        let read = synced(ContentBody::SynchronizeMessage(SyncMessage {
             read: vec![
                 sync_message::Read {
                     sender_aci: Some(OTHER.to_string()),
@@ -1067,7 +1082,7 @@ pub(super) mod tests {
             })
         );
 
-        let settings = received(ContentBody::SynchronizeMessage(SyncMessage {
+        let settings = synced(ContentBody::SynchronizeMessage(SyncMessage {
             content: Some(SyncContent::Configuration(sync_message::Configuration {
                 read_receipts: Some(true),
                 typing_indicators: Some(false),
@@ -1182,7 +1197,7 @@ pub(super) mod tests {
             ..Default::default()
         });
         assert_eq!(
-            received(edit),
+            synced(edit),
             Some(Incoming::Change(MessageChange {
                 destination: Destination::Contact(ServiceId::new(RECIPIENT)),
                 author: None,
@@ -1205,7 +1220,7 @@ pub(super) mod tests {
             }),
             ..Default::default()
         });
-        let Some(Incoming::Change(change)) = received(delete) else {
+        let Some(Incoming::Change(change)) = synced(delete) else {
             panic!("expected a change");
         };
         assert_eq!(change.author, None);
@@ -1262,7 +1277,7 @@ pub(super) mod tests {
 
         let chat = ChatRef::Contact(ServiceId::new(OTHER));
         assert_eq!(
-            received(ContentBody::SynchronizeMessage(SyncMessage {
+            synced(ContentBody::SynchronizeMessage(SyncMessage {
                 content: Some(SyncContent::DeleteForMe(delete)),
                 ..Default::default()
             })),
@@ -1285,9 +1300,103 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn ignores_syncs_from_other_accounts() {
+        use presage::libsignal_service::proto::sync_message::DeleteForMe;
+        use presage::libsignal_service::protocol::Pni;
+
+        let recipient = Some(RECIPIENT.to_string());
+        let syncs = [
+            SyncMessage {
+                read: vec![sync_message::Read {
+                    sender_aci: Some(OTHER.to_string()),
+                    timestamp: Some(5),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            SyncMessage {
+                content: Some(SyncContent::DeleteForMe(DeleteForMe {
+                    conversation_deletes: vec![sync_message::delete_for_me::ConversationDelete {
+                        conversation: Some(ConversationIdentifier {
+                            identifier: Some(conversation_identifier::Identifier::ThreadGroupId(
+                                vec![4; 32],
+                            )),
+                        }),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                })),
+                ..Default::default()
+            },
+            SyncMessage {
+                content: Some(SyncContent::Configuration(sync_message::Configuration {
+                    read_receipts: Some(true),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            },
+            SyncMessage {
+                content: Some(SyncContent::Sent(Sent {
+                    destination_service_id: recipient.clone(),
+                    timestamp: Some(77),
+                    message: sent_data("planted", false),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            },
+            SyncMessage {
+                content: Some(SyncContent::Sent(Sent {
+                    destination_service_id: recipient.clone(),
+                    timestamp: Some(90),
+                    edit_message: Some(EditMessage {
+                        target_sent_timestamp: Some(80),
+                        data_message: sent_data("edited", false),
+                    }),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            },
+            SyncMessage {
+                content: Some(SyncContent::Sent(Sent {
+                    destination_service_id: recipient,
+                    timestamp: Some(91),
+                    message: Some(DataMessage {
+                        delete: Some(data_message::Delete {
+                            target_sent_timestamp: Some(80),
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            },
+        ];
+
+        for sync in syncs {
+            let body = ContentBody::SynchronizeMessage(sync);
+            assert!(synced(body.clone()).is_some(), "{body:?}");
+            assert_eq!(received(body.clone()), None, "{body:?}");
+            let mut own_pni = content(body.clone());
+            own_pni.metadata.sender = Pni::from(ME).into();
+            assert_eq!(
+                incoming(Received::Content(Box::new(own_pni)), Aci::from(ME)),
+                None,
+                "{body:?}"
+            );
+        }
+    }
+
+    #[test]
     fn maps_queue_empty_and_contacts() {
-        assert_eq!(incoming(Received::QueueEmpty), Some(Incoming::QueueEmpty));
-        assert_eq!(incoming(Received::Contacts), Some(Incoming::ContactsSynced));
+        let me = Aci::from(ME);
+        assert_eq!(
+            incoming(Received::QueueEmpty, me),
+            Some(Incoming::QueueEmpty)
+        );
+        assert_eq!(
+            incoming(Received::Contacts, me),
+            Some(Incoming::ContactsSynced)
+        );
     }
 
     fn failure(content_hint: ContentHint, group_id: Option<Vec<u8>>) -> Received {
@@ -1315,9 +1424,10 @@ pub(super) mod tests {
 
     #[test]
     fn maps_decryption_failures_with_their_retry_request() {
-        let Some(Incoming::Undecryptable(failed)) =
-            incoming(failure(ContentHint::Resendable, Some(vec![4; 32])))
-        else {
+        let Some(Incoming::Undecryptable(failed)) = incoming(
+            failure(ContentHint::Resendable, Some(vec![4; 32])),
+            Aci::from(ME),
+        ) else {
             panic!("not mapped");
         };
 
@@ -1332,9 +1442,10 @@ pub(super) mod tests {
 
     #[test]
     fn decryption_failures_of_implicit_content_arent_shown() {
-        let Some(Incoming::Undecryptable(failed)) =
-            incoming(failure(ContentHint::Implicit, Some(vec![4; 3])))
-        else {
+        let Some(Incoming::Undecryptable(failed)) = incoming(
+            failure(ContentHint::Implicit, Some(vec![4; 3])),
+            Aci::from(ME),
+        ) else {
             panic!("not mapped");
         };
 
@@ -1354,7 +1465,7 @@ pub(super) mod tests {
         };
 
         assert_eq!(
-            incoming(request),
+            incoming(request, Aci::from(ME)),
             Some(Incoming::RetryRequested {
                 sender: ServiceId::new(SENDER),
                 device: 3,
@@ -1396,7 +1507,7 @@ pub(super) mod tests {
         });
 
         assert_eq!(
-            incoming(Received::Content(Box::new(content(body)))),
+            synced(body),
             Some(Incoming::Sent(SentMessage {
                 destination: Destination::Contact(ServiceId::new(RECIPIENT)),
                 timestamp: Timestamp::from_millis(77),
