@@ -991,8 +991,9 @@ impl<'a, B: SignalBackend> Session<'a, B> {
         }
     }
 
-    /// Resends our message that `sender` couldn't decrypt, if still kept;
-    /// otherwise starts a new session if theirs was reset.
+    /// Resends our message that `sender`'s `device` couldn't decrypt, if
+    /// still kept and that device got it; otherwise starts a new session if
+    /// theirs was reset.
     async fn retry_requested(
         &mut self,
         sender: ServiceId,
@@ -1009,7 +1010,7 @@ impl<'a, B: SignalBackend> Session<'a, B> {
         }
         let since =
             Timestamp::from_millis(self.now().as_millis().saturating_sub(SEND_LOG_LIFETIME_MS));
-        match self.db.resendable(sender, sent_at, since).await {
+        match self.db.resendable(sender, device, sent_at, since).await {
             Ok(Some(content)) => spawn_logged(
                 "resending a message",
                 self.backend.resend(sender, content, sent_at),

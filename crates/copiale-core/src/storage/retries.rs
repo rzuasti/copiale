@@ -114,35 +114,42 @@ impl Database {
         .fetch_one(&mut *tx)
         .await
         .map_err(database_error)?;
-        for recipient in &resendable.recipients {
-            sqlx::query(
-                "INSERT OR IGNORE INTO send_log_recipients (log_id, recipient) VALUES (?, ?)",
-            )
-            .bind(id)
-            .bind(recipient.uuid().as_bytes().as_slice())
-            .execute(&mut *tx)
-            .await
-            .map_err(database_error)?;
+        for (recipient, devices) in &resendable.recipients {
+            for device in devices {
+                sqlx::query(
+                    "INSERT OR IGNORE INTO send_log_recipients (log_id, recipient, device)
+                     VALUES (?, ?, ?)",
+                )
+                .bind(id)
+                .bind(recipient.uuid().as_bytes().as_slice())
+                .bind(device)
+                .execute(&mut *tx)
+                .await
+                .map_err(database_error)?;
+            }
         }
         tx.commit().await.map_err(database_error)?;
         Ok(())
     }
 
-    /// What we sent `recipient` at `sent_at`, if kept since `since`.
+    /// What we sent `recipient`'s `device` at `sent_at`, if kept since
+    /// `since`.
     pub(crate) async fn resendable(
         &self,
         recipient: ServiceId,
+        device: u32,
         sent_at: Timestamp,
         since: Timestamp,
     ) -> Result<Option<Vec<u8>>, StorageError> {
         sqlx::query_scalar(
             "SELECT l.content FROM send_log l
              JOIN send_log_recipients r ON r.log_id = l.id
-             WHERE l.sent_at = ? AND r.recipient = ? AND l.logged_at >= ?
+             WHERE l.sent_at = ? AND r.recipient = ? AND r.device = ? AND l.logged_at >= ?
              ORDER BY l.id DESC LIMIT 1",
         )
         .bind(millis(sent_at))
         .bind(recipient.uuid().as_bytes().as_slice())
+        .bind(device)
         .bind(millis(since))
         .fetch_optional(&self.app)
         .await
@@ -171,9 +178,10 @@ mod tests {
     use crate::model::{Change, GroupInfo, GroupMasterKey, GroupRef, Member, MessageChange};
     use crate::storage::testing::{at, db, peer};
 
+    /// Sent to device 1 of each recipient.
     fn resendable(recipients: &[u128], content: &[u8]) -> Resendable {
         Resendable {
-            recipients: recipients.iter().map(|n| peer(*n)).collect(),
+            recipients: recipients.iter().map(|n| (peer(*n), vec![1])).collect(),
             content: content.to_vec(),
         }
     }
@@ -339,11 +347,29 @@ mod tests {
             .await
             .unwrap();
 
-        let find = |n, sent_at| db.resendable(peer(n), at(sent_at), at(0));
+        let find = |n, sent_at| db.resendable(peer(n), 1, at(sent_at), at(0));
         assert_eq!(find(2, 10).await.unwrap().as_deref(), Some(&b"group"[..]));
         assert_eq!(find(1, 11).await.unwrap().as_deref(), Some(&b"direct"[..]));
         assert_eq!(find(2, 11).await.unwrap(), None, "not a recipient");
         assert_eq!(find(1, 12).await.unwrap(), None);
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn sends_are_resent_only_to_devices_that_got_them() {
+        let (_dir, db) = db().await;
+        let sent = Resendable {
+            recipients: vec![(peer(1), vec![1, 3]), (peer(2), vec![2])],
+            content: b"group".to_vec(),
+        };
+        db.log_send(at(10), at(10), &sent, at(10)).await.unwrap();
+
+        let find = |n, device| db.resendable(peer(n), device, at(10), at(0));
+        assert!(find(1, 1).await.unwrap().is_some());
+        assert!(find(1, 3).await.unwrap().is_some());
+        assert!(find(2, 2).await.unwrap().is_some());
+        assert_eq!(find(1, 2).await.unwrap(), None, "linked after the send");
+        assert_eq!(find(2, 1).await.unwrap(), None, "another member's device");
         db.close().await;
     }
 
@@ -369,11 +395,17 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(db.resendable(peer(1), at(10), at(15)).await.unwrap(), None);
+        assert_eq!(
+            db.resendable(peer(1), 1, at(10), at(15)).await.unwrap(),
+            None
+        );
         assert_eq!(db.forget_sends(at(15)).await.unwrap(), 1);
-        assert_eq!(db.resendable(peer(1), at(10), at(0)).await.unwrap(), None);
+        assert_eq!(
+            db.resendable(peer(1), 1, at(10), at(0)).await.unwrap(),
+            None
+        );
         assert!(
-            db.resendable(peer(1), at(20), at(0))
+            db.resendable(peer(1), 1, at(20), at(0))
                 .await
                 .unwrap()
                 .is_some()
@@ -417,7 +449,7 @@ mod tests {
         .await
         .unwrap();
 
-        let find = |sent_at| db.resendable(peer(1), at(sent_at), at(0));
+        let find = |sent_at| db.resendable(peer(1), 1, at(sent_at), at(0));
         assert_eq!(find(10).await.unwrap(), None, "deleted for everyone");
         assert_eq!(find(15).await.unwrap(), None, "its edit");
         assert_eq!(find(20).await.unwrap(), None, "deleted here");

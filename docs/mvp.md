@@ -340,9 +340,9 @@ crates/
   a delegating `Store` wrapper.
 - Decryption retries, as in Signal's clients: a message that fails to
   decrypt is asked for again (`DecryptionErrorMessage`) and shows as a
-  placeholder until it arrives. Our sends are kept a day (`send_log`) to
-  resend when a recipient asks; deleted and disappeared messages are
-  forgotten at once.
+  placeholder until it arrives. Our sends are kept a day (`send_log`) with
+  the devices they reached, to resend when one of those devices asks;
+  deleted and disappeared messages are forgotten at once.
 - `secure_delete` overwrites deleted rows rather than leaving them in free
   pages.
 - Tests use temporary databases and an in-memory keychain; never real Signal

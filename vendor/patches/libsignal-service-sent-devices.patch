@@ -1,0 +1,50 @@
+From 10b0f4f5aeff81cd6ff4aecde009014c0596cab5 Mon Sep 17 00:00:00 2001
+From: Ricardo Zuasti <rzuasti@pm.me>
+Date: Mon, 19 Oct 2026 19:16:08 -0400
+Subject: [PATCH] feat(sender): report the devices a message went to
+
+SentMessage::devices lists the recipient's devices that got the message,
+so clients answer retry requests only from those, as Signal-Android
+does: a device linked after the send can't ask for it.
+
+Assisted-by: Claude Opus 5.5
+---
+ src/sender.rs | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/src/sender.rs b/src/sender.rs
+index 3d68e86..6f5053d 100644
+--- a/src/sender.rs
++++ b/src/sender.rs
+@@ -65,6 +65,9 @@ pub type SendMessageResult = Result<SentMessage, MessageSenderError>;
+ #[derive(Debug, Clone)]
+ pub struct SentMessage {
+     pub recipient: ServiceId,
++    /// The recipient's devices it went to, to answer retry requests only
++    /// from them.
++    pub devices: Vec<DeviceId>,
+     pub used_identity_key: IdentityKey,
+     pub unidentified: bool,
+     pub needs_sync: bool,
+@@ -628,6 +631,10 @@ where
+                 return Err(MessageSenderError::NoMessagesToSend);
+             };
+ 
++            let devices = messages
++                .iter()
++                .map(|message| message.destination_device_id)
++                .collect();
+             let messages = OutgoingPushMessages {
+                 destination: recipient,
+                 timestamp,
+@@ -650,6 +657,7 @@ where
+                     tracing::debug!("message sent!");
+                     return Ok(SentMessage {
+                         recipient,
++                        devices,
+                         used_identity_key,
+                         unidentified: unidentified_access.is_some(),
+                         needs_sync,
+-- 
+2.55.0
+

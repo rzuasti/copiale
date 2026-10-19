@@ -1,7 +1,7 @@
-From 5c16669abbf26ae38f23a56f46a7a3bd4cb35fc9 Mon Sep 17 00:00:00 2001
+From 8b2e2f9d0502b29c855eb57ac8b7c74df6329541 Mon Sep 17 00:00:00 2001
 From: Ricardo Zuasti <rzuasti@pm.me>
 Date: Mon, 19 Oct 2026 10:28:46 -0400
-Subject: [PATCH] feat: send and answer retry requests
+Subject: [PATCH 1/2] feat: send and answer retry requests
 
 Needs libsignal-service's retry request support.
 
@@ -24,7 +24,7 @@ Assisted-by: Claude Opus 5.5
  2 files changed, 212 insertions(+), 23 deletions(-)
 
 diff --git a/src/manager/registered.rs b/src/manager/registered.rs
-index 963f7c3..eb21fb1 100644
+index 963f7c321..eb21fb141 100644
 --- a/src/manager/registered.rs
 +++ b/src/manager/registered.rs
 @@ -27,7 +27,8 @@ use libsignal_service::{
@@ -335,7 +335,7 @@ index 963f7c3..eb21fb1 100644
      match content_body {
          ContentBody::DataMessage(message) => {
 diff --git a/src/model/messages.rs b/src/model/messages.rs
-index fcdbf4d..1c178a0 100644
+index fcdbf4dbf..1c178a0d2 100644
 --- a/src/model/messages.rs
 +++ b/src/model/messages.rs
 @@ -1,4 +1,9 @@
@@ -388,6 +388,84 @@ index fcdbf4d..1c178a0 100644
 +    pub recipients: Vec<ServiceId>,
 +    pub content: proto::Content,
 +}
+-- 
+2.55.0
+
+
+From 32d58929e06fb5cc8da43303bd8c752167212c4a Mon Sep 17 00:00:00 2001
+From: Ricardo Zuasti <rzuasti@pm.me>
+Date: Mon, 19 Oct 2026 19:17:07 -0400
+Subject: [PATCH 2/2] feat: devices each sent message went to
+
+SentContent::recipients lists the devices of each recipient that got the
+message, from libsignal-service's SentMessage::devices, so clients answer
+retry requests only from those, as Signal-Android does.
+
+Assisted-by: Claude Opus 5.5
+---
+ src/manager/registered.rs | 9 ++++++---
+ src/model/messages.rs     | 8 +++++---
+ 2 files changed, 11 insertions(+), 6 deletions(-)
+
+diff --git a/src/manager/registered.rs b/src/manager/registered.rs
+index eb21fb141..94ca61200 100644
+--- a/src/manager/registered.rs
++++ b/src/manager/registered.rs
+@@ -1128,7 +1128,7 @@ impl<S: Store> Manager<S, Registered> {
+ 
+         ensure_data_message_timestamp(&mut content_body, timestamp);
+ 
+-        sender
++        let sent_message = sender
+             .send_message(
+                 &recipient,
+                 unidentified_access.as_ref(),
+@@ -1143,7 +1143,7 @@ impl<S: Store> Manager<S, Registered> {
+             recipients: if recipient == ServiceId::from(self.state.data.service_ids.aci()) {
+                 Vec::new()
+             } else {
+-                vec![recipient]
++                vec![(recipient, sent_message.devices)]
+             },
+             content: content_body.clone().into_proto(),
+         };
+@@ -1268,7 +1268,10 @@ impl<S: Store> Manager<S, Registered> {
+         let sent = SentContent {
+             recipients: results
+                 .iter()
+-                .filter_map(|result| Some(result.as_ref().ok()?.recipient))
++                .filter_map(|result| {
++                    let sent = result.as_ref().ok()?;
++                    Some((sent.recipient, sent.devices.clone()))
++                })
+                 .collect(),
+             content: content_body.clone().into_proto(),
+         };
+diff --git a/src/model/messages.rs b/src/model/messages.rs
+index 1c178a0d2..ea3db1ae9 100644
+--- a/src/model/messages.rs
++++ b/src/model/messages.rs
+@@ -22,7 +22,8 @@ pub enum Received {
+     DecryptionError(Box<DecryptionFailure>),
+ 
+     /// A device of `sender` couldn't decrypt our message sent at `timestamp` and asks for it
+-    /// again; resend it with [`Manager::resend_content`](crate::Manager::resend_content).
++    /// again; resend it with [`Manager::resend_content`](crate::Manager::resend_content) if
++    /// `sender_device` got it ([`SentContent::recipients`]).
+     ///
+     /// `session_archived` is set if our session with that device was the cause: it was archived,
+     /// so the next message starts a new one. Without a message to resend, send a null message
+@@ -43,7 +44,8 @@ pub enum Received {
+ #[derive(Debug, Clone)]
+ pub struct SentContent {
+     /// Who got it, apart from this account's other devices: the recipient,
+-    /// or the group members it reached.
+-    pub recipients: Vec<ServiceId>,
++    /// or the group members it reached, each with the devices it went to.
++    /// Answer retry requests only from those devices.
++    pub recipients: Vec<(ServiceId, Vec<DeviceId>)>,
+     pub content: proto::Content,
+ }
 -- 
 2.55.0
 

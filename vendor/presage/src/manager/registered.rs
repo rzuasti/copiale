@@ -1151,7 +1151,7 @@ impl<S: Store> Manager<S, Registered> {
 
         ensure_data_message_timestamp(&mut content_body, timestamp);
 
-        sender
+        let sent_message = sender
             .send_message(
                 &recipient,
                 unidentified_access.as_ref(),
@@ -1166,7 +1166,7 @@ impl<S: Store> Manager<S, Registered> {
             recipients: if recipient == ServiceId::from(self.state.data.service_ids.aci()) {
                 Vec::new()
             } else {
-                vec![recipient]
+                vec![(recipient, sent_message.devices)]
             },
             content: content_body.clone().into_proto(),
         };
@@ -1291,7 +1291,10 @@ impl<S: Store> Manager<S, Registered> {
         let sent = SentContent {
             recipients: results
                 .iter()
-                .filter_map(|result| Some(result.as_ref().ok()?.recipient))
+                .filter_map(|result| {
+                    let sent = result.as_ref().ok()?;
+                    Some((sent.recipient, sent.devices.clone()))
+                })
                 .collect(),
             content: content_body.clone().into_proto(),
         };

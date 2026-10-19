@@ -132,9 +132,9 @@ impl fmt::Debug for RetryRequest {
 /// it. `Debug` hides the content.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Resendable {
-    /// Who got it, this account's other devices aside: empty for Note to
-    /// Self.
-    pub recipients: Vec<ServiceId>,
+    /// Who got it, with the devices it went to, this account's other
+    /// devices aside: empty for Note to Self.
+    pub recipients: Vec<(ServiceId, Vec<u32>)>,
     /// As the backend encodes it.
     pub content: Vec<u8>,
 }

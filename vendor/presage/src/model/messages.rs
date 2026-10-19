@@ -22,7 +22,8 @@ pub enum Received {
     DecryptionError(Box<DecryptionFailure>),
 
     /// A device of `sender` couldn't decrypt our message sent at `timestamp` and asks for it
-    /// again; resend it with [`Manager::resend_content`](crate::Manager::resend_content).
+    /// again; resend it with [`Manager::resend_content`](crate::Manager::resend_content) if
+    /// `sender_device` got it ([`SentContent::recipients`]).
     ///
     /// `session_archived` is set if our session with that device was the cause: it was archived,
     /// so the next message starts a new one. Without a message to resend, send a null message
@@ -43,7 +44,8 @@ pub enum Received {
 #[derive(Debug, Clone)]
 pub struct SentContent {
     /// Who got it, apart from this account's other devices: the recipient,
-    /// or the group members it reached.
-    pub recipients: Vec<ServiceId>,
+    /// or the group members it reached, each with the devices it went to.
+    /// Answer retry requests only from those devices.
+    pub recipients: Vec<(ServiceId, Vec<DeviceId>)>,
     pub content: proto::Content,
 }

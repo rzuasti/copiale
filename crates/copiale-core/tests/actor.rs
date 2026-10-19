@@ -2855,9 +2855,18 @@ fn undecryptable(from: u128, sent_at: u64, group: Option<GroupId>, shown: bool) 
 }
 
 fn retry_requested(from: u128, sent_at: Timestamp, session_reset: bool) -> Incoming {
+    retry_requested_by(from, 1, sent_at, session_reset)
+}
+
+fn retry_requested_by(
+    from: u128,
+    device: u32,
+    sent_at: Timestamp,
+    session_reset: bool,
+) -> Incoming {
     Incoming::RetryRequested {
         sender: service_id(from),
-        device: 1,
+        device,
         sent_at,
         session_reset,
     }
@@ -3011,6 +3020,28 @@ async fn retry_requests_are_answered_once_and_only_to_recipients() {
     assert_eq!(running.network.resent().len(), 1);
     assert_eq!(running.network.resent()[0].0, service_id(2));
     assert_eq!(running.network.null_messages(), [service_id(3)]);
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn retry_requests_are_answered_only_from_devices_that_got_the_message() {
+    let (_dir, mut running) = ready().await;
+    running.network.set_devices(service_id(2), &[1, 2]);
+    let chat = open_chat(&mut running, 2).await;
+    let message = sent_text(&mut running, chat, "hi").await;
+
+    // Device 3 was linked after the send.
+    running
+        .network
+        .deliver(retry_requested_by(2, 3, message.sent_at, false));
+    running
+        .network
+        .deliver(retry_requested_by(2, 2, message.sent_at, false));
+    flush(&mut running).await;
+
+    until(&running, |network| !network.resent().is_empty()).await;
+    assert_eq!(running.network.resent().len(), 1);
+    assert_eq!(running.network.resent()[0].0, service_id(2));
     stop(running).await;
 }
 

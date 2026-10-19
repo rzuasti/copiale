@@ -25,6 +25,10 @@ each one once its patches are merged and the pin is updated.
     `MessageSender::send_retry_request` sends one as unencrypted content,
     and `MessageSender::resend_content` answers one.
     Upstream PR: [whisperfish/libsignal-service-rs#484](https://github.com/whisperfish/libsignal-service-rs/pull/484).
+  - `patches/libsignal-service-sent-devices.patch`. `SentMessage::devices`
+    lists the devices a send reached, to answer retry requests only from
+    those.
+    Upstream PR: [whisperfish/libsignal-service-rs#485](https://github.com/whisperfish/libsignal-service-rs/pull/485).
 - **Used via:** `[patch."https://github.com/whisperfish/libsignal-service-rs"]`
   in the root `Cargo.toml`.
 
@@ -48,7 +52,8 @@ libsignal-service git hash back to `nix/package.nix`.
     `Received::DecryptionError` carries the failure, for
     `Manager::send_retry_request`; retry requests arrive as
     `Received::RetryRequest`, archiving the session they show broken; sends
-    return what went out (`SentContent`), to resend with
+    return what went out and the devices it reached (`SentContent`), to
+    resend with
     `Manager::resend_content`; `Manager::send_null_message` starts a new
     session. Not upstream yet.
   - `patches/presage-sync-sender.patch`. The receive loop drops sync

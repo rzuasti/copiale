@@ -259,7 +259,10 @@ impl SignalBackend for PresageBackend {
                 recipients: sent
                     .recipients
                     .iter()
-                    .map(|recipient| ServiceId::new(recipient.raw_uuid()))
+                    .map(|(recipient, devices)| {
+                        let devices = devices.iter().map(|device| u32::from(*device)).collect();
+                        (ServiceId::new(recipient.raw_uuid()), devices)
+                    })
                     .collect(),
                 content: sent.content.encode_to_vec(),
             })

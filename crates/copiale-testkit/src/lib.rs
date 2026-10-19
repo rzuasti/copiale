@@ -143,6 +143,8 @@ struct State {
     device_name: Option<String>,
     /// Identity keys sessions use, by account.
     identities: HashMap<ServiceId, IdentityKey>,
+    /// Devices of each account, if not only device 1.
+    devices: HashMap<ServiceId, Vec<u32>>,
 }
 
 type DeletedForMe = (Destination, Vec<(Option<ServiceId>, Timestamp)>);
@@ -229,7 +231,8 @@ impl SignalBackend for FakeBackend {
 
     /// Counts as started at once; completes when sends aren't paused and
     /// the network is up. Reaches the contact, or the scripted group's
-    /// members; the content is its place among [`FakeNetwork::sent`].
+    /// members, on their devices; the content is its place among
+    /// [`FakeNetwork::sent`].
     fn send(
         &mut self,
         destination: Destination,
@@ -252,7 +255,7 @@ impl SignalBackend for FakeBackend {
                 return Err(error);
             }
             Ok(record(&state, &changes, |state| {
-                let recipients = match destination {
+                let recipients: Vec<ServiceId> = match destination {
                     Destination::Contact(peer) if peer == service_id(OWN_ID) => Vec::new(),
                     Destination::Contact(peer) => vec![peer],
                     Destination::Group(group) => state
@@ -261,6 +264,13 @@ impl SignalBackend for FakeBackend {
                         .map(|info| info.members.iter().map(|member| member.id).collect())
                         .unwrap_or_default(),
                 };
+                let recipients = recipients
+                    .into_iter()
+                    .map(|peer| {
+                        let devices = state.devices.get(&peer).cloned().unwrap_or(vec![1]);
+                        (peer, devices)
+                    })
+                    .collect();
                 let content = (state.sent.len() as u64).to_le_bytes().to_vec();
                 state.sent.push(SentText {
                     destination,
@@ -632,6 +642,16 @@ impl FakeNetwork {
 
     pub fn contact_sync_requests(&self) -> usize {
         self.state.lock().unwrap().contact_sync_requests
+    }
+
+    /// Sets `peer`'s devices, which later sends reach; device 1 alone by
+    /// default.
+    pub fn set_devices(&self, peer: ServiceId, devices: &[u32]) {
+        self.state
+            .lock()
+            .unwrap()
+            .devices
+            .insert(peer, devices.to_vec());
     }
 
     /// Sets the group state the backend reports; members' names are their
