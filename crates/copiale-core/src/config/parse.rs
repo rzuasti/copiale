@@ -1,26 +1,9 @@
 //! Reads `config.toml` setting by setting; never fails.
 
-use std::ops::RangeInclusive;
-
 use toml_edit::{DocumentMut, Item, Value};
 
-use super::schema::{Choice, Typography, WindowConfig, in_range};
-use super::{Config, ConfigWarning, Loaded};
-
-/// Every table and key the file may contain.
-const SCHEMA: &[(&str, &[&str])] = &[
-    ("appearance", &["theme"]),
-    (
-        "typography",
-        &["ui_font", "mono_font", "body_font", "size", "line_height"],
-    ),
-    (
-        "layout",
-        &["density", "message_style", "timestamps", "clock", "avatars"],
-    ),
-    ("window", &["opacity", "blur"]),
-    ("notifications", &["content"]),
-];
+use super::schema::Kind;
+use super::{Config, ConfigWarning, Loaded, Setting};
 
 pub(crate) fn parse(text: &str) -> Loaded {
     let doc = match text.parse::<DocumentMut>() {
@@ -41,53 +24,14 @@ pub(crate) fn parse(text: &str) -> Loaded {
         warnings: Vec::new(),
     };
     reader.check_unknown();
-
-    let defaults = Config::default();
-    let mut config = Config::default();
-    config.appearance.theme = reader.choice("appearance", "theme", defaults.appearance.theme);
-
-    let typography = &mut config.typography;
-    typography.ui_font = reader.font("typography", "ui_font");
-    typography.mono_font = reader.font("typography", "mono_font");
-    typography.body_font = reader.font("typography", "body_font");
-    typography.size = reader.integer(
-        "typography",
-        "size",
-        Typography::SIZE_RANGE,
-        defaults.typography.size,
-    );
-    typography.line_height = reader.float(
-        "typography",
-        "line_height",
-        Typography::LINE_HEIGHT_RANGE,
-        defaults.typography.line_height,
-    );
-
-    let layout = &mut config.layout;
-    layout.density = reader.choice("layout", "density", defaults.layout.density);
-    layout.message_style = reader.choice("layout", "message_style", defaults.layout.message_style);
-    layout.timestamps = reader.choice("layout", "timestamps", defaults.layout.timestamps);
-    layout.clock = reader.choice("layout", "clock", defaults.layout.clock);
-    layout.avatars = reader.boolean("layout", "avatars", defaults.layout.avatars);
-
-    config.window.opacity = reader.float(
-        "window",
-        "opacity",
-        WindowConfig::OPACITY_RANGE,
-        defaults.window.opacity,
-    );
-    config.window.blur = reader.boolean("window", "blur", defaults.window.blur);
-
-    config.notifications.content =
-        reader.choice("notifications", "content", defaults.notifications.content);
-
+    let config = Config::read(&mut reader);
     Loaded {
         config,
         warnings: reader.warnings,
     }
 }
 
-struct Reader<'a> {
+pub(crate) struct Reader<'a> {
     doc: &'a DocumentMut,
     warnings: Vec<ConfigWarning>,
 }
@@ -102,20 +46,16 @@ impl<'a> Reader<'a> {
 
     fn check_unknown(&mut self) {
         for (table_name, item) in self.doc.iter() {
-            let Some(keys) = SCHEMA
-                .iter()
-                .find(|(name, _)| *name == table_name)
-                .map(|(_, keys)| keys)
-            else {
+            if !Setting::KEYS.iter().any(|(table, _)| *table == table_name) {
                 self.warn(table_name.into(), "unknown setting, ignored".into());
                 continue;
-            };
+            }
             let Some(table) = item.as_table_like() else {
                 self.warn(table_name.into(), "expected a table, ignored".into());
                 continue;
             };
             for (key, _) in table.iter() {
-                if !keys.contains(&key) {
+                if !Setting::KEYS.contains(&(table_name, key)) {
                     self.warn(
                         format!("{table_name}.{key}"),
                         "unknown setting, ignored".into(),
@@ -140,104 +80,30 @@ impl<'a> Reader<'a> {
         }
     }
 
-    fn choice<T: Choice>(&mut self, table: &str, key: &str, default: T) -> T {
-        let Some(value) = self.value(table, key) else {
-            return default;
-        };
-        if let Some(choice) = value.as_str().and_then(T::from_name) {
-            return choice;
-        }
-        let names: Vec<_> = T::CHOICES.iter().map(|(name, _)| *name).collect();
-        self.warn(
-            format!("{table}.{key}"),
-            format!(
-                "expected one of {}, got {}; using {}",
-                names.join(", "),
-                value.to_string().trim(),
-                default.name()
-            ),
-        );
-        default
-    }
-
-    fn boolean(&mut self, table: &str, key: &str, default: bool) -> bool {
-        let Some(value) = self.value(table, key) else {
-            return default;
-        };
-        value.as_bool().unwrap_or_else(|| {
-            self.warn(
-                format!("{table}.{key}"),
-                format!(
-                    "expected true or false, got {}; using {default}",
-                    value.to_string().trim()
-                ),
-            );
-            default
-        })
-    }
-
-    fn integer(&mut self, table: &str, key: &str, range: RangeInclusive<u32>, default: u32) -> u32 {
-        let Some(value) = self.value(table, key) else {
-            return default;
-        };
-        let checked = match value.as_integer().map(u32::try_from) {
-            Some(Ok(number)) => in_range(&number, &range).map(|()| number),
-            _ => Err(format!(
-                "expected a whole number, got {}",
-                value.to_string().trim()
-            )),
-        };
-        self.or_default(table, key, checked, default)
-    }
-
-    /// Accepts integers too: `line_height = 1` means 1.0.
-    fn float(&mut self, table: &str, key: &str, range: RangeInclusive<f64>, default: f64) -> f64 {
-        let Some(value) = self.value(table, key) else {
-            return default;
-        };
-        let number = value
-            .as_float()
-            .or_else(|| value.as_integer().map(|number| number as f64));
-        let checked = match number {
-            Some(number) => in_range(&number, &range).map(|()| number),
-            None => Err(format!(
-                "expected a number, got {}",
-                value.to_string().trim()
-            )),
-        };
-        self.or_default(table, key, checked, default)
-    }
-
-    /// Empty means the default font.
-    fn font(&mut self, table: &str, key: &str) -> Option<String> {
-        let value = self.value(table, key)?;
-        match value.as_str() {
-            Some("") => None,
-            Some(font) => Some(font.to_string()),
-            None => {
-                self.warn(
-                    format!("{table}.{key}"),
-                    format!(
-                        "expected a font name, got {}; using the default",
-                        value.to_string().trim()
-                    ),
-                );
-                None
-            }
-        }
-    }
-
-    fn or_default<T: std::fmt::Display>(
+    /// The setting at `table.key`, or `default` if absent, of the wrong type
+    /// or rejected by `check`.
+    pub(crate) fn read<T: Kind>(
         &mut self,
         table: &str,
         key: &str,
-        checked: Result<T, String>,
         default: T,
+        check: impl Fn(&T) -> Result<(), String>,
     ) -> T {
+        let Some(value) = self.value(table, key) else {
+            return default;
+        };
+        let checked = match T::from_toml(value) {
+            Some(read) => check(&read).map(|()| read),
+            None => Err(format!(
+                "expected {}, got {}",
+                T::expected(),
+                value.to_string().trim()
+            )),
+        };
         checked.unwrap_or_else(|message| {
             self.warn(
                 format!("{table}.{key}"),
-                format!("{message}; using {default}"),
+                format!("{message}; using {}", default.describe()),
             );
             default
         })
@@ -370,6 +236,29 @@ mod tests {
             loaded.warnings[0].to_string(),
             "layout.density: expected one of compact, cozy, roomy, got \"tight\"; using cozy"
         );
+    }
+
+    #[test]
+    fn warnings_name_the_expected_type_and_fallback() {
+        let loaded =
+            parse("[typography]\nsize = -1\nline_height = 3\nui_font = 1\n[layout]\navatars = 1\n");
+        let warnings: Vec<_> = loaded.warnings.iter().map(|w| w.to_string()).collect();
+        assert_eq!(
+            warnings,
+            [
+                "typography.ui_font: expected a font name, got 1; using the default",
+                "typography.size: expected a whole number, got -1; using 14",
+                "typography.line_height: must be between 1 and 2, got 3; using 1.4",
+                "layout.avatars: expected true or false, got 1; using false",
+            ]
+        );
+    }
+
+    #[test]
+    fn keys_are_unique() {
+        for (ix, key) in Setting::KEYS.iter().enumerate() {
+            assert!(!Setting::KEYS[..ix].contains(key), "{key:?} repeats");
+        }
     }
 
     #[test]

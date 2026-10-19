@@ -4,6 +4,8 @@ use std::ops::RangeInclusive;
 
 use toml_edit::Value;
 
+use super::parse::Reader;
+
 /// All settings in `config.toml`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Config {
@@ -135,95 +137,211 @@ choice!(
     NotificationContent { Off = "off", #[default] Name = "name", Message = "message" }
 );
 
-/// One change to `config.toml`, as made by the settings UI.
-#[derive(Clone, Debug, PartialEq)]
-pub enum Setting {
-    Theme(ThemeMode),
-    /// `None` removes the key, restoring the default font.
-    UiFont(Option<String>),
-    MonoFont(Option<String>),
-    BodyFont(Option<String>),
-    FontSize(u32),
-    LineHeight(f64),
-    Density(Density),
-    MessageStyle(MessageStyle),
-    Timestamps(TimestampVisibility),
-    Clock(Clock),
-    Avatars(bool),
-    Opacity(f64),
-    Blur(bool),
-    NotificationContent(NotificationContent),
-}
-
-impl Config {
-    /// Applies a change as writing it to the file and reloading would.
-    pub fn set(&mut self, setting: &Setting) {
-        match setting.clone() {
-            Setting::Theme(v) => self.appearance.theme = v,
-            Setting::UiFont(font) => self.typography.ui_font = font.filter(|f| !f.is_empty()),
-            Setting::MonoFont(font) => self.typography.mono_font = font.filter(|f| !f.is_empty()),
-            Setting::BodyFont(font) => self.typography.body_font = font.filter(|f| !f.is_empty()),
-            Setting::FontSize(v) => self.typography.size = v,
-            Setting::LineHeight(v) => self.typography.line_height = v,
-            Setting::Density(v) => self.layout.density = v,
-            Setting::MessageStyle(v) => self.layout.message_style = v,
-            Setting::Timestamps(v) => self.layout.timestamps = v,
-            Setting::Clock(v) => self.layout.clock = v,
-            Setting::Avatars(v) => self.layout.avatars = v,
-            Setting::Opacity(v) => self.window.opacity = v,
-            Setting::Blur(v) => self.window.blur = v,
-            Setting::NotificationContent(v) => self.notifications.content = v,
+/// Declares every setting once: its `Setting` variant and payload, and its
+/// `Config` field, whose path is also its TOML table and key. Numbers give
+/// their range.
+macro_rules! settings {
+    (@check $v:ident) => {{
+        let _ = $v;
+        Ok(())
+    }};
+    (@check $v:ident $range:expr) => {
+        in_range($v, &$range)
+    };
+    ($($(#[$meta:meta])* $variant:ident($type:ty): $table:ident.$key:ident $(in $range:expr)?,)+) => {
+        /// One change to `config.toml`, as made by the settings UI.
+        #[derive(Clone, Debug, PartialEq)]
+        pub enum Setting {
+            $($(#[$meta])* $variant($type),)+
         }
-    }
-}
 
-impl Setting {
-    /// `(table, key)` in the file.
-    pub(crate) fn key(&self) -> (&'static str, &'static str) {
-        match self {
-            Self::Theme(_) => ("appearance", "theme"),
-            Self::UiFont(_) => ("typography", "ui_font"),
-            Self::MonoFont(_) => ("typography", "mono_font"),
-            Self::BodyFont(_) => ("typography", "body_font"),
-            Self::FontSize(_) => ("typography", "size"),
-            Self::LineHeight(_) => ("typography", "line_height"),
-            Self::Density(_) => ("layout", "density"),
-            Self::MessageStyle(_) => ("layout", "message_style"),
-            Self::Timestamps(_) => ("layout", "timestamps"),
-            Self::Clock(_) => ("layout", "clock"),
-            Self::Avatars(_) => ("layout", "avatars"),
-            Self::Opacity(_) => ("window", "opacity"),
-            Self::Blur(_) => ("window", "blur"),
-            Self::NotificationContent(_) => ("notifications", "content"),
-        }
-    }
+        impl Setting {
+            /// `(table, key)` of every setting, in declaration order.
+            pub const KEYS: &'static [(&'static str, &'static str)] =
+                &[$((stringify!($table), stringify!($key))),+];
 
-    /// TOML value; `None` removes the key.
-    pub(crate) fn value(&self) -> Option<Value> {
-        Some(match self {
-            Self::Theme(v) => v.name().into(),
-            Self::UiFont(font) | Self::MonoFont(font) | Self::BodyFont(font) => {
-                font.as_deref().filter(|font| !font.is_empty())?.into()
+            /// `(table, key)` in the file.
+            pub fn key(&self) -> (&'static str, &'static str) {
+                match self {
+                    $(Self::$variant(_) => (stringify!($table), stringify!($key)),)+
+                }
             }
-            Self::FontSize(size) => i64::from(*size).into(),
-            Self::LineHeight(v) | Self::Opacity(v) => (*v).into(),
-            Self::Density(v) => v.name().into(),
-            Self::MessageStyle(v) => v.name().into(),
-            Self::Timestamps(v) => v.name().into(),
-            Self::Clock(v) => v.name().into(),
-            Self::Avatars(v) | Self::Blur(v) => (*v).into(),
-            Self::NotificationContent(v) => v.name().into(),
-        })
+
+            /// TOML value; `None` removes the key.
+            pub(crate) fn value(&self) -> Option<Value> {
+                match self {
+                    $(Self::$variant(v) => v.to_toml(),)+
+                }
+            }
+
+            /// Error message if the value is out of range.
+            pub(crate) fn check(&self) -> Result<(), String> {
+                match self {
+                    $(Self::$variant(v) => settings!(@check v $($range)?),)+
+                }
+            }
+        }
+
+        impl Config {
+            /// Applies a change as writing it to the file and reloading would.
+            pub fn set(&mut self, setting: &Setting) {
+                match setting {
+                    $(Setting::$variant(v) => self.$table.$key = v.clone().normalized(),)+
+                }
+            }
+
+            /// Reads every setting, in declaration order.
+            pub(crate) fn read(reader: &mut Reader) -> Self {
+                let mut config = Self::default();
+                $(
+                    config.$table.$key = reader.read(
+                        stringify!($table),
+                        stringify!($key),
+                        config.$table.$key.clone(),
+                        |v| settings!(@check v $($range)?),
+                    );
+                )+
+                config
+            }
+        }
+    };
+}
+
+settings! {
+    Theme(ThemeMode): appearance.theme,
+    /// `None` removes the key, restoring the default font.
+    UiFont(Option<String>): typography.ui_font,
+    MonoFont(Option<String>): typography.mono_font,
+    BodyFont(Option<String>): typography.body_font,
+    FontSize(u32): typography.size in Typography::SIZE_RANGE,
+    LineHeight(f64): typography.line_height in Typography::LINE_HEIGHT_RANGE,
+    Density(Density): layout.density,
+    MessageStyle(MessageStyle): layout.message_style,
+    Timestamps(TimestampVisibility): layout.timestamps,
+    Clock(Clock): layout.clock,
+    Avatars(bool): layout.avatars,
+    Opacity(f64): window.opacity in WindowConfig::OPACITY_RANGE,
+    Blur(bool): window.blur,
+    NotificationContent(NotificationContent): notifications.content,
+}
+
+/// How a setting's type is read from and written to TOML.
+pub(crate) trait Kind: Clone {
+    /// What a warning says was expected.
+    fn expected() -> String;
+
+    fn from_toml(value: &Value) -> Option<Self>;
+
+    /// `None` removes the key.
+    fn to_toml(&self) -> Option<Value>;
+
+    /// As a warning names the fallback.
+    fn describe(&self) -> String;
+
+    /// As stored after a round trip through the file.
+    fn normalized(self) -> Self {
+        self
+    }
+}
+
+impl<T: Choice> Kind for T {
+    fn expected() -> String {
+        let names: Vec<_> = T::CHOICES.iter().map(|(name, _)| *name).collect();
+        format!("one of {}", names.join(", "))
     }
 
-    /// Error message if the value is out of range.
-    pub(crate) fn check(&self) -> Result<(), String> {
-        match self {
-            Self::FontSize(size) => in_range(size, &Typography::SIZE_RANGE),
-            Self::LineHeight(v) => in_range(v, &Typography::LINE_HEIGHT_RANGE),
-            Self::Opacity(v) => in_range(v, &WindowConfig::OPACITY_RANGE),
-            _ => Ok(()),
-        }
+    fn from_toml(value: &Value) -> Option<Self> {
+        value.as_str().and_then(T::from_name)
+    }
+
+    fn to_toml(&self) -> Option<Value> {
+        Some(self.name().into())
+    }
+
+    fn describe(&self) -> String {
+        self.name().into()
+    }
+}
+
+impl Kind for bool {
+    fn expected() -> String {
+        "true or false".into()
+    }
+
+    fn from_toml(value: &Value) -> Option<Self> {
+        value.as_bool()
+    }
+
+    fn to_toml(&self) -> Option<Value> {
+        Some((*self).into())
+    }
+
+    fn describe(&self) -> String {
+        self.to_string()
+    }
+}
+
+impl Kind for u32 {
+    fn expected() -> String {
+        "a whole number".into()
+    }
+
+    fn from_toml(value: &Value) -> Option<Self> {
+        value.as_integer().and_then(|number| number.try_into().ok())
+    }
+
+    fn to_toml(&self) -> Option<Value> {
+        Some(i64::from(*self).into())
+    }
+
+    fn describe(&self) -> String {
+        self.to_string()
+    }
+}
+
+/// Accepts integers too: `line_height = 1` means 1.0.
+impl Kind for f64 {
+    fn expected() -> String {
+        "a number".into()
+    }
+
+    fn from_toml(value: &Value) -> Option<Self> {
+        value
+            .as_float()
+            .or_else(|| value.as_integer().map(|number| number as f64))
+    }
+
+    fn to_toml(&self) -> Option<Value> {
+        Some((*self).into())
+    }
+
+    fn describe(&self) -> String {
+        self.to_string()
+    }
+}
+
+/// A font name; `None` or empty means the default font.
+impl Kind for Option<String> {
+    fn expected() -> String {
+        "a font name".into()
+    }
+
+    fn from_toml(value: &Value) -> Option<Self> {
+        Some(Some(value.as_str()?.to_owned()).normalized())
+    }
+
+    fn to_toml(&self) -> Option<Value> {
+        self.as_deref()
+            .filter(|font| !font.is_empty())
+            .map(Value::from)
+    }
+
+    fn describe(&self) -> String {
+        self.as_deref().unwrap_or("the default").into()
+    }
+
+    fn normalized(self) -> Self {
+        self.filter(|font| !font.is_empty())
     }
 }
 

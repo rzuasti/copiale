@@ -527,7 +527,10 @@ impl FontPicker {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use copiale_core::AccountSettings;
+    use copiale_core::config::ConfigFile;
 
     use super::*;
 
@@ -535,6 +538,48 @@ mod tests {
     fn stepped(config: &mut Config, field: Field, step: i32) {
         let setting = field.step(config, step).expect("a change");
         config.set(&setting);
+    }
+
+    /// Every change `field` offers from `config`.
+    fn changes(field: Field, config: &Config) -> Vec<Setting> {
+        let mut settings: Vec<_> = [-1, 1]
+            .into_iter()
+            .filter_map(|step| field.step(config, step))
+            .collect();
+        settings.extend((0..).map_while(|ix| field.choose(ix)));
+        match field.activate(config) {
+            Activation::Change(setting) => settings.push(setting),
+            Activation::PickFont(role) => {
+                settings.push(role.setting(Some("Inter".into())));
+                settings.push(role.setting(None));
+            }
+            Activation::ConfirmUnlink | Activation::Nothing => {}
+        }
+        settings
+    }
+
+    #[test]
+    fn every_change_round_trips_and_every_setting_has_one_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = ConfigFile::new(dir.path().join("config.toml"));
+        let mut expected = Config::default();
+        let mut rows = HashMap::new();
+        for field in FIELDS {
+            for setting in changes(field, &expected.clone()) {
+                let row = rows.entry(setting.key()).or_insert(field);
+                assert_eq!(*row, field, "{:?} is on two rows", setting.key());
+                file.write(std::slice::from_ref(&setting)).unwrap();
+                expected.set(&setting);
+                let loaded = file.load();
+                assert_eq!(loaded.warnings, vec![], "{setting:?}");
+                assert_eq!(loaded.config, expected, "{setting:?}");
+            }
+        }
+        let mut keys: Vec<_> = rows.into_keys().collect();
+        let mut all = Setting::KEYS.to_vec();
+        keys.sort();
+        all.sort();
+        assert_eq!(keys, all);
     }
 
     #[test]
