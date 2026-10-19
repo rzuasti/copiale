@@ -301,6 +301,8 @@ impl Core {
         let mut stopping = false;
         // When to stop waiting for the stream to end.
         let mut drain_by: Option<Instant> = None;
+        // Set once the server rejected our credentials.
+        let mut revoked = false;
         loop {
             if retry_at.is_some_and(|at| at <= Instant::now()) {
                 retry_at = None;
@@ -378,7 +380,13 @@ impl Core {
                         self.typing(db, &mut backend, &mut typing_sent, conversation, typing).await;
                     }
                     // Local data goes, so what's still arriving can too.
-                    Some(Command::Unlink) => return Served::Unlink,
+                    Some(Command::Unlink) => {
+                        self.emit(Event::Unlinking);
+                        if !revoked {
+                            self.remove_device(&mut backend).await;
+                        }
+                        return Served::Unlink;
+                    }
                     Some(Command::Shutdown) | None if incoming.is_none() => {
                         self.contacts_asked_meanwhile(db, &mut contacts_asked).await;
                         return Served::Stop;
@@ -395,6 +403,7 @@ impl Core {
                     match result {
                         Ok(stream) => {
                             incoming = Some(stream);
+                            revoked = false;
                             self.emit(Event::Connected);
                             probe.start();
                             outbox.connected(&mut backend);
@@ -412,6 +421,7 @@ impl Core {
                         }
                         Err(error) if error.is_unauthorized() => {
                             tracing::warn!(%error, "credentials rejected");
+                            revoked = true;
                             self.emit(Event::LinkRevoked);
                         }
                         Err(error) => {
@@ -639,10 +649,24 @@ impl Core {
                 outbox.disconnected();
                 let error = draining.take().flatten();
                 if error.as_ref().is_some_and(BackendError::is_unauthorized) {
+                    revoked = true;
                     self.emit(Event::LinkRevoked);
                 } else {
                     retry_at = Some(self.disconnected(error, &mut delay));
                 }
+            }
+        }
+    }
+
+    /// Removes this device from the account before its data goes.
+    async fn remove_device<B: SignalBackend>(&self, backend: &mut B) {
+        match timed(self.options.unlink_timeout, backend.remove_device()).await {
+            Ok(()) => tracing::info!("device removed from the account"),
+            // Already removed.
+            Err(error) if error.is_unauthorized() => {}
+            Err(error) => {
+                tracing::warn!(%error, "removing the device failed");
+                self.emit(Event::DeviceNotRemoved(error));
             }
         }
     }

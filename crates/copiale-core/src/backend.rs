@@ -206,6 +206,10 @@ pub trait SignalBackend {
         destination: Destination,
         typing: bool,
     ) -> LocalBoxFuture<'static, Result<(), BackendError>>;
+
+    /// Removes this device from the account, so the phone stops listing it.
+    /// Doesn't borrow the backend.
+    fn remove_device(&mut self) -> LocalBoxFuture<'static, Result<(), BackendError>>;
 }
 
 /// Account setup: presage in the app, a fake in tests.

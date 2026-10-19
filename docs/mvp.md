@@ -242,10 +242,13 @@ not in the file:
 
 Unlinking and wiping:
 
-- **Unlink and wipe** (settings, Account) asks first, then deletes the
-  database, salt and keychain key, keeps `config.toml`, and returns to the
-  link screen. presage can't remove a linked device from the account, so
-  the confirmation says to remove it on the phone too.
+- **Unlink and wipe** (settings, Account) asks first, shows "Unlinking…"
+  while it removes the device from the account, then deletes the database,
+  salt and keychain key, keeps `config.toml`, and returns to the link
+  screen. If removing fails (e.g.
+  offline, 10 s timeout), local data goes anyway and the link screen says to
+  remove the device on the phone. Skipped once the server rejected the
+  credentials: the phone already removed it.
 - When the server rejects this device's credentials (the phone unlinked
   it), the core stops reconnecting and the app shows "This device was
   unlinked": wipe and link again, or try again in case it was a glitch.

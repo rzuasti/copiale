@@ -34,6 +34,8 @@ pub enum Screen {
     Revoked {
         busy: bool,
     },
+    /// Removing the device from the account and wiping local data.
+    Unlinking,
     Stopped,
 }
 
@@ -43,6 +45,9 @@ pub struct Onboarding {
     /// Shown on the next [`Screen::Unlinked`] or [`Screen::Passphrase`]:
     /// why linking failed, or local data couldn't be read or written.
     pending_error: Option<String>,
+    /// Shown on the next [`Screen::Unlinked`]: unlinking couldn't remove
+    /// the device from the account.
+    still_listed: Option<String>,
     /// Last name used or suggested, kept across link attempts.
     device_name: Option<String>,
 }
@@ -52,6 +57,7 @@ impl Default for Onboarding {
         Self {
             screen: Screen::Starting,
             pending_error: None,
+            still_listed: None,
             device_name: None,
         }
     }
@@ -86,11 +92,21 @@ impl Onboarding {
             }
             Event::Unlinked { device_name } => {
                 let device_name = self.device_name.get_or_insert_with(|| device_name.clone());
+                let error = [self.pending_error.take(), self.still_listed.take()]
+                    .into_iter()
+                    .flatten()
+                    .reduce(|first, second| format!("{first}\n{second}"));
                 self.screen = Screen::Unlinked {
                     device_name: device_name.clone(),
-                    error: self.pending_error.take(),
+                    error,
                     busy: false,
                 };
+            }
+            Event::DeviceNotRemoved(error) => {
+                self.still_listed = Some(format!(
+                    "Your phone still lists this device ({error}). Remove it there under \
+                     Settings > Linked devices."
+                ));
             }
             Event::LinkUrl(url) => self.screen = Screen::Linking { url: url.clone() },
             Event::LinkFailed(error) => self.pending_error = Some(error.to_string()),
@@ -99,6 +115,7 @@ impl Onboarding {
                 self.pending_error = Some(format!("Local data: {error}"));
             }
             Event::Ready => self.screen = Screen::Ready,
+            Event::Unlinking => self.screen = Screen::Unlinking,
             Event::LinkRevoked => self.screen = Screen::Revoked { busy: false },
             // Trying again worked.
             Event::Connected if matches!(self.screen, Screen::Revoked { .. }) => {
@@ -299,6 +316,48 @@ mod tests {
             device_name: "Copiale on host".into(),
         });
         assert!(!model.has_account());
+    }
+
+    #[test]
+    fn unlinking_leaves_the_account() {
+        for from in [Event::Ready, Event::LinkRevoked] {
+            let mut model = at(from);
+            model.apply(&Event::Unlinking);
+            assert_eq!(model.screen(), &Screen::Unlinking);
+            assert!(!model.has_account());
+            assert!(model.wipe().is_none());
+        }
+    }
+
+    #[test]
+    fn device_still_listed_after_unlinking_shows_on_the_link_screen() {
+        let mut model = at(Event::Ready);
+        model.apply(&Event::DeviceNotRemoved(BackendError::network("offline")));
+        model.apply(&Event::Locked {
+            new_passphrase: true,
+        });
+        assert!(matches!(
+            model.screen(),
+            Screen::Passphrase { error: None, .. }
+        ));
+        model.apply(&Event::Unlinked {
+            device_name: "Copiale on host".into(),
+        });
+        assert!(matches!(
+            model.screen(),
+            Screen::Unlinked { error: Some(error), .. }
+                if error == "Your phone still lists this device (offline). Remove it there \
+                             under Settings > Linked devices."
+        ));
+
+        // Only once.
+        model.apply(&Event::Unlinked {
+            device_name: "Copiale on host".into(),
+        });
+        assert!(matches!(
+            model.screen(),
+            Screen::Unlinked { error: None, .. }
+        ));
     }
 
     #[test]

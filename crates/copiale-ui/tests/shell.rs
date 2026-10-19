@@ -1940,6 +1940,10 @@ fn unlink_asks_then_wipes_and_drops_the_chats(cx: &mut TestAppContext) {
     assert!(matches!(ui.core.take().as_slice(), [Command::Unlink]));
     assert_eq!(overlay(&ui, cx), None);
 
+    // The chats go while the device is removed and its data wiped.
+    ui.event(Event::Unlinking, cx);
+    assert_eq!(ui.screen(cx), Screen::Unlinking);
+    assert!(cx.update(|cx| ui.shell.read(cx).chat().is_none()));
     ui.event(
         Event::Unlinked {
             device_name: "Copiale on host".into(),
@@ -1969,6 +1973,8 @@ fn an_unlinked_device_asks_before_wiping(cx: &mut TestAppContext) {
     ui.click("wipe", cx);
     assert!(matches!(ui.core.take().as_slice(), [Command::Unlink]));
     assert_eq!(ui.screen(cx), Screen::Revoked { busy: true });
+    ui.event(Event::Unlinking, cx);
+    assert_eq!(ui.screen(cx), Screen::Unlinking);
     ui.event(
         Event::Unlinked {
             device_name: "Copiale on host".into(),

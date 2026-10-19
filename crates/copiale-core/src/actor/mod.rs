@@ -89,10 +89,12 @@ pub enum Command {
         conversation: ConversationId,
         typing: bool,
     },
-    /// Deletes all local data (database, salt, keychain key; not the
-    /// config) and starts over: [`Event::Unlinked`] or [`Event::Locked`]
-    /// follows. The phone keeps listing the device until removed there.
-    /// The UI must confirm first.
+    /// Removes this device from the account, unless the phone already did,
+    /// then deletes all local data (database, salt, keychain key; not the
+    /// config) and starts over: [`Event::Unlinking`], then
+    /// [`Event::Unlinked`] or [`Event::Locked`], after
+    /// [`Event::DeviceNotRemoved`] if removing failed. The UI must confirm
+    /// first.
     Unlink,
     /// Stops the core; [`Event::Stopped`] follows.
     Shutdown,
@@ -177,6 +179,12 @@ pub enum Event {
     /// unlinks it. The core stops reconnecting: offer [`Command::Unlink`],
     /// or [`Command::Reconnect`] in case it was a glitch.
     LinkRevoked,
+    /// [`Command::Unlink`] started: the account's data is going.
+    Unlinking,
+    /// [`Command::Unlink`] couldn't remove this device from the account;
+    /// local data goes anyway. The phone lists the device until it's
+    /// removed there.
+    DeviceNotRemoved(BackendError),
     /// The connection failed to open (`Some`) or closed (`None`); the next
     /// attempt is in `retry_in`.
     Disconnected {
@@ -261,6 +269,8 @@ pub struct CoreOptions {
     /// How long losing the connection, or stopping, waits for what was
     /// already received to be stored; whatever is left after it is lost.
     pub drain_timeout: Duration,
+    /// How long unlinking waits to remove the device from the account.
+    pub unlink_timeout: Duration,
     /// Times disappearing messages.
     pub clock: Arc<dyn Clock>,
 }
@@ -275,6 +285,7 @@ impl Default for CoreOptions {
             probe_timeout: Duration::from_secs(10),
             send_timeout: Duration::from_secs(600),
             drain_timeout: Duration::from_secs(10),
+            unlink_timeout: Duration::from_secs(10),
             clock: Arc::new(SystemClock),
         }
     }

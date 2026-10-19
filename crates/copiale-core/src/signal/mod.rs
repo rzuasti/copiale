@@ -405,6 +405,11 @@ impl SignalBackend for PresageBackend {
             .map(str::to_owned)
     }
 
+    fn remove_device(&mut self) -> LocalBoxFuture<'static, Result<(), BackendError>> {
+        let manager = self.manager.clone();
+        async move { manager.unlink_self().await.map_err(presage_error) }.boxed_local()
+    }
+
     fn request_contact_sync(&mut self) -> LocalBoxFuture<'static, Result<(), BackendError>> {
         let mut manager = self.manager.clone();
         async move { manager.request_contacts().await.map_err(presage_error) }.boxed_local()

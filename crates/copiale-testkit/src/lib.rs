@@ -99,6 +99,9 @@ struct State {
     profiles_fetched: HashSet<ServiceId>,
     profile_fetches: usize,
     settings_sync_requests: usize,
+    /// Times this device was removed from the account.
+    device_removals: usize,
+    device_removal_failure: Option<BackendError>,
     read_receipts: Vec<(ServiceId, Vec<Timestamp>)>,
     read_syncs: Vec<Vec<(ServiceId, Timestamp)>>,
     typing: Vec<(Destination, bool)>,
@@ -306,6 +309,15 @@ impl SignalBackend for FakeBackend {
         async { Ok(()) }.boxed_local()
     }
 
+    /// Fails as scripted; otherwise counted once sent, hanging while the
+    /// network is down.
+    fn remove_device(&mut self) -> LocalBoxFuture<'static, Result<(), BackendError>> {
+        if let Some(error) = self.state.lock().unwrap().device_removal_failure.take() {
+            return async { Err(error) }.boxed_local();
+        }
+        self.sync_request(|state| state.device_removals += 1)
+    }
+
     /// The scripted group, with fetched profile names filled in.
     fn group(
         &mut self,
@@ -482,6 +494,15 @@ impl FakeNetwork {
 
     pub fn settings_sync_requests(&self) -> usize {
         self.state.lock().unwrap().settings_sync_requests
+    }
+
+    pub fn device_removals(&self) -> usize {
+        self.state.lock().unwrap().device_removals
+    }
+
+    /// Makes the next device removal fail.
+    pub fn fail_device_removal(&self, error: BackendError) {
+        self.state.lock().unwrap().device_removal_failure = Some(error);
     }
 
     /// Read receipts sent so far, per recipient.

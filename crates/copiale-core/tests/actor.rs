@@ -1311,8 +1311,10 @@ async fn unlink_wipes_local_data_and_starts_over() {
     let old_key = secrets.secret();
 
     send(&running, Command::Unlink);
+    expect(&mut running.events, Event::Unlinking).await;
     // Fresh storage with a new key; the account must be linked again.
     expect_unlinked(&mut running.events).await;
+    assert_eq!(running.network.device_removals(), 1);
     assert!(secrets.secret().is_some());
     assert_ne!(secrets.secret(), old_key);
     assert_eq!(std::fs::read_to_string(&other).unwrap(), "kept");
@@ -1324,6 +1326,82 @@ async fn unlink_wipes_local_data_and_starts_over() {
     expect(&mut running.events, Event::Connected).await;
     send(&running, Command::LoadConversations);
     expect(&mut running.events, Event::Conversations(Vec::new())).await;
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn unlink_wipes_even_if_removing_the_device_fails() {
+    let (_dir, mut running) = ready().await;
+    let error = BackendError::new("server error");
+    running.network.fail_device_removal(error.clone());
+
+    send(&running, Command::Unlink);
+    expect(&mut running.events, Event::Unlinking).await;
+
+    expect(&mut running.events, Event::DeviceNotRemoved(error)).await;
+    expect_unlinked(&mut running.events).await;
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn unlink_offline_gives_up_on_removing_the_device() {
+    let dir = tempfile::tempdir().unwrap();
+    let options = CoreOptions {
+        unlink_timeout: RETRY,
+        ..fast()
+    };
+    let mut running = start_with(
+        dir.path(),
+        &MemorySecretStore::default(),
+        true,
+        options,
+        |_| {},
+    );
+    expect_ready(&mut running.events).await;
+    expect(&mut running.events, Event::Connected).await;
+    running.network.go_offline();
+
+    send(&running, Command::Unlink);
+    expect(&mut running.events, Event::Unlinking).await;
+
+    let Event::DeviceNotRemoved(error) = next_event(&mut running.events).await else {
+        panic!("expected DeviceNotRemoved");
+    };
+    assert!(error.is_network(), "{error}");
+    expect_unlinked(&mut running.events).await;
+    assert_eq!(running.network.device_removals(), 0);
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn unlink_after_the_device_was_already_removed_says_nothing() {
+    let (_dir, mut running) = ready().await;
+    running
+        .network
+        .fail_device_removal(BackendError::unauthorized("401 Unauthorized"));
+
+    send(&running, Command::Unlink);
+    expect(&mut running.events, Event::Unlinking).await;
+
+    expect_unlinked(&mut running.events).await;
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn unlink_after_rejected_credentials_skips_removing_the_device() {
+    let (_dir, mut running) = ready().await;
+    running
+        .network
+        .fail_receive(BackendError::unauthorized("401 Unauthorized"));
+    running.network.disconnect();
+    expect_disconnected(&mut running.events, RETRY).await;
+    expect(&mut running.events, Event::LinkRevoked).await;
+
+    send(&running, Command::Unlink);
+    expect(&mut running.events, Event::Unlinking).await;
+
+    expect_unlinked(&mut running.events).await;
+    assert_eq!(running.network.device_removals(), 0);
     stop(running).await;
 }
 

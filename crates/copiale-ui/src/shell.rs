@@ -313,6 +313,7 @@ impl Shell {
             .into_any_element(),
             // Shown by the chat view instead.
             Screen::Ready => status("Loading…", cx),
+            Screen::Unlinking => status("Unlinking…", cx),
             Screen::Revoked { busy } => card(
                 "This device was unlinked",
                 "Your phone removed Copiale from its linked devices, so it can't send or \

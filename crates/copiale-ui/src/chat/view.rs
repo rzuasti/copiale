@@ -1472,12 +1472,9 @@ impl ChatView {
             .gap_3()
             .child(div().text_lg().child("Unlink this device?"))
             .child(div().text_sm().text_color(muted).child(
-                "This deletes all messages and keys on this device and returns to the link \
-                 screen. Settings stay. Your messages stay on your phone.",
-            ))
-            .child(div().text_sm().text_color(muted).child(
-                "Your phone keeps listing this device until you remove it there, under \
-                 Settings > Linked devices.",
+                "This removes the device from your account, deletes all messages and keys on \
+                 it and returns to the link screen. Settings stay. Your messages stay on your \
+                 phone.",
             ))
             .child(
                 h_flex()
