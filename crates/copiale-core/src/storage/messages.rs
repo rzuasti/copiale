@@ -1,9 +1,12 @@
 //! Conversations and messages in Copiale's tables.
 
+use std::collections::HashMap;
+
 use uuid::Uuid;
 
 use super::StorageError;
 use super::changes::apply_pending;
+use super::contacts::display_name;
 use super::database::{Database, database_error};
 use crate::model::{
     Content, ConversationId, ConversationSummary, Destination, Direction, Expiry, GroupId,
@@ -12,18 +15,22 @@ use crate::model::{
 };
 
 /// Summary columns: id, peer, group ID, group title, last_activity,
-/// unread, last message direction and body. A macro so queries stay string
+/// unread, last message direction and body, and the peer's contact and
+/// profile names (from presage's tables). A macro so queries stay string
 /// literals, which sqlx requires.
 macro_rules! summary_query {
     () => {
         "SELECT c.id, c.peer, c.group_id, c.group_title, c.last_activity,
                 (SELECT count(*) FROM messages u WHERE u.conversation_id = c.id AND u.read = 0),
-                m.outgoing, m.body, m.content
+                m.outgoing, m.body, m.content,
+                ct.name, p.given_name, p.family_name
          FROM conversations c
          LEFT JOIN messages m ON m.id = (
              SELECT id FROM messages WHERE conversation_id = c.id
              ORDER BY sent_at DESC, id DESC LIMIT 1
-         )"
+         )
+         LEFT JOIN contacts ct ON ct.uuid = c.peer
+         LEFT JOIN profiles p ON p.uuid = c.peer"
     };
 }
 
@@ -44,6 +51,9 @@ type SummaryRow = (
     Option<i64>,
     i64,
     Option<bool>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
     Option<String>,
     Option<String>,
 );
@@ -317,11 +327,13 @@ impl Database {
         .fetch_all(&self.app)
         .await
         .map_err(database_error)?;
-        let mut summaries = Vec::with_capacity(rows.len());
-        for row in rows {
-            summaries.push(self.summary(row).await?);
-        }
-        Ok(summaries)
+        let mut members = self.all_members().await?;
+        rows.into_iter()
+            .map(|row| {
+                let members = members.remove(&row.0).unwrap_or_default();
+                summary(row, members)
+            })
+            .collect()
     }
 
     pub(crate) async fn conversation(
@@ -334,7 +346,10 @@ impl Database {
             .await
             .map_err(database_error)?;
         match row {
-            Some(row) => Ok(Some(self.summary(row).await?)),
+            Some(row) => {
+                let members = self.members(row.0).await?;
+                Ok(Some(summary(row, members)?))
+            }
             None => Ok(None),
         }
     }
@@ -427,47 +442,6 @@ impl Database {
         Ok(at.map(timestamp))
     }
 
-    async fn summary(&self, row: SummaryRow) -> Result<ConversationSummary, StorageError> {
-        let (id, peer, group_id, group_title, last_activity, unread, outgoing, body, content) = row;
-        let last_message = match outgoing.zip(body) {
-            Some((outgoing, body)) => Some(MessagePreview {
-                direction: direction(outgoing),
-                content: content_from(body, content)?,
-            }),
-            None => None,
-        };
-        let (peer, title, members) = match (peer, group_id) {
-            (Some(peer), _) => {
-                let peer = service_id(&peer)?;
-                (
-                    Peer::Contact(peer),
-                    self.contact_name(peer).await,
-                    Vec::new(),
-                )
-            }
-            (None, Some(group_id)) => {
-                let bytes = <[u8; 32]>::try_from(group_id.as_slice())
-                    .map_err(|_| StorageError::Database("invalid group ID".into()))?;
-                let title = group_title.filter(|title| !title.trim().is_empty());
-                (
-                    Peer::Group(GroupId::new(bytes)),
-                    title,
-                    self.members(id).await?,
-                )
-            }
-            (None, None) => return Err(StorageError::Database("conversation without peer".into())),
-        };
-        Ok(ConversationSummary {
-            id: ConversationId::new(id),
-            peer,
-            title,
-            members,
-            last_activity: last_activity.map(timestamp),
-            unread: u32::try_from(unread).unwrap_or(u32::MAX),
-            last_message,
-        })
-    }
-
     async fn members(&self, conversation: i64) -> Result<Vec<Member>, StorageError> {
         let rows: Vec<(Vec<u8>, Option<String>)> = sqlx::query_as(
             "SELECT member, name FROM group_members WHERE conversation_id = ? ORDER BY position",
@@ -485,6 +459,73 @@ impl Database {
             })
             .collect()
     }
+
+    /// Every group's members, by conversation.
+    async fn all_members(&self) -> Result<HashMap<i64, Vec<Member>>, StorageError> {
+        let rows: Vec<(i64, Vec<u8>, Option<String>)> = sqlx::query_as(
+            "SELECT conversation_id, member, name FROM group_members
+             ORDER BY conversation_id, position",
+        )
+        .fetch_all(&self.app)
+        .await
+        .map_err(database_error)?;
+        let mut members: HashMap<i64, Vec<Member>> = HashMap::new();
+        for (conversation, member, name) in rows {
+            members.entry(conversation).or_default().push(Member {
+                id: service_id(&member)?,
+                name,
+            });
+        }
+        Ok(members)
+    }
+}
+
+/// A conversation's summary from its row and, for a group, its members.
+fn summary(row: SummaryRow, members: Vec<Member>) -> Result<ConversationSummary, StorageError> {
+    let (
+        id,
+        peer,
+        group_id,
+        group_title,
+        last_activity,
+        unread,
+        outgoing,
+        body,
+        content,
+        contact_name,
+        given_name,
+        family_name,
+    ) = row;
+    let last_message = match outgoing.zip(body) {
+        Some((outgoing, body)) => Some(MessagePreview {
+            direction: direction(outgoing),
+            content: content_from(body, content)?,
+        }),
+        None => None,
+    };
+    let (peer, title, members) = match (peer, group_id) {
+        (Some(peer), _) => {
+            let peer = service_id(&peer)?;
+            let title = display_name(contact_name, given_name, family_name);
+            (Peer::Contact(peer), title, Vec::new())
+        }
+        (None, Some(group_id)) => {
+            let bytes = <[u8; 32]>::try_from(group_id.as_slice())
+                .map_err(|_| StorageError::Database("invalid group ID".into()))?;
+            let title = group_title.filter(|title| !title.trim().is_empty());
+            (Peer::Group(GroupId::new(bytes)), title, members)
+        }
+        (None, None) => return Err(StorageError::Database("conversation without peer".into())),
+    };
+    Ok(ConversationSummary {
+        id: ConversationId::new(id),
+        peer,
+        title,
+        members,
+        last_activity: last_activity.map(timestamp),
+        unread: u32::try_from(unread).unwrap_or(u32::MAX),
+        last_message,
+    })
 }
 
 pub(super) async fn load_message(
@@ -1169,6 +1210,46 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(summary.members, fewer.members);
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn conversations_list_each_groups_members() {
+        let (_dir, db) = db().await;
+        let member = |n, name: Option<&str>| Member {
+            id: peer(n),
+            name: name.map(Into::into),
+        };
+        let groups = [
+            vec![member(3, Some("Carol")), member(1, None)],
+            vec![member(2, None)],
+        ];
+        for (n, members) in (1u8..).zip(&groups) {
+            add_to_group(&db, group(n), Some(1), 100).await.unwrap();
+            let info = GroupInfo {
+                title: format!("Group {n}"),
+                revision: 1,
+                members: members.clone(),
+            };
+            db.set_group(group(n).key, &info).await.unwrap();
+        }
+        add(&db, 1, Direction::Incoming, 100, "hi").await;
+
+        let summaries = db.conversations().await.unwrap();
+
+        let mut listed: Vec<_> = summaries
+            .iter()
+            .map(|summary| (summary.title.clone(), summary.members.clone()))
+            .collect();
+        listed.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            listed,
+            [
+                (None, Vec::new()),
+                (Some("Group 1".into()), groups[0].clone()),
+                (Some("Group 2".into()), groups[1].clone()),
+            ]
+        );
         db.close().await;
     }
 

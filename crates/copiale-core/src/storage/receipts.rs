@@ -10,6 +10,19 @@ use crate::model::{
 const READ_RECEIPTS: &str = "read_receipts";
 const TYPING_INDICATORS: &str = "typing_indicators";
 
+/// Our sent messages at `?1` to `?2`, or to a group they're in; ours have
+/// no author.
+const RECEIPT_TARGETS: &str = "SELECT m.id, m.conversation_id, c.group_id IS NOT NULL
+     FROM messages m JOIN conversations c ON c.id = m.conversation_id
+     WHERE m.author = x'' AND m.sent_at = ?1 AND m.status = 'sent'
+       AND (c.peer = ?2 OR EXISTS (
+           SELECT 1 FROM group_members g
+           WHERE g.conversation_id = c.id AND g.member = ?2))";
+
+/// The message by `?1` at `?2`.
+const READ_ELSEWHERE_TARGET: &str =
+    "SELECT conversation_id, sent_at FROM messages WHERE author = ?1 AND sent_at = ?2";
+
 impl Database {
     /// Applies `sender`'s receipt for our messages sent at `timestamps`;
     /// returns the messages whose status advanced.
@@ -24,20 +37,12 @@ impl Database {
         let mut changed = Vec::new();
         for sent_at in timestamps {
             let mut tx = self.begin_write().await?;
-            // Sent messages to `sender`, or to a group they're in.
-            let targets: Vec<(i64, i64, bool)> = sqlx::query_as(
-                "SELECT m.id, m.conversation_id, c.group_id IS NOT NULL
-                 FROM messages m JOIN conversations c ON c.id = m.conversation_id
-                 WHERE m.outgoing = 1 AND m.status = 'sent' AND m.sent_at = ?1
-                   AND (c.peer = ?2 OR EXISTS (
-                       SELECT 1 FROM group_members g
-                       WHERE g.conversation_id = c.id AND g.member = ?2))",
-            )
-            .bind(millis(*sent_at))
-            .bind(&sender_bytes)
-            .fetch_all(&mut *tx)
-            .await
-            .map_err(database_error)?;
+            let targets: Vec<(i64, i64, bool)> = sqlx::query_as(RECEIPT_TARGETS)
+                .bind(millis(*sent_at))
+                .bind(&sender_bytes)
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(database_error)?;
             let mut advanced = Vec::new();
             for (id, conversation, group) in targets {
                 let delivery = if group {
@@ -110,14 +115,12 @@ impl Database {
     ) -> Result<Vec<Message>, StorageError> {
         let mut changed = Vec::new();
         for (author, sent_at) in read {
-            let found: Option<(i64, i64)> = sqlx::query_as(
-                "SELECT conversation_id, sent_at FROM messages WHERE author = ? AND sent_at = ?",
-            )
-            .bind(author.uuid().as_bytes().as_slice())
-            .bind(millis(*sent_at))
-            .fetch_optional(&self.app)
-            .await
-            .map_err(database_error)?;
+            let found: Option<(i64, i64)> = sqlx::query_as(READ_ELSEWHERE_TARGET)
+                .bind(author.uuid().as_bytes().as_slice())
+                .bind(millis(*sent_at))
+                .fetch_optional(&self.app)
+                .await
+                .map_err(database_error)?;
             let Some((conversation, sent_at)) = found else {
                 continue;
             };
@@ -446,6 +449,28 @@ mod tests {
             read[0].expiry.and_then(|expiry| expiry.at),
             Some(at(65_000))
         );
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn message_lookups_use_an_index() {
+        let (_dir, db) = db().await;
+        for query in [RECEIPT_TARGETS, READ_ELSEWHERE_TARGET] {
+            let plan: Vec<(i64, i64, i64, String)> =
+                sqlx::query_as(sqlx::AssertSqlSafe(format!("EXPLAIN QUERY PLAN {query}")))
+                    .fetch_all(db.pool())
+                    .await
+                    .unwrap();
+            let steps: Vec<_> = plan.into_iter().map(|(.., step)| step).collect();
+            assert!(
+                steps.iter().any(|step| step.contains("messages_by_author")),
+                "{steps:?}"
+            );
+            assert!(
+                !steps.iter().any(|step| step.starts_with("SCAN")),
+                "{steps:?}"
+            );
+        }
         db.close().await;
     }
 

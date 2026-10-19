@@ -1,5 +1,6 @@
 //! Contacts synced from the phone, as presage stores them.
 
+use presage::libsignal_service::profile_name::ProfileName;
 use presage::libsignal_service::protocol::{Aci, ServiceId as SignalServiceId};
 use presage::store::ContentsStore as _;
 
@@ -56,22 +57,6 @@ impl Database {
         Ok(contacts)
     }
 
-    /// The contact's name, else their cached profile name; `None` if
-    /// unknown or blank.
-    pub(super) async fn contact_name(&self, peer: ServiceId) -> Option<String> {
-        let id: SignalServiceId = Aci::from(peer.uuid()).into();
-        match self.presage.contact_by_id(&id).await {
-            Ok(Some(contact)) => {
-                if let Some(name) = blank_to_none(contact.name) {
-                    return Some(name);
-                }
-            }
-            Ok(None) => {}
-            Err(error) => tracing::warn!(%error, "reading a contact failed"),
-        }
-        self.profile_name(peer).await
-    }
-
     async fn profile_name(&self, peer: ServiceId) -> Option<String> {
         let id: SignalServiceId = Aci::from(peer.uuid()).into();
         let key = self.presage.profile_key(&id).await.ok().flatten()?;
@@ -111,6 +96,22 @@ impl Database {
     }
 }
 
+/// The contact's name, else their profile name from its parts; `None` if
+/// unknown or blank.
+pub(super) fn display_name(
+    contact: Option<String>,
+    given_name: Option<String>,
+    family_name: Option<String>,
+) -> Option<String> {
+    contact.and_then(blank_to_none).or_else(|| {
+        let name = ProfileName {
+            given_name: given_name?,
+            family_name,
+        };
+        blank_to_none(name.to_string())
+    })
+}
+
 fn blank_to_none(name: String) -> Option<String> {
     let trimmed = name.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_owned())
@@ -122,7 +123,8 @@ fn presage_error(error: impl std::error::Error) -> StorageError {
 
 #[cfg(test)]
 mod tests {
-    use presage::libsignal_service::prelude::phonenumber;
+    use presage::libsignal_service::Profile;
+    use presage::libsignal_service::prelude::{ProfileKey, phonenumber};
     use presage::model::contacts::Contact as StoredContact;
     use tempfile::TempDir;
     use uuid::Uuid;
@@ -192,6 +194,69 @@ mod tests {
             .unwrap();
         assert_eq!(named.title.as_deref(), Some("Alice"));
         assert_eq!(unnamed.title, None);
+        db.close().await;
+    }
+
+    async fn save_profile(db: &Database, n: u128, given_name: &str, family_name: Option<&str>) {
+        let profile = Profile {
+            name: Some(ProfileName {
+                given_name: given_name.into(),
+                family_name: family_name.map(Into::into),
+            }),
+            about: None,
+            about_emoji: None,
+            avatar: None,
+            unrestricted_unidentified_access: false,
+        };
+        let key = ProfileKey::create([n as u8; 32]);
+        db.presage
+            .clone()
+            .save_profile(Uuid::from_u128(n), key, profile)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn titles_fall_back_to_profile_names() {
+        let (_dir, db) = db().await;
+        let conversations = [
+            incoming(&db, 1).await,
+            incoming(&db, 2).await,
+            incoming(&db, 3).await,
+            incoming(&db, 4).await,
+        ]
+        .map(|message| message.conversation);
+        save(&db, 1, "Alice", None).await;
+        save_profile(&db, 1, "Ali", None).await;
+        save(&db, 2, " ", None).await;
+        save_profile(&db, 2, "Ada", Some("Lovelace")).await;
+        save_profile(&db, 3, "Grace", None).await;
+        save_profile(&db, 4, " ", None).await;
+
+        let mut titles = Vec::new();
+        for id in conversations {
+            titles.push(db.conversation(id).await.unwrap().unwrap().title);
+        }
+        let listed: Vec<_> = db
+            .conversations()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|summary| (summary.id, summary.title))
+            .collect();
+
+        assert_eq!(
+            titles,
+            [
+                Some("Alice".into()),
+                Some("Ada Lovelace".into()),
+                Some("Grace".into()),
+                None,
+            ]
+        );
+        for (id, title) in conversations.into_iter().zip(&titles) {
+            assert!(listed.contains(&(id, title.clone())));
+        }
         db.close().await;
     }
 
