@@ -863,7 +863,8 @@ impl Chat {
                 message.status,
                 Some(MessageStatus::Sent | MessageStatus::Delivered | MessageStatus::Read)
             );
-        let shown = !message.content.is_system() && message.content != Content::Deleted;
+        let shown = !message.content.is_system()
+            && !matches!(message.content, Content::Deleted | Content::Undecryptable);
         let plain_text = matches!(
             &message.content,
             Content::Text { attachments, .. } if attachments.is_empty()

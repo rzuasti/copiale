@@ -6485,7 +6485,6 @@ checksum = "925383efa346730478fb4838dbe9137d2a47675ad789c546d150a6e1dd4ab31c"
 [[package]]
 name = "presage"
 version = "0.8.0-dev"
-source = "git+https://github.com/whisperfish/presage?rev=6f630791b2c7bf3d5b00c75f5a6c94131bf79c8c#6f630791b2c7bf3d5b00c75f5a6c94131bf79c8c"
 dependencies = [
  "base64 0.22.1",
  "bytes",

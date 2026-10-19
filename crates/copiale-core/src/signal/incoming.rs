@@ -1,5 +1,6 @@
 //! Received presage content as [`Incoming`] core events.
 
+use presage::libsignal_service::cipher::DecryptionFailure;
 use presage::libsignal_service::content::{Content, ContentBody};
 use presage::libsignal_service::groups_v2::{GroupChange, GroupOperations, Role};
 use presage::libsignal_service::prelude::{GroupSecretParams, ProtobufMessage as _};
@@ -11,10 +12,10 @@ use presage::libsignal_service::proto::{
     EditMessage, GroupContextV2, ReceiptMessage, SyncMessage, TypingMessage, addressable_message,
     attachment_pointer, conversation_identifier, data_message, receipt_message, typing_message,
 };
-use presage::libsignal_service::protocol::{Aci, ServiceId as SignalServiceId};
+use presage::libsignal_service::protocol::{Aci, ContentHint, ServiceId as SignalServiceId};
 use presage::model::messages::Received;
 
-use crate::backend::Incoming;
+use crate::backend::{Incoming, RetryRequest, Undecryptable};
 use crate::model::{
     self, Attachment, Change, ChatRef, Destination, GroupId, GroupMasterKey, GroupRef, GroupUpdate,
     IncomingMessage, MessageBody, MessageChange, MessageRef, Quote, ReceiptKind, SentMessage,
@@ -30,10 +31,40 @@ pub(super) fn incoming(received: Received) -> Option<Incoming> {
             .or_else(|| received_message(&content).map(Incoming::Message))
             .or_else(|| sent_message(&content).map(Incoming::Sent)),
         Received::Contacts => Some(Incoming::ContactsSynced),
-        Received::DecryptionError(_) => {
-            tracing::warn!("a message could not be decrypted");
-            None
+        Received::DecryptionError(failure) => {
+            Some(Incoming::Undecryptable(undecryptable(&failure)))
         }
+        Received::RetryRequest {
+            sender,
+            sender_device,
+            timestamp,
+            session_archived,
+        } => Some(Incoming::RetryRequested {
+            sender: ServiceId::new(sender.raw_uuid()),
+            device: sender_device.into(),
+            sent_at: Timestamp::from_millis(timestamp),
+            session_reset: session_archived,
+        }),
+    }
+}
+
+/// A message that failed to decrypt.
+fn undecryptable(failure: &DecryptionFailure) -> Undecryptable {
+    let group = failure
+        .group_id
+        .as_ref()
+        .and_then(|id| <[u8; 32]>::try_from(id.as_slice()).ok())
+        .map(GroupId::new);
+    Undecryptable {
+        sender: ServiceId::new(failure.sender.raw_uuid()),
+        device: failure.sender_device.into(),
+        sent_at: Timestamp::from_millis(failure.timestamp),
+        group,
+        shown: failure.content_hint != ContentHint::Implicit,
+        retry: RetryRequest::new(
+            failure.retry_request.serialized().to_vec(),
+            failure.group_id.clone(),
+        ),
     }
 }
 
@@ -1254,12 +1285,82 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn maps_queue_empty_and_contacts_and_drops_the_rest() {
+    fn maps_queue_empty_and_contacts() {
         assert_eq!(incoming(Received::QueueEmpty), Some(Incoming::QueueEmpty));
         assert_eq!(incoming(Received::Contacts), Some(Incoming::ContactsSynced));
+    }
+
+    fn failure(content_hint: ContentHint, group_id: Option<Vec<u8>>) -> Received {
+        use presage::libsignal_service::protocol::{
+            CiphertextMessageType, DecryptionErrorMessage, DeviceId, SignalProtocolError,
+        };
+
+        let retry_request = DecryptionErrorMessage::for_original(
+            &[],
+            CiphertextMessageType::SenderKey,
+            presage::libsignal_service::protocol::Timestamp::from_epoch_millis(77),
+            2,
+        )
+        .unwrap();
+        Received::DecryptionError(Box::new(DecryptionFailure {
+            error: SignalProtocolError::InvalidState("decrypt", "test".into()),
+            sender: Aci::from(SENDER).into(),
+            sender_device: DeviceId::new(2).unwrap(),
+            timestamp: 77,
+            content_hint,
+            group_id,
+            retry_request,
+        }))
+    }
+
+    #[test]
+    fn maps_decryption_failures_with_their_retry_request() {
+        let Some(Incoming::Undecryptable(failed)) =
+            incoming(failure(ContentHint::Resendable, Some(vec![4; 32])))
+        else {
+            panic!("not mapped");
+        };
+
+        assert_eq!(failed.sender, ServiceId::new(SENDER));
+        assert_eq!(failed.device, 2);
+        assert_eq!(failed.sent_at, Timestamp::from_millis(77));
+        assert_eq!(failed.group, Some(GroupId::new([4; 32])));
+        assert!(failed.shown);
+        assert_eq!(failed.retry.group_id(), Some(&[4; 32][..]));
+        assert!(!failed.retry.message().is_empty());
+    }
+
+    #[test]
+    fn decryption_failures_of_implicit_content_arent_shown() {
+        let Some(Incoming::Undecryptable(failed)) =
+            incoming(failure(ContentHint::Implicit, Some(vec![4; 3])))
+        else {
+            panic!("not mapped");
+        };
+
+        assert!(!failed.shown);
+        assert_eq!(failed.group, None, "not a group ID");
+    }
+
+    #[test]
+    fn maps_retry_requests() {
+        use presage::libsignal_service::protocol::DeviceId;
+
+        let request = Received::RetryRequest {
+            sender: Aci::from(SENDER).into(),
+            sender_device: DeviceId::new(3).unwrap(),
+            timestamp: 99,
+            session_archived: true,
+        };
+
         assert_eq!(
-            incoming(Received::DecryptionError(Aci::from(SENDER).into())),
-            None
+            incoming(request),
+            Some(Incoming::RetryRequested {
+                sender: ServiceId::new(SENDER),
+                device: 3,
+                sent_at: Timestamp::from_millis(99),
+                session_reset: true,
+            })
         );
     }
 

@@ -338,6 +338,11 @@ crates/
 - Messages live in Copiale's tables only, with edits, deletes and expiry
   applied. presage's own message saving (`thread_messages`) is turned off by
   a delegating `Store` wrapper.
+- Decryption retries, as in Signal's clients: a message that fails to
+  decrypt is asked for again (`DecryptionErrorMessage`) and shows as a
+  placeholder until it arrives. Our sends are kept a day (`send_log`) to
+  resend when a recipient asks; deleted and disappeared messages are
+  forgotten at once.
 - `secure_delete` overwrites deleted rows rather than leaving them in free
   pages.
 - Tests use temporary databases and an in-memory keychain; never real Signal

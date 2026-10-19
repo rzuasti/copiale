@@ -1,0 +1,393 @@
+From 5c16669abbf26ae38f23a56f46a7a3bd4cb35fc9 Mon Sep 17 00:00:00 2001
+From: Ricardo Zuasti <rzuasti@pm.me>
+Date: Mon, 19 Oct 2026 10:28:46 -0400
+Subject: [PATCH] feat: send and answer retry requests
+
+Needs libsignal-service's retry request support.
+
+- Received::DecryptionError carries the DecryptionFailure, so clients
+  can send its retry request (Manager::send_retry_request); it now also
+  fires for unsealed messages.
+- Retry requests for this device arrive as Received::RetryRequest
+  instead of DecryptionError. One naming our current ratchet key with
+  the requesting device archives that session.
+- send_message and send_message_to_group return the message as it
+  went out (SentContent), with the recipients it reached, for clients
+  to keep and resend with Manager::resend_content.
+- Manager::send_null_message starts a new session after a retry
+  request archived one.
+
+Assisted-by: Claude Opus 5.5
+---
+ src/manager/registered.rs | 197 ++++++++++++++++++++++++++++++++++----
+ src/model/messages.rs     |  38 +++++++-
+ 2 files changed, 212 insertions(+), 23 deletions(-)
+
+diff --git a/src/manager/registered.rs b/src/manager/registered.rs
+index 963f7c3..eb21fb1 100644
+--- a/src/manager/registered.rs
++++ b/src/manager/registered.rs
+@@ -27,7 +27,8 @@ use libsignal_service::{
+         Verified,
+     },
+     protocol::{
+-        Aci, DeviceId, IdentityKeyStore, SenderCertificate, ServiceId, ServiceIdKind, Username,
++        Aci, DecryptionErrorMessage, DeviceId, IdentityKeyStore, SenderCertificate, ServiceId,
++        ServiceIdKind, Username,
+     },
+     provisioning::ProvisioningError,
+     push_service::{PushService, ServiceIds, DEFAULT_DEVICE_ID},
+@@ -58,6 +59,7 @@ use tracing::{debug, error, info, trace, warn};
+ use url::Url;
+ 
+ use crate::model::contacts::Contact;
++use crate::model::messages::SentContent;
+ use crate::serde::serde_profile_key;
+ use crate::store::{ContentsStore, Sticker, StickerPack, StickerPackManifest, Store, Thread};
+ use crate::{model::groups::Group, AvatarBytes, Error, Manager};
+@@ -599,6 +601,7 @@ impl<S: Store> Manager<S, Registered> {
+             message_sender: MessageSender<AciStore>,
+             account_entropy_pool: Option<AccountEntropyPool>,
+             registration_type: RegistrationType,
++            device_id: DeviceId,
+         }
+ 
+         let identified_push_service = self.identified_push_service();
+@@ -650,6 +653,7 @@ impl<S: Store> Manager<S, Registered> {
+             message_sender: self.new_message_sender().await?,
+             account_entropy_pool: self.account_entropy_pool().await?,
+             registration_type: self.registration_type(),
++            device_id: self.state.device_id(),
+         };
+ 
+         debug!("starting to consume incoming message stream");
+@@ -688,15 +692,20 @@ impl<S: Store> Manager<S, Registered> {
+                             };
+                             match envelope {
+                                 Ok(Some(content)) => {
+-                                    if let ContentBody::DecryptionErrorMessage(e) = &content.body {
+-                                        error!(
+-                                            error = ?e,
+-                                            "got error decrypting a message"
+-                                        );
+-                                        return Some((
+-                                            Received::DecryptionError(content.metadata.sender),
+-                                            state,
+-                                        ));
++                                    if let ContentBody::DecryptionErrorMessage(request) =
++                                        &content.body
++                                    {
++                                        match retry_request(
++                                            &state.store,
++                                            &content.metadata,
++                                            request,
++                                            state.device_id,
++                                        )
++                                        .await
++                                        {
++                                            Some(received) => return Some((received, state)),
++                                            None => continue,
++                                        }
+                                     }
+ 
+                                     if let ContentBody::SynchronizeMessage(SyncMessage {
+@@ -976,13 +985,14 @@ impl<S: Store> Manager<S, Registered> {
+                                 Ok(None) => {
+                                     debug!("empty envelope, message will be skipped!")
+                                 }
++                                Err(libsignal_service::prelude::ServiceError::DecryptionFailed(
++                                    failure,
++                                )) => {
++                                    error!(%failure, "failed to decrypt a message");
++                                    return Some((Received::DecryptionError(failure), state));
++                                }
+                                 Err(error) => {
+                                     error!(%error, "error opening envelope, message will be skipped!");
+-                                    if let libsignal_service::prelude::ServiceError::SealedSenderDecryptionError(libsignal_service::cipher::SealedSenderDecryptionError { sender: Some(sender), .. }) = &error {
+-                                        if let Some(sender) = ServiceId::parse_from_service_id_string(sender.name()) {
+-                                            return Some((Received::DecryptionError(sender), state));
+-                                        }
+-                                    }
+                                 }
+                             }
+                         }
+@@ -1077,12 +1087,14 @@ impl<S: Store> Manager<S, Registered> {
+     /// This method will automatically update the [DataMessage::expire_timer] if it is set to
+     /// [None] such that the chat will keep the current expire timer. If the expire timer is set,
+     /// it will be used as is, and the expire timer version will be incremented.
++    ///
++    /// Returns the message as sent, to resend on request.
+     pub async fn send_message(
+         &mut self,
+         recipient: impl Into<ServiceId>,
+         message: impl Into<ContentBody>,
+         timestamp: u64,
+-    ) -> Result<(), Error<S::Error>> {
++    ) -> Result<SentContent, Error<S::Error>> {
+         let mut sender = self.new_message_sender().await?;
+         let recipient = recipient.into();
+ 
+@@ -1127,6 +1139,15 @@ impl<S: Store> Manager<S, Registered> {
+             )
+             .await?;
+ 
++        let sent = SentContent {
++            recipients: if recipient == ServiceId::from(self.state.data.service_ids.aci()) {
++                Vec::new()
++            } else {
++                vec![recipient]
++            },
++            content: content_body.clone().into_proto(),
++        };
++
+         // save the message
+         let content = Content {
+             metadata: Metadata {
+@@ -1154,7 +1175,7 @@ impl<S: Store> Manager<S, Registered> {
+         )
+         .await?;
+ 
+-        Ok(())
++        Ok(sent)
+     }
+ 
+     /// Uploads one attachment prior to linking them in a message.
+@@ -1190,12 +1211,14 @@ impl<S: Store> Manager<S, Registered> {
+     ///
+     /// This method will automatically update the [DataMessage::expire_timer] if it is set to
+     /// [None] such that the chat will keep the current expire timer.
++    ///
++    /// Returns the message as sent, to resend on request.
+     pub async fn send_message_to_group(
+         &mut self,
+         master_key_bytes: &[u8],
+         message: impl Into<ContentBody>,
+         timestamp: u64,
+-    ) -> Result<(), Error<S::Error>> {
++    ) -> Result<SentContent, Error<S::Error>> {
+         let mut content_body = message.into();
+         let master_key_bytes = master_key_bytes
+             .try_into()
+@@ -1242,6 +1265,14 @@ impl<S: Store> Manager<S, Registered> {
+             .send_message_to_group(recipients, content_body.clone(), timestamp, online_only)
+             .await;
+ 
++        let sent = SentContent {
++            recipients: results
++                .iter()
++                .filter_map(|result| Some(result.as_ref().ok()?.recipient))
++                .collect(),
++            content: content_body.clone().into_proto(),
++        };
++
+         // TODO: Handle the NotFound error in the future by removing all sessions to this UUID and marking it as unregistered, not sending any messages to this contact anymore.
+         results
+             .into_iter()
+@@ -1283,7 +1314,7 @@ impl<S: Store> Manager<S, Registered> {
+         )
+         .await?;
+ 
+-        Ok(())
++        Ok(sent)
+     }
+ 
+     async fn restore_thread_timer(&mut self, thread: &Thread, content_body: &mut ContentBody) {
+@@ -1492,6 +1523,77 @@ impl<S: Store> Manager<S, Registered> {
+         Ok(())
+     }
+ 
++    /// Asks `recipient` to resend a message that failed to decrypt
++    /// ([`Received::DecryptionError`]): `retry_request` and `group_id` come
++    /// from its [`DecryptionFailure`](libsignal_service::cipher::DecryptionFailure).
++    pub async fn send_retry_request(
++        &mut self,
++        recipient: &ServiceId,
++        retry_request: DecryptionErrorMessage,
++        group_id: Option<&[u8]>,
++    ) -> Result<(), Error<S::Error>> {
++        let mut sender = self.new_message_sender().await?;
++        let unidentified_access = self.unidentified_access(recipient).await?;
++        sender
++            .send_retry_request(
++                recipient,
++                unidentified_access.as_ref(),
++                retry_request,
++                group_id,
++            )
++            .await?;
++        Ok(())
++    }
++
++    /// Sends a message again to `recipient` alone, as [`SentContent`]
++    /// recorded it, with its original `timestamp`; answers
++    /// [`Received::RetryRequest`]. Nothing is synced or stored.
++    pub async fn resend_content(
++        &mut self,
++        recipient: &ServiceId,
++        content: libsignal_service::proto::Content,
++        timestamp: u64,
++    ) -> Result<(), Error<S::Error>> {
++        let mut sender = self.new_message_sender().await?;
++        let unidentified_access = self.unidentified_access(recipient).await?;
++        sender
++            .resend_content(
++                recipient,
++                unidentified_access.as_ref(),
++                content,
++                timestamp,
++            )
++            .await?;
++        Ok(())
++    }
++
++    /// Sends `recipient` a null message, which starts a new session after
++    /// [`Received::RetryRequest`] archived the old one. Nothing is synced
++    /// or stored.
++    pub async fn send_null_message(
++        &mut self,
++        recipient: &ServiceId,
++        timestamp: u64,
++    ) -> Result<(), Error<S::Error>> {
++        let content = ContentBody::NullMessage(NullMessage::generate(&mut rand::rng()));
++        self.resend_content(recipient, content.into_proto(), timestamp)
++            .await
++    }
++
++    /// Sealed sender access to `recipient`, if we have their profile key.
++    async fn unidentified_access(
++        &self,
++        recipient: &ServiceId,
++    ) -> Result<Option<UnidentifiedAccess>, Error<S::Error>> {
++        let Some(profile_key) = self.store.profile_key(recipient).await? else {
++            return Ok(None);
++        };
++        Ok(Some(UnidentifiedAccess {
++            key: profile_key.derive_access_key().to_vec(),
++            certificate: self.sender_certificate().await?,
++        }))
++    }
++
+     fn credentials(&self) -> ServiceCredentials {
+         self.state.credentials()
+     }
+@@ -1657,6 +1759,63 @@ impl<S: Store> Manager<S, Registered> {
+ }
+ 
+ /// Set the timestamp in any DataMessage so it matches its envelope's
++/// A retry request ([`ContentBody::DecryptionErrorMessage`]) as
++/// [`Received::RetryRequest`]; `None` if it isn't for this device.
++///
++/// Archives our session with the requesting device if the request names its
++/// current ratchet key: the session is broken, so the next message starts a
++/// new one.
++async fn retry_request<S: Store>(
++    store: &S,
++    metadata: &Metadata,
++    request: &libsignal_service::proto::DecryptionErrorMessage,
++    device_id: DeviceId,
++) -> Option<Received> {
++    let Some(timestamp) = request.timestamp else {
++        warn!("retry request without a timestamp");
++        return None;
++    };
++    if request.device_id != Some(u32::from(device_id)) {
++        debug!("retry request for another of our devices");
++        return None;
++    }
++    let mut session_archived = false;
++    if let Some(ratchet_key) = &request.ratchet_key {
++        match archive_broken_session(store, metadata, ratchet_key).await {
++            Ok(archived) => session_archived = archived,
++            Err(error) => warn!(%error, "failed to check the session of a retry request"),
++        }
++    }
++    info!(timestamp, session_archived, "received a retry request");
++    Some(Received::RetryRequest {
++        sender: metadata.sender,
++        sender_device: metadata.sender_device,
++        timestamp,
++        session_archived,
++    })
++}
++
++/// Archives our session with the sender's device if its current ratchet key
++/// is `ratchet_key`; returns whether it did.
++async fn archive_broken_session<S: Store>(
++    store: &S,
++    metadata: &Metadata,
++    ratchet_key: &[u8],
++) -> Result<bool, libsignal_service::prelude::ServiceError> {
++    let ratchet_key = libsignal_service::protocol::PublicKey::deserialize(ratchet_key)?;
++    let address = metadata.sender.to_protocol_address(metadata.sender_device)?;
++    let mut sessions = store.aci_protocol_store();
++    let Some(mut session) = sessions.load_session(&address).await? else {
++        return Ok(false);
++    };
++    if !session.current_ratchet_key_matches(&ratchet_key)? {
++        return Ok(false);
++    }
++    session.archive_current_state()?;
++    sessions.store_session(&address, &session).await?;
++    Ok(true)
++}
++
+ fn ensure_data_message_timestamp(content_body: &mut ContentBody, timestamp: u64) {
+     match content_body {
+         ContentBody::DataMessage(message) => {
+diff --git a/src/model/messages.rs b/src/model/messages.rs
+index fcdbf4d..1c178a0 100644
+--- a/src/model/messages.rs
++++ b/src/model/messages.rs
+@@ -1,4 +1,9 @@
+-use libsignal_service::{prelude::Content, protocol::ServiceId};
++use libsignal_service::{
++    cipher::DecryptionFailure,
++    prelude::Content,
++    proto,
++    protocol::{DeviceId, ServiceId},
++};
+ 
+ #[derive(Debug)]
+ pub enum Received {
+@@ -10,10 +15,35 @@ pub enum Received {
+     /// Contacts can be later queried in the store.
+     Contacts,
+ 
+-    // Failed to receive a message from the specified service ID.
+-    // A session reset with the contact may fix this.
+-    DecryptionError(ServiceId),
++    /// A message from a known sender failed to decrypt. Send
++    /// [`DecryptionFailure::retry_request`] with
++    /// [`Manager::send_retry_request`](crate::Manager::send_retry_request)
++    /// so the sender resends it.
++    DecryptionError(Box<DecryptionFailure>),
++
++    /// A device of `sender` couldn't decrypt our message sent at `timestamp` and asks for it
++    /// again; resend it with [`Manager::resend_content`](crate::Manager::resend_content).
++    ///
++    /// `session_archived` is set if our session with that device was the cause: it was archived,
++    /// so the next message starts a new one. Without a message to resend, send a null message
++    /// ([`Manager::send_null_message`](crate::Manager::send_null_message)) to start it.
++    RetryRequest {
++        sender: ServiceId,
++        sender_device: DeviceId,
++        timestamp: u64,
++        session_archived: bool,
++    },
+ 
+     /// Incoming decrypted message with metadata and content
+     Content(Box<Content>),
+ }
++
++/// A message as it went out, to resend when a recipient asks
++/// ([`Received::RetryRequest`]).
++#[derive(Debug, Clone)]
++pub struct SentContent {
++    /// Who got it, apart from this account's other devices: the recipient,
++    /// or the group members it reached.
++    pub recipients: Vec<ServiceId>,
++    pub content: proto::Content,
++}
+-- 
+2.55.0
+

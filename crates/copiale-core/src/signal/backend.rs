@@ -6,13 +6,16 @@ use futures::{FutureExt as _, StreamExt as _};
 use presage::Manager;
 use presage::libsignal_service::configuration::SignalServers;
 use presage::libsignal_service::content::ContentBody;
+use presage::libsignal_service::prelude::ProtobufMessage as _;
 use presage::libsignal_service::proto::sync_message::{self, Content as SyncContent};
 use presage::libsignal_service::proto::{
-    AddressableMessage, ConversationIdentifier, DataMessage, EditMessage, GroupContextV2,
+    self, AddressableMessage, ConversationIdentifier, DataMessage, EditMessage, GroupContextV2,
     ReceiptMessage, SyncMessage, TypingMessage, addressable_message, conversation_identifier,
     data_message, receipt_message, typing_message,
 };
-use presage::libsignal_service::protocol::{Aci, ServiceId as SignalServiceId};
+use presage::libsignal_service::protocol::{
+    Aci, DecryptionErrorMessage, ServiceId as SignalServiceId,
+};
 use presage::manager::Registered;
 use presage::model::messages::Received;
 use presage::store::{ContentsStore as _, StateStore as _, Thread};
@@ -23,7 +26,7 @@ use tokio::time::{Duration, Instant};
 use super::errors::{presage_error, store_error};
 use super::incoming::incoming;
 use super::store::AppStore;
-use crate::backend::{BackendError, Incoming, Linker, SignalBackend};
+use crate::backend::{BackendError, Incoming, Linker, Resendable, RetryRequest, SignalBackend};
 use crate::model::{
     Destination, GroupInfo, GroupMasterKey, Member, MessageBody, Outgoing, Quote, ServiceId,
     Timestamp,
@@ -166,7 +169,7 @@ impl SignalBackend for PresageBackend {
         destination: Destination,
         outgoing: Outgoing,
         timestamp: Timestamp,
-    ) -> LocalBoxFuture<'static, Result<(), BackendError>> {
+    ) -> LocalBoxFuture<'static, Result<Resendable, BackendError>> {
         let mut manager = self.manager.clone();
         let me = manager.registration_data().service_ids.aci;
         let at = timestamp.as_millis();
@@ -214,7 +217,7 @@ impl SignalBackend for PresageBackend {
                 }
                 .into(),
             };
-            match destination {
+            let sent = match destination {
                 Destination::Contact(recipient) => {
                     manager
                         .send_message(Aci::from(recipient.uuid()), content, at)
@@ -226,7 +229,67 @@ impl SignalBackend for PresageBackend {
                         .await
                 }
             }
-            .map_err(presage_error)
+            .map_err(presage_error)?;
+            Ok(Resendable {
+                recipients: sent
+                    .recipients
+                    .iter()
+                    .map(|recipient| ServiceId::new(recipient.raw_uuid()))
+                    .collect(),
+                content: sent.content.encode_to_vec(),
+            })
+        }
+        .boxed_local()
+    }
+
+    fn send_retry_request(
+        &mut self,
+        sender: ServiceId,
+        retry: RetryRequest,
+    ) -> LocalBoxFuture<'static, Result<(), BackendError>> {
+        let mut manager = self.manager.clone();
+        async move {
+            let message = DecryptionErrorMessage::try_from(retry.message())
+                .map_err(|error| BackendError::new(format!("invalid retry request: {error}")))?;
+            let sender = Aci::from(sender.uuid()).into();
+            manager
+                .send_retry_request(&sender, message, retry.group_id())
+                .await
+                .map_err(presage_error)
+        }
+        .boxed_local()
+    }
+
+    fn resend(
+        &mut self,
+        recipient: ServiceId,
+        content: Vec<u8>,
+        sent_at: Timestamp,
+    ) -> LocalBoxFuture<'static, Result<(), BackendError>> {
+        let mut manager = self.manager.clone();
+        async move {
+            let content = proto::Content::decode(content.as_slice())
+                .map_err(|error| BackendError::new(format!("invalid sent message: {error}")))?;
+            let recipient = Aci::from(recipient.uuid()).into();
+            manager
+                .resend_content(&recipient, content, sent_at.as_millis())
+                .await
+                .map_err(presage_error)
+        }
+        .boxed_local()
+    }
+
+    fn send_null_message(
+        &mut self,
+        recipient: ServiceId,
+    ) -> LocalBoxFuture<'static, Result<(), BackendError>> {
+        let mut manager = self.manager.clone();
+        async move {
+            let recipient = Aci::from(recipient.uuid()).into();
+            manager
+                .send_null_message(&recipient, Timestamp::now().as_millis())
+                .await
+                .map_err(presage_error)
         }
         .boxed_local()
     }
@@ -272,6 +335,7 @@ impl SignalBackend for PresageBackend {
             manager
                 .send_message(me, sync, Timestamp::now().as_millis())
                 .await
+                .map(drop)
                 .map_err(presage_error)
         }
         .boxed_local()
@@ -420,6 +484,7 @@ impl SignalBackend for PresageBackend {
             manager
                 .send_message(me, request, Timestamp::now().as_millis())
                 .await
+                .map(drop)
                 .map_err(presage_error)
         }
         .boxed_local()
@@ -443,6 +508,7 @@ impl SignalBackend for PresageBackend {
                     Timestamp::now().as_millis(),
                 )
                 .await
+                .map(drop)
                 .map_err(presage_error)
         }
         .boxed_local()
@@ -469,6 +535,7 @@ impl SignalBackend for PresageBackend {
             manager
                 .send_message(me, sync, Timestamp::now().as_millis())
                 .await
+                .map(drop)
                 .map_err(presage_error)
         }
         .boxed_local()
@@ -509,6 +576,7 @@ impl SignalBackend for PresageBackend {
                         .await
                 }
             }
+            .map(drop)
             .map_err(presage_error)
         }
         .boxed_local()

@@ -12,6 +12,7 @@ mod database;
 mod key;
 mod messages;
 mod receipts;
+mod retries;
 mod secrets;
 #[cfg(test)]
 mod testing;

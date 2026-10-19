@@ -167,6 +167,8 @@ pub enum Content {
     TimerChanged(Option<u32>),
     /// Deleted by its author.
     Deleted,
+    /// Couldn't be decrypted; replaced if the sender resends it.
+    Undecryptable,
 }
 
 impl Content {
@@ -191,9 +193,10 @@ impl Content {
         matches!(self, Self::GroupChanged(_) | Self::TimerChanged(_))
     }
 
-    /// Arrives read: system lines and reactions don't need attention.
+    /// Arrives read: system lines, reactions and placeholders for what
+    /// couldn't be decrypted don't need attention.
     pub fn is_quiet(&self) -> bool {
-        self.is_system() || matches!(self, Self::Reaction { .. })
+        self.is_system() || matches!(self, Self::Reaction { .. } | Self::Undecryptable)
     }
 }
 
@@ -219,6 +222,7 @@ impl fmt::Debug for Content {
             }
             Self::TimerChanged(seconds) => f.debug_tuple("TimerChanged").field(seconds).finish(),
             Self::Deleted => f.write_str("Deleted"),
+            Self::Undecryptable => f.write_str("Undecryptable"),
         }
     }
 }

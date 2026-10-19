@@ -1,5 +1,7 @@
 //! Boundary between the core and the Signal network.
 
+use std::fmt;
+
 use futures::future::LocalBoxFuture;
 use futures::stream::LocalBoxStream;
 use tokio::sync::oneshot;
@@ -51,6 +53,83 @@ pub enum Incoming {
         read_receipts: Option<bool>,
         typing_indicators: Option<bool>,
     },
+    /// A message couldn't be decrypted; asking for it again may get it
+    /// resent.
+    Undecryptable(Undecryptable),
+    /// `sender`'s device `device` couldn't decrypt our message sent at
+    /// `sent_at` and asks for it again. With `session_reset`, our session
+    /// with that device was broken and is gone: the next message to them
+    /// starts a new one.
+    RetryRequested {
+        sender: ServiceId,
+        device: u32,
+        sent_at: Timestamp,
+        session_reset: bool,
+    },
+}
+
+/// A message that couldn't be decrypted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Undecryptable {
+    pub sender: ServiceId,
+    /// The sender's device it came from.
+    pub device: u32,
+    pub sent_at: Timestamp,
+    /// The group it was sent in, if the sender said.
+    pub group: Option<GroupId>,
+    /// Whether it may have been a message to show, rather than content
+    /// that never is, like receipts and typing.
+    pub shown: bool,
+    /// Asks the sender to resend it: [`SignalBackend::send_retry_request`].
+    pub retry: RetryRequest,
+}
+
+/// A request to resend a message, as the backend encodes it, with the
+/// group it was sent in. `Debug` hides it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct RetryRequest {
+    message: Vec<u8>,
+    group_id: Option<Vec<u8>>,
+}
+
+impl RetryRequest {
+    pub fn new(message: Vec<u8>, group_id: Option<Vec<u8>>) -> Self {
+        Self { message, group_id }
+    }
+
+    pub fn message(&self) -> &[u8] {
+        &self.message
+    }
+
+    pub fn group_id(&self) -> Option<&[u8]> {
+        self.group_id.as_deref()
+    }
+}
+
+impl fmt::Debug for RetryRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("RetryRequest(…)")
+    }
+}
+
+/// A message as it went out, to send again when a recipient can't decrypt
+/// it. `Debug` hides the content.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Resendable {
+    /// Who got it, this account's other devices aside: empty for Note to
+    /// Self.
+    pub recipients: Vec<ServiceId>,
+    /// As the backend encodes it.
+    pub content: Vec<u8>,
+}
+
+impl fmt::Debug for Resendable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Resendable")
+            .field("recipients", &self.recipients)
+            .field("content_bytes", &self.content.len())
+            .finish()
+    }
 }
 
 /// Backend failure, as text for display. Must not contain message content.
@@ -121,8 +200,8 @@ pub trait SignalBackend {
     fn stop_receiving(&mut self);
 
     /// Sends a message, or a change to one of ours, to one account or a
-    /// group, with a copy to this account's other devices. Quotes of our
-    /// messages have no author.
+    /// group, with a copy to this account's other devices; returns it as it
+    /// went out. Quotes of our messages have no author.
     ///
     /// The future doesn't borrow the backend, so the core can keep serving
     /// while it runs.
@@ -131,6 +210,30 @@ pub trait SignalBackend {
         destination: Destination,
         outgoing: Outgoing,
         timestamp: Timestamp,
+    ) -> LocalBoxFuture<'static, Result<Resendable, BackendError>>;
+
+    /// Asks `sender` to resend a message that couldn't be decrypted
+    /// ([`Incoming::Undecryptable`]). Doesn't borrow the backend.
+    fn send_retry_request(
+        &mut self,
+        sender: ServiceId,
+        retry: RetryRequest,
+    ) -> LocalBoxFuture<'static, Result<(), BackendError>>;
+
+    /// Sends `content` again to `recipient` alone, with its timestamp
+    /// `sent_at` ([`Incoming::RetryRequested`]). Doesn't borrow the backend.
+    fn resend(
+        &mut self,
+        recipient: ServiceId,
+        content: Vec<u8>,
+        sent_at: Timestamp,
+    ) -> LocalBoxFuture<'static, Result<(), BackendError>>;
+
+    /// Sends `recipient` an empty message, which starts a new session after
+    /// [`Incoming::RetryRequested`] reset it. Doesn't borrow the backend.
+    fn send_null_message(
+        &mut self,
+        recipient: ServiceId,
     ) -> LocalBoxFuture<'static, Result<(), BackendError>>;
 
     /// Tells this account's other devices we deleted these messages, by

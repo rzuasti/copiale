@@ -21,7 +21,9 @@ pub use actor::{
     Command, CoreHandle, CoreOptions, CoreStopped, DELETE_WINDOW, EDIT_WINDOW, Event, Events,
     StorageFailure, TYPING_TIMEOUT, spawn, spawn_with_options,
 };
-pub use backend::{BackendError, Incoming, Linker, SignalBackend};
+pub use backend::{
+    BackendError, Incoming, Linker, Resendable, RetryRequest, SignalBackend, Undecryptable,
+};
 pub use clock::{Clock, SystemClock};
 pub use dirs::{create_private_dir, runtime_dir};
 pub use model::{

@@ -62,6 +62,9 @@ zeroize = "1"
 [patch."https://github.com/whisperfish/libsignal-service-rs"]
 libsignal-service = { path = "vendor/libsignal-service-rs" }
 
+[patch."https://github.com/whisperfish/presage"]
+presage = { path = "vendor/presage" }
+
 # Same SQLCipher-enabled fork presage uses.
 [patch.crates-io]
 libsqlite3-sys = { git = "https://github.com/whisperfish/rusqlite", rev = "2a42b3354c9194700d08aa070f70a131a470e7dc" }

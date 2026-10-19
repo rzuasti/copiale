@@ -11,11 +11,12 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::time::Instant;
 
 use super::groups::{Groups, Update};
-use super::outbox::{Outbox, Outcome};
+use super::outbox::{Outbox, Outcome, Sent};
 use super::probe::{Check, Probe};
+use super::retries::Limiter;
 use super::run::{Core, ignored};
 use super::{Command, DELETE_WINDOW, EDIT_WINDOW, Event};
-use crate::backend::{BackendError, Incoming, SignalBackend};
+use crate::backend::{BackendError, Incoming, SignalBackend, Undecryptable};
 use crate::clock::Clock;
 use crate::model::{
     Account, AccountSettings, Change, ChatRef, Content, ConversationId, Destination, GroupId,
@@ -54,6 +55,9 @@ struct Session<'a, B> {
     outbox: Outbox,
     probe: Probe,
     groups: Groups,
+    /// Retry requests we sent, and answered.
+    retries_sent: Limiter,
+    retries_answered: Limiter,
     /// When we last told each conversation we're typing.
     typing_sent: HashMap<ConversationId, Instant>,
     next_expiry: Option<Timestamp>,
@@ -89,6 +93,8 @@ impl<'a, B: SignalBackend> Session<'a, B> {
             outbox: Outbox::new(options.send_timeout),
             probe: Probe::new(options.probe_interval, options.probe_timeout),
             groups: Groups::new(),
+            retries_sent: Limiter::new(RETRY_WINDOW, MAX_RETRIES_PER_DEVICE),
+            retries_answered: Limiter::new(RETRY_WINDOW, MAX_RETRIES_PER_DEVICE),
             typing_sent: HashMap::new(),
             next_expiry: None,
             contacts_wanted: false,
@@ -131,6 +137,7 @@ impl<'a, B: SignalBackend> Session<'a, B> {
             Ok(count) => tracing::info!(count, "edits and deletes for unknown messages dropped"),
             Err(error) => self.database_error(error),
         }
+        self.forget_sends().await;
         // Contact names title conversations; settings stay off until the
         // phone says otherwise.
         self.contacts_wanted = linked_now || self.contacts_due().await;
@@ -272,6 +279,16 @@ impl<'a, B: SignalBackend> Session<'a, B> {
                 typing_indicators,
             } => self.settings_synced(read_receipts, typing_indicators).await,
             Incoming::ContactsSynced => self.contacts_synced().await,
+            Incoming::Undecryptable(failure) => self.undecryptable(failure).await,
+            Incoming::RetryRequested {
+                sender,
+                device,
+                sent_at,
+                session_reset,
+            } => {
+                self.retry_requested(sender, device, sent_at, session_reset)
+                    .await
+            }
         }
     }
 
@@ -397,9 +414,21 @@ impl<'a, B: SignalBackend> Session<'a, B> {
 
     async fn send_outcome(&mut self, outcome: Outcome) -> Option<Served> {
         match outcome {
-            Outcome::Sent { id, change: false } => self.send_finished(id, Ok(())).await,
-            Outcome::Sent { id, change: true } => {
-                tracing::debug!(message = id.get(), "change sent")
+            Outcome::Sent {
+                id,
+                change: false,
+                sent,
+            } => {
+                self.log_send(sent).await;
+                self.send_finished(id, Ok(())).await;
+            }
+            Outcome::Sent {
+                id,
+                change: true,
+                sent,
+            } => {
+                tracing::debug!(message = id.get(), "change sent");
+                self.log_send(sent).await;
             }
             Outcome::Failed {
                 id,
@@ -864,6 +893,80 @@ impl<'a, B: SignalBackend> Session<'a, B> {
         }
     }
 
+    /// Asks the sender to resend a message that couldn't be decrypted, and
+    /// shows a placeholder until it arrives.
+    async fn undecryptable(&mut self, failure: Undecryptable) {
+        tracing::warn!(
+            sender = ?failure.sender,
+            device = failure.device,
+            "a message couldn't be decrypted"
+        );
+        let ask = self.retries_sent.allow(
+            failure.sender,
+            failure.device,
+            failure.sent_at,
+            Instant::now(),
+        );
+        if ask {
+            spawn_logged(
+                "sending a retry request",
+                self.backend
+                    .send_retry_request(failure.sender, failure.retry),
+            );
+        } else {
+            tracing::info!("retry request already sent, or too many");
+        }
+        // Our other devices send syncs, which have no chat of their own.
+        if !failure.shown || failure.sender == self.backend.own_id() {
+            return;
+        }
+        match self
+            .db
+            .add_placeholder(failure.sender, failure.group, failure.sent_at, self.now())
+            .await
+        {
+            Ok(Some(message)) => {
+                let conversation = message.conversation;
+                self.emit(Event::MessageAdded(message));
+                self.send_conversation(conversation).await;
+            }
+            Ok(None) => {}
+            Err(error) => self.database_error(error),
+        }
+    }
+
+    /// Resends our message that `sender` couldn't decrypt, if still kept;
+    /// otherwise starts a new session if theirs was reset.
+    async fn retry_requested(
+        &mut self,
+        sender: ServiceId,
+        device: u32,
+        sent_at: Timestamp,
+        session_reset: bool,
+    ) {
+        if !self
+            .retries_answered
+            .allow(sender, device, sent_at, Instant::now())
+        {
+            tracing::info!("retry request already answered, or too many");
+            return;
+        }
+        let since =
+            Timestamp::from_millis(self.now().as_millis().saturating_sub(SEND_LOG_LIFETIME_MS));
+        match self.db.resendable(sender, sent_at, since).await {
+            Ok(Some(content)) => spawn_logged(
+                "resending a message",
+                self.backend.resend(sender, content, sent_at),
+            ),
+            Ok(None) if session_reset => spawn_logged(
+                "sending a null message",
+                self.backend.send_null_message(sender),
+            ),
+            Ok(None) => tracing::info!("nothing to resend"),
+            Err(error) => self.database_error(error),
+        }
+    }
+
     async fn contacts_synced(&mut self) {
         match self.db.contact_count().await {
             Ok(count) => tracing::info!(count, "contacts synced"),
@@ -881,6 +984,30 @@ impl<'a, B: SignalBackend> Session<'a, B> {
     }
 
     // Helpers.
+
+    /// Keeps a send to resend on request, and forgets old ones.
+    async fn log_send(&self, sent: Sent) {
+        let logged = self
+            .db
+            .log_send(
+                sent.sent_at,
+                sent.message_sent_at,
+                &sent.resendable,
+                self.now(),
+            )
+            .await;
+        match logged {
+            Ok(()) => self.forget_sends().await,
+            Err(error) => self.database_error(error),
+        }
+    }
+
+    async fn forget_sends(&self) {
+        let before = self.now().as_millis().saturating_sub(SEND_LOG_LIFETIME_MS);
+        if let Err(error) = self.db.forget_sends(Timestamp::from_millis(before)).await {
+            self.database_error(error);
+        }
+    }
 
     /// Removes this device from the account before its data goes.
     async fn remove_device(&mut self) {
@@ -1088,6 +1215,13 @@ impl<'a, B: SignalBackend> Session<'a, B> {
             tracing::debug!("expired message not stored");
             return;
         }
+        // It replaces the placeholder shown while it couldn't be decrypted.
+        if let Some(author) = author {
+            match self.db.take_placeholders(author, sent_at).await {
+                Ok(placeholders) => self.removed(placeholders).await,
+                Err(error) => self.database_error(error),
+            }
+        }
         let added = self
             .db
             .add_message(destination, author, sent_at, content, expire_timer, now)
@@ -1176,6 +1310,14 @@ const CONTACTS_RETRY_MS: u64 = 3600 * 1000;
 
 /// How long an edit or delete waits for its message.
 const PENDING_CHANGE_LIFETIME_MS: u64 = 24 * 3600 * 1000;
+
+/// How long our sends are kept to resend on request, as in Signal.
+const SEND_LOG_LIFETIME_MS: u64 = 24 * 3600 * 1000;
+
+/// Most retry requests sent to, or answered for, one device per
+/// [`RETRY_WINDOW`]; each message's only once.
+const MAX_RETRIES_PER_DEVICE: usize = 100;
+const RETRY_WINDOW: Duration = Duration::from_secs(3600);
 
 /// How often a typing indicator is renewed while typing; recipients drop
 /// it after [`super::TYPING_TIMEOUT`].

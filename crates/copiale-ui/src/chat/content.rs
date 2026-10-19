@@ -31,6 +31,7 @@ pub fn placeholders(content: &Content) -> Vec<String> {
             vec![format!("[{label}] {ON_PHONE}")]
         }
         Content::Deleted => vec!["this message was deleted".into()],
+        Content::Undecryptable => vec!["this message couldn't be decrypted".into()],
         Content::GroupChanged(_) | Content::TimerChanged(_) => Vec::new(),
     }
 }
@@ -264,6 +265,14 @@ mod tests {
         assert_eq!(
             placeholders(&Content::Deleted),
             ["this message was deleted"]
+        );
+    }
+
+    #[test]
+    fn undecryptable_messages_say_so() {
+        assert_eq!(
+            placeholders(&Content::Undecryptable),
+            ["this message couldn't be decrypted"]
         );
     }
 

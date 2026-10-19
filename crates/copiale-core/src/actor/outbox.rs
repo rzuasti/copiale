@@ -10,7 +10,7 @@ use std::time::Duration;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
-use crate::backend::{BackendError, SignalBackend};
+use crate::backend::{BackendError, Resendable, SignalBackend};
 use crate::model::{Destination, MessageId, Outgoing, Timestamp};
 
 pub(super) struct Outbox {
@@ -35,11 +35,29 @@ impl Job {
     fn change(&self) -> bool {
         !matches!(self.outgoing, Outgoing::Text { .. })
     }
+
+    /// Sent time of the message sent or changed.
+    fn message_sent_at(&self) -> Timestamp {
+        match self.outgoing {
+            Outgoing::Text { .. } => self.sent_at,
+            Outgoing::Edit { target, .. } | Outgoing::Delete { target } => target,
+        }
+    }
 }
 
 struct Sending {
     outgoing: Job,
-    task: JoinHandle<Result<(), BackendError>>,
+    task: JoinHandle<Result<Resendable, BackendError>>,
+}
+
+/// A finished send as it went out, to send again on request.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct Sent {
+    /// The send's own timestamp.
+    pub sent_at: Timestamp,
+    /// Sent time of the message sent or changed.
+    pub message_sent_at: Timestamp,
+    pub resendable: Resendable,
 }
 
 /// How a queued send left the outbox, or why sending stopped. `change` is
@@ -49,6 +67,7 @@ pub(super) enum Outcome {
     Sent {
         id: MessageId,
         change: bool,
+        sent: Sent,
     },
     Failed {
         id: MessageId,
@@ -124,7 +143,15 @@ impl Outbox {
                 let sending = self.sending.take().expect("sending");
                 let (id, change) = (sending.outgoing.id, sending.outgoing.change());
                 match result {
-                    Some(Ok(())) => Outcome::Sent { id, change },
+                    Some(Ok(resendable)) => Outcome::Sent {
+                        id,
+                        change,
+                        sent: Sent {
+                            sent_at: sending.outgoing.sent_at,
+                            message_sent_at: sending.outgoing.message_sent_at(),
+                            resendable,
+                        },
+                    },
                     Some(Err(error)) if error.is_network() => {
                         self.connected = false;
                         self.queue.push_front(sending.outgoing);

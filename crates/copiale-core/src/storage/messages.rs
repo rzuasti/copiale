@@ -528,7 +528,7 @@ pub(super) async fn load_message(
 }
 
 /// The conversation with `destination`, created if new.
-async fn conversation_id(
+pub(super) async fn conversation_id(
     tx: &mut sqlx::SqliteConnection,
     destination: &Destination,
 ) -> Result<i64, StorageError> {
@@ -563,7 +563,7 @@ async fn conversation_id(
 /// Inserts a message into `conversation`, stored at `received_at`, unless
 /// it's a duplicate, and bumps the conversation's activity.
 #[allow(clippy::too_many_arguments)]
-async fn insert_message(
+pub(super) async fn insert_message(
     tx: &mut sqlx::SqliteConnection,
     conversation: i64,
     author: Option<ServiceId>,

@@ -3,6 +3,7 @@
 use super::StorageError;
 use super::database::{Database, database_error};
 use super::messages::{content_columns, load_message, millis};
+use super::retries::placeholder_json;
 use crate::model::{
     Change, ChatRef, Content, ConversationId, Destination, Message, MessageChange, MessageId,
     MessageRef, Timestamp,
@@ -34,16 +35,19 @@ impl Database {
             }
         }
         .map_err(database_error)?;
-        // Later edits may target the previous edit's time.
+        // Later edits may target the previous edit's time. Changes to a
+        // message that couldn't be decrypted wait for it.
         let target: Option<i64> = match conversation {
             Some(conversation) => sqlx::query_scalar(
                 "SELECT id FROM messages
                  WHERE conversation_id = ?1 AND author = ?2 AND (sent_at = ?3 OR edited_at = ?3)
+                   AND coalesce(content, '') != ?4
                  ORDER BY id LIMIT 1",
             )
             .bind(conversation)
             .bind(&author)
             .bind(millis(change.target))
+            .bind(placeholder_json()?)
             .fetch_optional(&mut *tx)
             .await
             .map_err(database_error)?,

@@ -9,7 +9,7 @@ use std::time::Duration;
 use copiale_core::storage::{Database, SecretError, SecretStore};
 use copiale_core::{
     BackendError, Clock, Contact, Destination, GroupInfo, GroupMasterKey, Incoming, Linker,
-    MessageBody, Outgoing, ServiceId, SignalBackend, Timestamp,
+    MessageBody, Outgoing, Resendable, RetryRequest, ServiceId, SignalBackend, Timestamp,
 };
 use futures::future::LocalBoxFuture;
 use futures::stream::LocalBoxStream;
@@ -106,6 +106,10 @@ struct State {
     read_syncs: Vec<Vec<(ServiceId, Timestamp)>>,
     typing: Vec<(Destination, bool)>,
     deleted_for_me: Vec<DeletedForMe>,
+    retry_requests: Vec<(ServiceId, RetryRequest)>,
+    /// Texts sent again, by recipient.
+    resent: Vec<(ServiceId, SentText)>,
+    null_messages: Vec<ServiceId>,
     /// presage's store in the core's database, once the account is loaded.
     store: Option<SqliteStore>,
     /// Disappearing messages timers, by conversation.
@@ -195,13 +199,14 @@ impl SignalBackend for FakeBackend {
     }
 
     /// Counts as started at once; completes when sends aren't paused and
-    /// the network is up.
+    /// the network is up. Reaches the contact, or the scripted group's
+    /// members; the content is its place among [`FakeNetwork::sent`].
     fn send(
         &mut self,
         destination: Destination,
         outgoing: Outgoing,
         timestamp: Timestamp,
-    ) -> LocalBoxFuture<'static, Result<(), BackendError>> {
+    ) -> LocalBoxFuture<'static, Result<Resendable, BackendError>> {
         let failure = self.record(|state| {
             state.sends_started += 1;
             state.send_failures.pop_front()
@@ -217,16 +222,69 @@ impl SignalBackend for FakeBackend {
             if let Some(error) = failure {
                 return Err(error);
             }
-            record(&state, &changes, |state| {
+            Ok(record(&state, &changes, |state| {
+                let recipients = match destination {
+                    Destination::Contact(peer) if peer == service_id(OWN_ID) => Vec::new(),
+                    Destination::Contact(peer) => vec![peer],
+                    Destination::Group(group) => state
+                        .groups
+                        .get(&group.key)
+                        .map(|info| info.members.iter().map(|member| member.id).collect())
+                        .unwrap_or_default(),
+                };
+                let content = (state.sent.len() as u64).to_le_bytes().to_vec();
                 state.sent.push(SentText {
                     destination,
                     outgoing,
                     timestamp,
-                })
-            });
-            Ok(())
+                });
+                Resendable {
+                    recipients,
+                    content,
+                }
+            }))
         }
         .boxed_local()
+    }
+
+    fn send_retry_request(
+        &mut self,
+        sender: ServiceId,
+        retry: RetryRequest,
+    ) -> LocalBoxFuture<'static, Result<(), BackendError>> {
+        self.record(|state| state.retry_requests.push((sender, retry)));
+        async { Ok(()) }.boxed_local()
+    }
+
+    /// Sends the text whose content [`Self::send`] returned again.
+    fn resend(
+        &mut self,
+        recipient: ServiceId,
+        content: Vec<u8>,
+        sent_at: Timestamp,
+    ) -> LocalBoxFuture<'static, Result<(), BackendError>> {
+        let result = self.record(|state| {
+            let index = <[u8; 8]>::try_from(content.as_slice())
+                .map(|bytes| u64::from_le_bytes(bytes) as usize)
+                .map_err(|_| BackendError::new("not sent here"))?;
+            let sent = state
+                .sent
+                .get(index)
+                .filter(|sent| sent.timestamp == sent_at)
+                .cloned()
+                .ok_or_else(|| BackendError::new("not sent here"))?;
+            state.resent.push((recipient, sent));
+            Ok(())
+        });
+        async move { result }.boxed_local()
+    }
+
+    fn send_null_message(
+        &mut self,
+        recipient: ServiceId,
+    ) -> LocalBoxFuture<'static, Result<(), BackendError>> {
+        self.record(|state| state.null_messages.push(recipient));
+        async { Ok(()) }.boxed_local()
     }
 
     /// The scripted timer.
@@ -523,6 +581,21 @@ impl FakeNetwork {
     /// Typing indicators sent so far.
     pub fn typing(&self) -> Vec<(Destination, bool)> {
         self.state.lock().unwrap().typing.clone()
+    }
+
+    /// Requests to resend messages that couldn't be decrypted, by sender.
+    pub fn retry_requests(&self) -> Vec<(ServiceId, RetryRequest)> {
+        self.state.lock().unwrap().retry_requests.clone()
+    }
+
+    /// Texts sent again on request, by recipient.
+    pub fn resent(&self) -> Vec<(ServiceId, SentText)> {
+        self.state.lock().unwrap().resent.clone()
+    }
+
+    /// Null messages sent so far, by recipient.
+    pub fn null_messages(&self) -> Vec<ServiceId> {
+        self.state.lock().unwrap().null_messages.clone()
     }
 
     /// Saves contacts to presage's store, as a sync from the phone does, and

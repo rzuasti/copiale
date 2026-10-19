@@ -9,10 +9,10 @@ use copiale_core::storage::{KdfParams, Passphrase, Storage, StoragePaths};
 use copiale_core::{
     Account, AccountSettings, BackendError, Change, ChatRef, Command, Contact, Content,
     ConversationId, ConversationSummary, CoreHandle, CoreOptions, Destination, Direction,
-    EDIT_WINDOW, Event, Events, Expiry, GroupInfo, GroupRef, GroupUpdate, Incoming,
+    EDIT_WINDOW, Event, Events, Expiry, GroupId, GroupInfo, GroupRef, GroupUpdate, Incoming,
     IncomingMessage, Member, Message, MessageBody, MessageChange, MessagePreview, MessageRef,
-    MessageStatus, Outgoing, Peer, PhoneNumber, Quote, ReceiptKind, SentMessage, StorageFailure,
-    Timestamp,
+    MessageStatus, Outgoing, Peer, PhoneNumber, Quote, ReceiptKind, RetryRequest, SentMessage,
+    StorageFailure, Timestamp, Undecryptable,
 };
 use copiale_testkit::{
     DEVICE_NAME, FAKE_LINK_URL, FakeNetwork, FakePhone, ManualClock, MemorySecretStore, OWN_ID,
@@ -2664,5 +2664,271 @@ async fn timer_changes_stay_in_the_log() {
     }));
     let change = message_added(&mut running.events).await;
     assert_eq!(change.expiry, None);
+    stop(running).await;
+}
+
+// Decryption retries
+
+fn retry(n: u8) -> RetryRequest {
+    RetryRequest::new(vec![n], None)
+}
+
+fn undecryptable(from: u128, sent_at: u64, group: Option<GroupId>, shown: bool) -> Incoming {
+    Incoming::Undecryptable(Undecryptable {
+        sender: service_id(from),
+        device: 2,
+        sent_at: Timestamp::from_millis(sent_at),
+        group,
+        shown,
+        retry: retry(sent_at as u8),
+    })
+}
+
+fn retry_requested(from: u128, sent_at: Timestamp, session_reset: bool) -> Incoming {
+    Incoming::RetryRequested {
+        sender: service_id(from),
+        device: 1,
+        sent_at,
+        session_reset,
+    }
+}
+
+#[tokio::test]
+async fn undecryptable_messages_are_asked_for_until_they_arrive() {
+    let (_dir, mut running) = ready().await;
+
+    running.network.deliver(undecryptable(1, 100, None, true));
+
+    let placeholder = message_added(&mut running.events).await;
+    assert_eq!(placeholder.content, Content::Undecryptable);
+    assert_eq!(placeholder.sender, Some(service_id(1)));
+    assert!(placeholder.read, "nothing to notify");
+    let summary = conversation_updated(&mut running.events).await;
+    assert_eq!(summary.peer, Peer::Contact(service_id(1)));
+    until(&running, |network| !network.retry_requests().is_empty()).await;
+    assert_eq!(
+        running.network.retry_requests(),
+        [(service_id(1), retry(100))]
+    );
+
+    running.network.deliver(incoming(1, 100, "resent"));
+
+    assert_eq!(
+        next_event(&mut running.events).await,
+        Event::MessageRemoved {
+            conversation: placeholder.conversation,
+            id: placeholder.id,
+        }
+    );
+    conversation_updated(&mut running.events).await;
+    let resent = message_added(&mut running.events).await;
+    assert_eq!(resent.conversation, placeholder.conversation);
+    assert_eq!(resent.content, Content::text("resent"));
+    assert!(!resent.read);
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn each_undecryptable_message_is_asked_for_once() {
+    let (_dir, mut running) = ready().await;
+
+    running.network.deliver(undecryptable(1, 100, None, true));
+    running.network.deliver(undecryptable(1, 100, None, true));
+    running.network.deliver(undecryptable(1, 101, None, true));
+    let events = flush(&mut running).await;
+
+    let added = events
+        .iter()
+        .filter(|event| matches!(event, Event::MessageAdded(_)))
+        .count();
+    assert_eq!(added, 2);
+    until(&running, |network| network.retry_requests().len() == 2).await;
+    assert_eq!(
+        running.network.retry_requests(),
+        [(service_id(1), retry(100)), (service_id(1), retry(101))]
+    );
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn hidden_and_own_undecryptable_content_gets_no_placeholder() {
+    let (_dir, mut running) = ready().await;
+
+    running.network.deliver(undecryptable(1, 100, None, false));
+    running
+        .network
+        .deliver(undecryptable(OWN_ID, 101, None, true));
+    let events = flush(&mut running).await;
+
+    assert_eq!(events, []);
+    until(&running, |network| network.retry_requests().len() == 2).await;
+    assert_eq!(
+        running.network.retry_requests(),
+        [
+            (service_id(1), retry(100)),
+            (service_id(OWN_ID), retry(101))
+        ]
+    );
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn undecryptable_group_messages_show_in_the_group() {
+    let (_dir, mut running) = ready().await;
+    running.network.set_group(group_key(1), dev_group(3));
+    let (_, group) = receive_in_group(&mut running, group_ref(1, 3), 2, 100).await;
+    conversation_updated(&mut running.events).await;
+    conversation_updated(&mut running.events).await;
+
+    running
+        .network
+        .deliver(undecryptable(2, 101, Some(group_key(1).id()), true));
+
+    let placeholder = message_added(&mut running.events).await;
+    assert_eq!(placeholder.conversation, group.id);
+    assert_eq!(placeholder.content, Content::Undecryptable);
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn retry_requests_resend_our_message() {
+    let (_dir, mut running) = ready().await;
+    let chat = open_chat(&mut running, 2).await;
+    let message = sent_text(&mut running, chat, "hi").await;
+
+    running
+        .network
+        .deliver(retry_requested(2, message.sent_at, false));
+
+    until(&running, |network| !network.resent().is_empty()).await;
+    assert_eq!(
+        running.network.resent(),
+        [(
+            service_id(2),
+            SentText {
+                destination: Destination::Contact(service_id(2)),
+                outgoing: text("hi"),
+                timestamp: message.sent_at,
+            }
+        )]
+    );
+    assert_eq!(running.network.null_messages(), []);
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn retry_requests_are_answered_once_and_only_to_recipients() {
+    let (_dir, mut running) = ready().await;
+    let chat = open_chat(&mut running, 2).await;
+    let message = sent_text(&mut running, chat, "hi").await;
+
+    running
+        .network
+        .deliver(retry_requested(3, message.sent_at, false));
+    running
+        .network
+        .deliver(retry_requested(2, message.sent_at, false));
+    running
+        .network
+        .deliver(retry_requested(2, message.sent_at, false));
+    // A broken session without a message to resend is restarted.
+    running
+        .network
+        .deliver(retry_requested(3, Timestamp::from_millis(5), true));
+    flush(&mut running).await;
+
+    until(&running, |network| !network.null_messages().is_empty()).await;
+    assert_eq!(running.network.resent().len(), 1);
+    assert_eq!(running.network.resent()[0].0, service_id(2));
+    assert_eq!(running.network.null_messages(), [service_id(3)]);
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn group_messages_are_resent_to_members_who_ask() {
+    let (_dir, mut running) = ready().await;
+    running.network.set_group(group_key(1), dev_group(3));
+    let (_, group) = receive_in_group(&mut running, group_ref(1, 3), 2, 100).await;
+    conversation_updated(&mut running.events).await;
+    conversation_updated(&mut running.events).await;
+    let message = sent_text(&mut running, group.id, "hi all").await;
+
+    running
+        .network
+        .deliver(retry_requested(1, message.sent_at, false));
+
+    until(&running, |network| !network.resent().is_empty()).await;
+    let (recipient, resent) = &running.network.resent()[0];
+    assert_eq!(*recipient, service_id(1));
+    assert_eq!(resent.outgoing, text("hi all"));
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn messages_deleted_for_everyone_are_not_resent() {
+    let (_dir, mut running) = ready().await;
+    let chat = open_chat(&mut running, 2).await;
+    let original = sent_text(&mut running, chat, "oops").await;
+    send(
+        &running,
+        Command::Delete {
+            id: original.id,
+            everyone: true,
+        },
+    );
+    message_updated(&mut running.events).await;
+    conversation_updated(&mut running.events).await;
+    until(&running, |network| network.sent().len() == 2).await;
+    let delete_sent_at = running.network.sent()[1].timestamp;
+    sync(&mut running).await;
+
+    running
+        .network
+        .deliver(retry_requested(2, original.sent_at, false));
+    running
+        .network
+        .deliver(retry_requested(2, delete_sent_at, false));
+
+    until(&running, |network| !network.resent().is_empty()).await;
+    let resent: Vec<_> = running
+        .network
+        .resent()
+        .into_iter()
+        .map(|(_, sent)| sent.outgoing)
+        .collect();
+    assert_eq!(
+        resent,
+        [Outgoing::Delete {
+            target: original.sent_at,
+        }]
+    );
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn sends_are_resent_only_for_a_day() {
+    let clock = ManualClock::new(Timestamp::from_millis(NOW));
+    let (_dir, mut running) = ready_at(&clock).await;
+    let chat = open_chat(&mut running, 2).await;
+    let old = sent_text(&mut running, chat, "old").await;
+    clock.advance(DAY);
+    let recent = sent_text(&mut running, chat, "recent").await;
+    clock.advance(Duration::from_millis(1));
+
+    running
+        .network
+        .deliver(retry_requested(2, old.sent_at, false));
+    running
+        .network
+        .deliver(retry_requested(2, recent.sent_at, false));
+
+    until(&running, |network| !network.resent().is_empty()).await;
+    let resent: Vec<_> = running
+        .network
+        .resent()
+        .into_iter()
+        .map(|(_, sent)| sent.outgoing)
+        .collect();
+    assert_eq!(resent, [text("recent")]);
     stop(running).await;
 }
