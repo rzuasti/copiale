@@ -5,6 +5,7 @@ mod groups;
 mod outbox;
 mod probe;
 mod run;
+mod session;
 
 use std::sync::Arc;
 use std::thread::JoinHandle;
