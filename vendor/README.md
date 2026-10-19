@@ -23,7 +23,8 @@ each one once its patches are merged and the pin is updated.
   - `patches/libsignal-service-retry-requests.patch`. Decryption failures
     carry what a retry request needs (`ServiceError::DecryptionFailed`);
     `MessageSender::send_retry_request` sends one as unencrypted content,
-    and `MessageSender::resend_content` answers one. Not upstream yet.
+    and `MessageSender::resend_content` answers one.
+    Upstream PR: [whisperfish/libsignal-service-rs#484](https://github.com/whisperfish/libsignal-service-rs/pull/484).
 - **Used via:** `[patch."https://github.com/whisperfish/libsignal-service-rs"]`
   in the root `Cargo.toml`.
 
