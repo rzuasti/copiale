@@ -15,6 +15,16 @@ use copiale_ui::Request;
 use futures::channel::mpsc::unbounded;
 use instance::Claim;
 
+/// Held by tests while they spawn a process: until it execs, the child
+/// shares every open file, so a lock dropped meanwhile stays held.
+#[cfg(test)]
+fn spawn_guard() -> std::sync::MutexGuard<'static, ()> {
+    static SPAWNING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    SPAWNING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 fn main() -> ExitCode {
     copiale_core::logging::init();
 

@@ -275,6 +275,7 @@ mod tests {
         };
         // A crashed instance leaves its socket file but not its lock.
         std::mem::forget(first.listener);
+        let _spawning = crate::spawn_guard();
         drop(first._lock);
 
         let Claim::First(instance) = claim(dir.path()).unwrap() else {

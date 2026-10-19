@@ -42,7 +42,7 @@ fn name(signal: i32) -> &'static str {
 mod tests {
     use std::io::Write as _;
     use std::os::unix::process::ExitStatusExt as _;
-    use std::process::Command;
+    use std::process::{Command, Stdio};
     use std::sync::mpsc;
     use std::time::Duration;
 
@@ -70,15 +70,21 @@ mod tests {
 
     #[test]
     fn first_signal_quits_and_a_second_ends_the_process() {
-        let output = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "signals::tests::signalled_process",
-                "--ignored",
-                "--nocapture",
-            ])
-            .output()
-            .unwrap();
+        let child = {
+            let _spawning = crate::spawn_guard();
+            Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "signals::tests::signalled_process",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap()
+        };
+        let output = child.wait_with_output().unwrap();
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(stdout.contains(QUIT), "{stdout}");
