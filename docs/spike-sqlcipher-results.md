@@ -94,10 +94,10 @@ races, both fixed:
   its private heap and providers while a sqlx worker thread is still closing
   a connection (`sqlite3_close` → `sqlite3FreeCodecArg`), giving a segfault
   or double free. There is no build option to skip the handler. Fix: close
-  every connection before exit. presage's pool wasn't reachable, so a
-  vendored, patched `presage-store-sqlite` adds `SqliteStore::close()`
-  (`vendor/README.md`); `Database::close` closes both pools, and failure
-  paths close what they opened.
+  every connection before exit. presage's pool wasn't reachable, so we
+  added `SqliteStore::close()` upstream (whisperfish/presage#457);
+  `Database::close` closes both pools, and failure paths close what they
+  opened.
 - **"sqlcipher not initialized"** on `PRAGMA key` (about 0.5%): SQLite marks
   itself initialized before SQLCipher's extra init finishes, so a
   concurrent first connection can fail. Fix: one throwaway in-memory

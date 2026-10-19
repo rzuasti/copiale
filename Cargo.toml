@@ -32,8 +32,8 @@ log = "0.4"
 notify = "8"
 notify-rust = "4.18"
 # Not on crates.io; upgrade deliberately.
-presage = { git = "https://github.com/whisperfish/presage", rev = "94b3978f5456469cfd4d9f72351a5eff93715f81" }
-presage-store-sqlite = { git = "https://github.com/whisperfish/presage", rev = "94b3978f5456469cfd4d9f72351a5eff93715f81" }
+presage = { git = "https://github.com/whisperfish/presage", rev = "6f630791b2c7bf3d5b00c75f5a6c94131bf79c8c" }
+presage-store-sqlite = { git = "https://github.com/whisperfish/presage", rev = "6f630791b2c7bf3d5b00c75f5a6c94131bf79c8c" }
 qrcode = { version = "0.14", default-features = false }
 rand = "0.9"
 # Only to read libsignal-service's handshake errors; same major as it uses.
@@ -57,9 +57,6 @@ uuid = "1"
 zeroize = "1"
 
 # Patched until upstream merges the changes; see vendor/README.md.
-[patch."https://github.com/whisperfish/presage"]
-presage-store-sqlite = { path = "vendor/presage-store-sqlite" }
-
 [patch."https://github.com/whisperfish/libsignal-service-rs"]
 libsignal-service = { path = "vendor/libsignal-service-rs" }
 
