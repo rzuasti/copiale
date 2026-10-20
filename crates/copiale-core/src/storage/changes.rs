@@ -1,10 +1,13 @@
 //! Edits and deletes of earlier messages, including ones that arrive first.
 
+use std::cmp::Reverse;
+use std::time::Duration;
+
 use super::StorageError;
 use super::database::{Database, database_error};
 use super::messages::{
     Removed, RemovedRow, author_bytes, content_columns, load_message, millis, removed,
-    removed_columns,
+    removed_columns, timestamp,
 };
 use super::retries::placeholder_json;
 use crate::model::{
@@ -12,10 +15,21 @@ use crate::model::{
     MessageRef, Timestamp,
 };
 
+/// How long after the server got a message others may edit it, as in
+/// Signal; from the original message, not the last edit.
+const EDIT_WINDOW: Duration = Duration::from_secs(48 * 3600);
+/// How long after the server got a message others may delete it, as in
+/// Signal: a day plus a day's grace.
+const DELETE_WINDOW: Duration = Duration::from_secs(48 * 3600);
+/// Most edits a message takes, as in Signal.
+const MAX_EDITS: i64 = 100;
+
 impl Database {
     /// Applies an edit or delete by the message's author; returns the
     /// changed message. One for a message not stored yet is kept until it
     /// is, from `now`; `None` then, and when there's nothing to change.
+    /// Others' changes apply only within [`EDIT_WINDOW`] or
+    /// [`DELETE_WINDOW`] of the message, and edits up to [`MAX_EDITS`].
     pub(crate) async fn apply_change(
         &self,
         change: &MessageChange,
@@ -62,13 +76,15 @@ impl Database {
                 Change::Delete => (None, None),
             };
             sqlx::query(
-                "INSERT INTO pending_changes (author, target, content, edited_at, received_at)
-                 VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO pending_changes
+                     (author, target, content, edited_at, server_at, received_at)
+                 VALUES (?, ?, ?, ?, ?, ?)",
             )
             .bind(&author)
             .bind(millis(change.target))
             .bind(content)
             .bind(edited_at)
+            .bind(millis(change.server_at))
             .bind(millis(now))
             .execute(&mut *tx)
             .await
@@ -76,7 +92,8 @@ impl Database {
             tx.commit().await.map_err(database_error)?;
             return Ok(None);
         };
-        let changed = update(&mut tx, MessageId::new(id), &change.change).await?;
+        let server_at = change.author.map(|_| change.server_at);
+        let changed = update(&mut tx, MessageId::new(id), &change.change, server_at).await?;
         let message = match changed {
             true => load_message(&mut tx, MessageId::new(id)).await?,
             false => None,
@@ -165,61 +182,71 @@ impl Database {
 }
 
 /// Applies changes kept for a message just stored: a delete wins, else the
-/// latest edit. Returns the message as it now is.
+/// latest edit, of those that apply. Returns the message as it now is.
 pub(super) async fn apply_pending(
     tx: &mut sqlx::SqliteConnection,
     message: Message,
 ) -> Result<Message, StorageError> {
     let author = author_bytes(message.sender);
     let target = millis(message.sent_at);
-    let pending: Vec<(Option<String>, Option<i64>)> = sqlx::query_as(
+    let mut pending: Vec<(Option<String>, Option<i64>, Option<i64>)> = sqlx::query_as(
         "DELETE FROM pending_changes WHERE author = ? AND target = ?
-         RETURNING content, edited_at",
+         RETURNING content, edited_at, server_at",
     )
     .bind(&author)
     .bind(target)
     .fetch_all(&mut *tx)
     .await
     .map_err(database_error)?;
-    let change = if pending.iter().any(|(content, _)| content.is_none()) {
-        Some(Change::Delete)
-    } else {
-        pending
-            .into_iter()
-            .filter_map(|(content, at)| Some((content?, at?)))
-            .max_by_key(|(_, at)| *at)
-            .map(|(content, at)| {
-                let content = serde_json::from_str(&content)
-                    .map_err(|_| StorageError::Database("invalid kept edit".into()))?;
-                let at = Timestamp::from_millis(u64::try_from(at).unwrap_or(0));
-                Ok::<_, StorageError>(Change::Edit { content, at })
-            })
-            .transpose()?
-    };
-    let Some(change) = change else {
-        return Ok(message);
-    };
-    update(tx, message.id, &change).await?;
-    Ok(load_message(tx, message.id).await?.unwrap_or(message))
+    // Deletes first, then edits from the latest.
+    pending.sort_by_key(|(content, edited_at, _)| (content.is_some(), Reverse(*edited_at)));
+    for (content, edited_at, server_at) in pending {
+        let change = match (content, edited_at) {
+            (None, _) => Change::Delete,
+            (Some(content), Some(at)) => Change::Edit {
+                content: serde_json::from_str(&content)
+                    .map_err(|_| StorageError::Database("invalid kept edit".into()))?,
+                at: timestamp(at),
+            },
+            (Some(_), None) => continue,
+        };
+        let server_at = match (message.sender, server_at) {
+            (None, _) => None,
+            (Some(_), Some(at)) => Some(timestamp(at)),
+            // Others' are always kept with one.
+            (Some(_), None) => continue,
+        };
+        if update(tx, message.id, &change, server_at).await? {
+            return Ok(load_message(tx, message.id).await?.unwrap_or(message));
+        }
+    }
+    Ok(message)
 }
 
 /// Applies `change` to a stored message; `false` if it doesn't apply: an
 /// edit to or of anything but text, e.g. a deleted message or a system
-/// line, or an older edit than the stored one.
+/// line, an older edit than the stored one, or one past [`MAX_EDITS`].
+/// With `server_at`, when the server got someone else's change, it must
+/// also be within its window of the message's.
 async fn update(
     tx: &mut sqlx::SqliteConnection,
     id: MessageId,
     change: &Change,
+    server_at: Option<Timestamp>,
 ) -> Result<bool, StorageError> {
     let deleted = json(&Content::Deleted)?;
+    let window = |window: Duration| i64::try_from(window.as_millis()).unwrap_or(i64::MAX);
     let result = match change {
         Change::Delete => {
             sqlx::query(
                 "UPDATE messages SET body = '', content = ?1
-             WHERE id = ?2 AND coalesce(content, '') != ?1",
+                 WHERE id = ?2 AND coalesce(content, '') != ?1
+                   AND (?3 IS NULL OR ?3 <= server_at + ?4)",
             )
             .bind(&deleted)
             .bind(id.get())
+            .bind(server_at.map(millis))
+            .bind(window(DELETE_WINDOW))
             .execute(&mut *tx)
             .await
         }
@@ -230,14 +257,18 @@ async fn update(
             let (body, content) = content_columns(content)?;
             // Only text is edited: plain, or kept as JSON.
             sqlx::query(
-                "UPDATE messages SET body = ?1, content = ?2, edited_at = ?3
+                "UPDATE messages SET body = ?1, content = ?2, edited_at = ?3, edits = edits + 1
                  WHERE id = ?4 AND (content IS NULL OR json_type(content, '$.text') IS NOT NULL)
-                   AND (edited_at IS NULL OR edited_at < ?3)",
+                   AND (edited_at IS NULL OR edited_at < ?3) AND edits < ?5
+                   AND (?6 IS NULL OR ?6 <= server_at + ?7)",
             )
             .bind(body)
             .bind(content)
             .bind(millis(*at))
             .bind(id.get())
+            .bind(MAX_EDITS)
+            .bind(server_at.map(millis))
+            .bind(window(EDIT_WINDOW))
             .execute(&mut *tx)
             .await
         }
@@ -263,6 +294,7 @@ mod tests {
             at(sent_at),
             &Content::text(body),
             None,
+            Some(at(sent_at)),
             Timestamp::from_millis(0),
         )
         .await
@@ -274,6 +306,7 @@ mod tests {
             destination: Destination::Contact(peer(from)),
             author: Some(peer(from)),
             target: at(target),
+            server_at: at(target),
             change,
         }
     }
@@ -298,7 +331,7 @@ mod tests {
 
         assert_eq!(edited.id, original.id);
         assert_eq!(edited.content, Content::text("the"));
-        assert!(edited.edited);
+        assert!(edited.edited());
         assert_eq!(edited.sent_at, original.sent_at);
         // A second edit may target the first edit's time.
         let again = db
@@ -328,6 +361,7 @@ mod tests {
                 at(100),
                 &Content::TimerChanged(Some(60)),
                 None,
+                Some(at(100)),
                 Timestamp::from_millis(0),
             )
             .await
@@ -426,7 +460,7 @@ mod tests {
         let message = incoming(&db, 1, 100, "v1").await.unwrap();
 
         assert_eq!(message.content, Content::text("v3"));
-        assert!(message.edited);
+        assert!(message.edited());
 
         db.apply_change(&change(2, 50, edit("x", 60)), at(0))
             .await
@@ -453,6 +487,7 @@ mod tests {
                 at(100),
                 &Content::text("hi all"),
                 None,
+                None,
                 Timestamp::from_millis(0),
             )
             .await
@@ -465,6 +500,7 @@ mod tests {
                     destination: group,
                     author: None,
                     target: at(100),
+                    server_at: at(100),
                     change: edit("hi everyone", 200),
                 },
                 at(0),
@@ -506,6 +542,7 @@ mod tests {
             at(sent_at),
             &content,
             None,
+            Some(at(sent_at)),
             at(0),
         )
         .await
@@ -535,6 +572,7 @@ mod tests {
             None,
             at(70),
             &Content::text("mine"),
+            None,
             None,
             at(0),
         )
@@ -611,6 +649,7 @@ mod tests {
                 at(102),
                 &Content::text("c"),
                 None,
+                None,
                 Timestamp::from_millis(0),
             )
             .await
@@ -664,6 +703,147 @@ mod tests {
 
         let message = incoming(&db, 1, 100, "kept").await.unwrap();
         assert_eq!(message.content, Content::text("kept"));
+        db.close().await;
+    }
+
+    /// `change`, as the server got it at `server_at`.
+    fn got_at(server_at: u64, change: MessageChange) -> MessageChange {
+        MessageChange {
+            server_at: at(server_at),
+            ..change
+        }
+    }
+
+    const WINDOW: u64 = 48 * 3600 * 1000;
+
+    #[tokio::test]
+    async fn others_change_messages_only_within_the_window() {
+        let (_dir, db) = db().await;
+        incoming(&db, 1, 100, "v1").await.unwrap();
+        incoming(&db, 1, 101, "old").await.unwrap();
+        incoming(&db, 1, 102, "gone").await.unwrap();
+
+        let last = got_at(100 + WINDOW, change(1, 100, edit("v2", 200)));
+        assert!(db.apply_change(&last, at(0)).await.unwrap().is_some());
+        // From the original, not the last edit.
+        let past = got_at(101 + WINDOW, change(1, 200, edit("v3", 300)));
+        assert_eq!(db.apply_change(&past, at(0)).await.unwrap(), None);
+        let late_edit = got_at(102 + WINDOW, change(1, 101, edit("new", 300)));
+        assert_eq!(db.apply_change(&late_edit, at(0)).await.unwrap(), None);
+        let late_delete = got_at(102 + WINDOW, change(1, 101, Change::Delete));
+        assert_eq!(db.apply_change(&late_delete, at(0)).await.unwrap(), None);
+        let delete = got_at(102 + WINDOW, change(1, 102, Change::Delete));
+        assert!(db.apply_change(&delete, at(0)).await.unwrap().is_some());
+
+        let stored = db.messages(ConversationId::new(1), None, 10).await.unwrap();
+        let contents: Vec<_> = stored.into_iter().map(|m| m.content).collect();
+        assert_eq!(
+            contents,
+            [Content::text("v2"), Content::text("old"), Content::Deleted]
+        );
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn own_changes_have_no_window() {
+        let (_dir, db) = db().await;
+        let destination = Destination::Contact(peer(1));
+        for sent_at in [100, 101] {
+            db.add_message(
+                &destination,
+                None,
+                at(sent_at),
+                &Content::text("mine"),
+                None,
+                None,
+                at(0),
+            )
+            .await
+            .unwrap();
+        }
+        let own = |target, change| MessageChange {
+            destination,
+            author: None,
+            target: at(target),
+            server_at: at(10 * WINDOW),
+            change,
+        };
+
+        let edited = own(100, edit("still mine", 200));
+        assert!(db.apply_change(&edited, at(0)).await.unwrap().is_some());
+        let deleted = own(101, Change::Delete);
+        assert!(db.apply_change(&deleted, at(0)).await.unwrap().is_some());
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn edits_stop_at_the_limit() {
+        let (_dir, db) = db().await;
+        incoming(&db, 1, 100, "v0").await.unwrap();
+
+        for n in 1..=MAX_EDITS as u64 {
+            let edit = change(1, 100, edit(&format!("v{n}"), 100 + n));
+            assert!(db.apply_change(&edit, at(0)).await.unwrap().is_some());
+        }
+        let over = change(1, 100, edit("one more", 1000));
+        assert_eq!(db.apply_change(&over, at(0)).await.unwrap(), None);
+        let delete = change(1, 100, Change::Delete);
+        assert!(db.apply_change(&delete, at(0)).await.unwrap().is_some());
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn kept_changes_apply_only_within_the_window() {
+        let (_dir, db) = db().await;
+        let late_delete = got_at(100 + WINDOW + 1, change(1, 100, Change::Delete));
+        db.apply_change(&late_delete, at(0)).await.unwrap();
+        let late_edit = got_at(100 + WINDOW + 1, change(1, 100, edit("v3", 300)));
+        db.apply_change(&late_edit, at(0)).await.unwrap();
+        let in_time = got_at(100 + WINDOW, change(1, 100, edit("v2", 200)));
+        db.apply_change(&in_time, at(0)).await.unwrap();
+        let other_late = got_at(50 + WINDOW + 1, change(2, 50, edit("x", 60)));
+        db.apply_change(&other_late, at(0)).await.unwrap();
+
+        let message = incoming(&db, 1, 100, "v1").await.unwrap();
+        assert_eq!(message.content, Content::text("v2"));
+        let message = incoming(&db, 2, 50, "kept").await.unwrap();
+        assert_eq!(message.content, Content::text("kept"));
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn migration_bounds_older_messages_by_their_arrival() {
+        let (_dir, db) = db().await;
+        let theirs = incoming(&db, 1, 100, "teh").await.unwrap();
+        db.apply_change(&change(1, 100, edit("the", 200)), at(0))
+            .await
+            .unwrap();
+        // One connection, so the migration sees the dropped columns.
+        let mut connection = db.pool().acquire().await.unwrap();
+        sqlx::raw_sql(
+            "ALTER TABLE messages DROP COLUMN server_at;
+             ALTER TABLE messages DROP COLUMN edits;
+             ALTER TABLE pending_changes DROP COLUMN server_at;
+             UPDATE messages SET received_at = 5000;",
+        )
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+
+        let migration = include_str!("../../migrations/20261027120000_change_limits.sql");
+        sqlx::raw_sql(migration)
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        drop(connection);
+
+        let row: (Option<i64>, i64) =
+            sqlx::query_as("SELECT server_at, edits FROM messages WHERE id = ?")
+                .bind(theirs.id.get())
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(row, (Some(5000), 1));
         db.close().await;
     }
 }

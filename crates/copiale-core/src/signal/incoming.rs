@@ -330,6 +330,7 @@ fn received_message(content: &Content, server: &ServerPublicParams) -> Option<In
         sender: ServiceId::new(content.metadata.sender.raw_uuid()),
         group,
         timestamp: Timestamp::from_millis(timestamp),
+        server_at: server_timestamp(content),
         content: message,
         expire_timer,
     })
@@ -450,6 +451,7 @@ fn message_change(content: &Content) -> Option<MessageChange> {
         destination,
         author,
         target: Timestamp::from_millis(target),
+        server_at: server_timestamp(content),
         change,
     })
 }
@@ -667,6 +669,10 @@ fn client_timestamp(content: &Content) -> u64 {
     content.metadata.client_timestamp.timestamp_millis().max(0) as u64
 }
 
+fn server_timestamp(content: &Content) -> Timestamp {
+    Timestamp::from_millis(content.metadata.server_timestamp.timestamp_millis().max(0) as u64)
+}
+
 #[cfg(test)]
 pub(super) mod tests {
     use chrono::{TimeZone as _, Utc};
@@ -695,9 +701,12 @@ pub(super) mod tests {
     /// This account.
     const ME: Uuid = Uuid::from_u128(0x99);
     const KEY: [u8; 32] = [9; 32];
+    /// When the server got [`content`]'s.
+    const SERVER_AT: u64 = 1_700_000_001_000;
 
     pub(in crate::signal) fn content(body: ContentBody) -> Content {
         let at = Utc.timestamp_millis_opt(1_700_000_000_123).unwrap();
+        let server_at = Utc.timestamp_millis_opt(SERVER_AT as i64).unwrap();
         Content {
             metadata: presage::libsignal_service::content::Metadata {
                 sender: Aci::from(SENDER).into(),
@@ -705,7 +714,7 @@ pub(super) mod tests {
                 sender_device: DeviceId::try_from(1u32).unwrap(),
                 pni_verified: None,
                 client_timestamp: at,
-                server_timestamp: at,
+                server_timestamp: server_at,
                 needs_receipt: false,
                 unidentified_sender: true,
                 was_plaintext: false,
@@ -744,6 +753,7 @@ pub(super) mod tests {
                 sender: ServiceId::new(SENDER),
                 group: None,
                 timestamp: Timestamp::from_millis(42),
+                server_at: Timestamp::from_millis(SERVER_AT),
                 content: model::Content::text("hi"),
                 expire_timer: None,
             }))
@@ -1519,6 +1529,7 @@ pub(super) mod tests {
                 }),
                 author: Some(ServiceId::new(SENDER)),
                 target: Timestamp::from_millis(40),
+                server_at: Timestamp::from_millis(SERVER_AT),
                 change: Change::Delete,
             }))
         );
@@ -1537,6 +1548,7 @@ pub(super) mod tests {
                 destination: Destination::Contact(ServiceId::new(SENDER)),
                 author: Some(ServiceId::new(SENDER)),
                 target: Timestamp::from_millis(40),
+                server_at: Timestamp::from_millis(SERVER_AT),
                 change: Change::Edit {
                     content: model::Content::text("fixed"),
                     at: Timestamp::from_millis(45),
@@ -1563,6 +1575,7 @@ pub(super) mod tests {
                 destination: Destination::Contact(ServiceId::new(RECIPIENT)),
                 author: None,
                 target: Timestamp::from_millis(80),
+                server_at: Timestamp::from_millis(SERVER_AT),
                 change: Change::Edit {
                     content: model::Content::text("better"),
                     at: Timestamp::from_millis(90),

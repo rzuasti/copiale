@@ -107,6 +107,7 @@ impl Database {
                 now,
                 &Content::SafetyNumberChanged,
                 None,
+                None,
                 now,
             )
             .await?;

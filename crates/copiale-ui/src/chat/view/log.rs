@@ -577,7 +577,7 @@ fn message_meta(row: &Row<'_>, time: bool, at: &str, cx: &App) -> Vec<AnyElement
     };
     [
         time.then(|| glyph(at.to_owned().into(), muted)),
-        row.message.edited.then(|| glyph("edited".into(), muted)),
+        row.message.edited().then(|| glyph("edited".into(), muted)),
         row.timer.clone().map(|timer| glyph(timer.into(), muted)),
         status.map(|(status, color)| glyph(status.into(), color)),
     ]

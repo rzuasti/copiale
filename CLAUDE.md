@@ -54,6 +54,9 @@ went unsolved until 2011.
     group as last fetched, with this account in it (one fetch first on a
     mismatch); group change lines only from server-signed changes newer
     than the stored group. Edits are text only.
+  - Others' edits and deletes apply only within 48h of the message, by
+    server time (edits from the original, not the last edit); at most 100
+    edits per message (`storage::changes`), 10 of our own sent.
   - Quotes: only which message a reply quotes is stored; its text is shown
     as stored in the same chat, else "original message not found".
   - Message requests: a chat the other side wrote in is a request until

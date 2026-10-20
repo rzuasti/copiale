@@ -240,6 +240,7 @@ mod tests {
             at(sent_at),
             &Content::text("out"),
             None,
+            None,
             Timestamp::from_millis(0),
         )
         .await
@@ -355,6 +356,7 @@ mod tests {
             at(sent_at),
             &Content::text("in"),
             None,
+            Some(at(sent_at)),
             Timestamp::from_millis(0),
         )
         .await
@@ -425,6 +427,7 @@ mod tests {
             at(101),
             &reply,
             None,
+            Some(at(101)),
             at(0),
         )
         .await
@@ -455,6 +458,7 @@ mod tests {
                 at(100),
                 &Content::text("in"),
                 Some(60),
+                Some(at(100)),
                 at(0),
             )
             .await
@@ -484,6 +488,7 @@ mod tests {
             at(10_000),
             &Content::text("in"),
             Some(60),
+            Some(at(10_000)),
             at(20_000),
         )
         .await

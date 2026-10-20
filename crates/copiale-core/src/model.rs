@@ -306,6 +306,8 @@ pub struct MessageChange {
     pub author: Option<ServiceId>,
     /// The message's sent time.
     pub target: Timestamp,
+    /// When the server received it; made here, the local time.
+    pub server_at: Timestamp,
     pub change: Change,
 }
 
@@ -434,6 +436,8 @@ pub struct IncomingMessage {
     /// The group it was sent in; `None` for 1:1.
     pub group: Option<GroupRef>,
     pub timestamp: Timestamp,
+    /// When the server received it.
+    pub server_at: Timestamp,
     pub content: Content,
     /// Disappears this many seconds after being read; `None` if it doesn't.
     pub expire_timer: Option<u32>,
@@ -672,13 +676,20 @@ pub struct Message {
     /// When this device stored it, by the local clock.
     pub received_at: Timestamp,
     pub content: Content,
-    /// Edited by its author since it was sent.
-    pub edited: bool,
+    /// How many times its author edited it since it was sent.
+    pub edits: u32,
     pub read: bool,
     /// Outgoing messages only.
     pub status: Option<MessageStatus>,
     /// Set if the message disappears.
     pub expiry: Option<Expiry>,
+}
+
+impl Message {
+    /// Edited by its author since it was sent.
+    pub fn edited(&self) -> bool {
+        self.edits > 0
+    }
 }
 
 /// When a disappearing message goes.

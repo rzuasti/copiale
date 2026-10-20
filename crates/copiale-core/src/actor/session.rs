@@ -17,7 +17,7 @@ use super::outbox::{Outbox, Outcome, Sent};
 use super::probe::{Check, Probe};
 use super::retries::Limiter;
 use super::run::{Core, ignored};
-use super::{Command, DELETE_WINDOW, EDIT_WINDOW, Event};
+use super::{Command, DELETE_WINDOW, EDIT_WINDOW, Event, MAX_SENT_EDITS};
 use crate::backend::{
     BackendError, Incoming, RetryRequest, SignalBackend, StoredChats, Undecryptable,
 };
@@ -659,6 +659,10 @@ impl<'a, B: SignalBackend> Session<'a, B> {
         let Some((message, destination)) = self.own_sent(id, EDIT_WINDOW).await else {
             return;
         };
+        if message.edits >= MAX_SENT_EDITS {
+            tracing::debug!(message = id.get(), "edit limit reached");
+            return;
+        }
         let Content::Text {
             attachments, quote, ..
         } = &message.content
@@ -677,6 +681,7 @@ impl<'a, B: SignalBackend> Session<'a, B> {
             destination,
             author: None,
             target: message.sent_at,
+            server_at: at,
             change: Change::Edit {
                 content: Content::Text {
                     body: body.clone(),
@@ -711,6 +716,7 @@ impl<'a, B: SignalBackend> Session<'a, B> {
                 destination,
                 author: None,
                 target: message.sent_at,
+                server_at: self.now(),
                 change: Change::Delete,
             };
             if self.apply_own_change(&change).await {
@@ -886,6 +892,7 @@ impl<'a, B: SignalBackend> Session<'a, B> {
             message.timestamp,
             &message.content,
             message.expire_timer,
+            Some(message.server_at),
         )
         .await;
         if let Some(group) = message.group {
@@ -911,6 +918,7 @@ impl<'a, B: SignalBackend> Session<'a, B> {
             message.timestamp,
             &message.content,
             message.expire_timer,
+            None,
         )
         .await;
         if let Destination::Group(group) = message.destination {
@@ -1886,6 +1894,7 @@ impl<'a, B: SignalBackend> Session<'a, B> {
         sent_at: Timestamp,
         content: &Content,
         expire_timer: Option<u32>,
+        server_at: Option<Timestamp>,
     ) {
         let now = self.now();
         if author.is_none()
@@ -1904,7 +1913,15 @@ impl<'a, B: SignalBackend> Session<'a, B> {
         }
         let added = self
             .db
-            .add_message(destination, author, sent_at, content, expire_timer, now)
+            .add_message(
+                destination,
+                author,
+                sent_at,
+                content,
+                expire_timer,
+                server_at,
+                now,
+            )
             .await;
         match added {
             Ok(Some(message)) => {

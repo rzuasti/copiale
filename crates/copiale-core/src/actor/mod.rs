@@ -55,8 +55,8 @@ pub enum Command {
         reply_to: Option<MessageId>,
     },
     /// Replaces the text of our message, within [`EDIT_WINDOW`] of sending
-    /// it: [`Event::MessageUpdated`] at once, then sent in the background,
-    /// or [`Event::ChangeFailed`].
+    /// it and up to [`MAX_SENT_EDITS`] times: [`Event::MessageUpdated`] at
+    /// once, then sent in the background, or [`Event::ChangeFailed`].
     Edit { id: MessageId, body: MessageBody },
     /// Deletes a message: ours for everyone, within [`DELETE_WINDOW`] of
     /// sending it ([`Event::MessageUpdated`]), or any just for this account
@@ -230,6 +230,8 @@ pub enum Event {
 
 /// How long after sending our message it may be edited, as in Signal.
 pub const EDIT_WINDOW: Duration = Duration::from_secs(24 * 3600);
+/// How many times our message may be edited, as in Signal.
+pub const MAX_SENT_EDITS: u32 = 10;
 /// How long after sending our message it may be deleted for everyone.
 pub const DELETE_WINDOW: Duration = Duration::from_secs(24 * 3600);
 

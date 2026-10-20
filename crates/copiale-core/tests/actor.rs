@@ -10,9 +10,9 @@ use copiale_core::{
     Account, AccountSettings, BackendError, BlockedList, Change, ChatRef, ChatState, Command,
     Contact, Content, ConversationId, ConversationSummary, CoreHandle, CoreOptions, Destination,
     Direction, EDIT_WINDOW, Event, Events, Expiry, GroupId, GroupInfo, GroupRef, GroupUpdate,
-    Identity, Incoming, IncomingMessage, Member, Message, MessageBody, MessageChange,
-    MessagePreview, MessageRef, MessageStatus, Outgoing, Peer, PhoneNumber, Quote, Quoted,
-    ReceiptKind, RequestResponse, RetryRequest, SentMessage, StorageFailure, StoredChat,
+    Identity, Incoming, IncomingMessage, MAX_SENT_EDITS, Member, Message, MessageBody,
+    MessageChange, MessagePreview, MessageRef, MessageStatus, Outgoing, Peer, PhoneNumber, Quote,
+    Quoted, ReceiptKind, RequestResponse, RetryRequest, SentMessage, StorageFailure, StoredChat,
     StoredChats, Timestamp, Undecryptable, Verification,
 };
 use copiale_testkit::{
@@ -95,6 +95,7 @@ fn incoming(from: u128, sent_at: u64, body: &str) -> Incoming {
         sender: service_id(from),
         group: None,
         timestamp: Timestamp::from_millis(sent_at),
+        server_at: Timestamp::from_millis(sent_at),
         content: Content::text(body),
         expire_timer: None,
     })
@@ -1543,6 +1544,7 @@ fn group_incoming(group: GroupRef, from: u128, sent_at: u64, body: &str) -> Inco
         sender: service_id(from),
         group: Some(group),
         timestamp: Timestamp::from_millis(sent_at),
+        server_at: Timestamp::from_millis(sent_at),
         content: Content::text(body),
         expire_timer: None,
     })
@@ -1779,6 +1781,7 @@ async fn removed_members_can_no_longer_post_edit_or_delete() {
             destination: Destination::Group(group_ref(1, 3)),
             author: Some(service_id(2)),
             target: Timestamp::from_millis(100),
+            server_at: Timestamp::from_millis(100),
             change,
         })
     };
@@ -1840,6 +1843,7 @@ async fn group_changes_are_shown_once() {
             sender: service_id(1),
             group: Some(group_ref(1, revision)),
             timestamp: Timestamp::from_millis(100 + u64::from(revision)),
+            server_at: Timestamp::from_millis(100 + u64::from(revision)),
             content: Content::GroupChanged(vec![GroupUpdate::Title("Dev".into())]),
             expire_timer: None,
         })
@@ -1903,6 +1907,7 @@ async fn system_lines_and_reactions_arrive_read_but_calls_do_not() {
             sender: service_id(1),
             group: Some(group_ref(1, 0)),
             timestamp: Timestamp::from_millis(sent_at),
+            server_at: Timestamp::from_millis(sent_at),
             content,
             expire_timer: None,
         })
@@ -2190,6 +2195,7 @@ fn changed(from: u128, target: u64, change: Change) -> Incoming {
         destination: Destination::Contact(service_id(from)),
         author: Some(service_id(from)),
         target: Timestamp::from_millis(target),
+        server_at: Timestamp::from_millis(target),
         change,
     })
 }
@@ -2212,7 +2218,7 @@ async fn edits_and_deletes_update_the_message() {
     let edited = message_updated(&mut running.events).await;
     assert_eq!(edited.id, original.id);
     assert_eq!(edited.content, Content::text("the"));
-    assert!(edited.edited);
+    assert!(edited.edited());
     conversation_updated(&mut running.events).await;
 
     running.network.deliver(changed(1, 100, Change::Delete));
@@ -2231,7 +2237,7 @@ async fn changes_before_their_message_apply_on_arrival() {
 
     let message = message_added(&mut running.events).await;
     assert_eq!(message.content, Content::text("final"));
-    assert!(message.edited);
+    assert!(message.edited());
     stop(running).await;
 }
 
@@ -2261,7 +2267,7 @@ async fn changes_before_their_message_are_kept_for_a_day() {
     running.network.deliver(incoming(1, 200, "original"));
     let unchanged = message_added(&mut running.events).await;
     assert_eq!(unchanged.content, Content::text("original"));
-    assert!(!unchanged.edited);
+    assert!(!unchanged.edited());
     stop(running).await;
 }
 
@@ -2283,6 +2289,7 @@ async fn quotes_of_our_messages_name_no_author() {
             sender: service_id(1),
             group: None,
             timestamp: Timestamp::from_millis(sent_at),
+            server_at: Timestamp::from_millis(sent_at),
             content: reply(author),
             expire_timer: None,
         }));
@@ -2315,6 +2322,7 @@ fn reply_to(from: u128, sent_at: u64, quoted: u64) -> Incoming {
         sender: service_id(from),
         group: None,
         timestamp: Timestamp::from_millis(sent_at),
+        server_at: Timestamp::from_millis(sent_at),
         content: Content::Text {
             body: MessageBody::new("yes"),
             attachments: Vec::new(),
@@ -2533,7 +2541,7 @@ async fn own_messages_can_be_edited_and_deleted_for_everyone() {
     );
     let edited = message_updated(&mut running.events).await;
     assert_eq!(edited.content, Content::text("the"));
-    assert!(edited.edited);
+    assert!(edited.edited());
     conversation_updated(&mut running.events).await;
 
     send(
@@ -2569,6 +2577,33 @@ async fn own_messages_can_be_edited_and_deleted_for_everyone() {
             },
         ]
     );
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn own_messages_are_edited_up_to_the_limit() {
+    let (_dir, mut running) = ready().await;
+    let chat = open_chat(&mut running, 2).await;
+    let original = sent_text(&mut running, chat, "v0").await;
+
+    for n in 1..=MAX_SENT_EDITS + 1 {
+        send(
+            &running,
+            Command::Edit {
+                id: original.id,
+                body: MessageBody::new(format!("v{n}")),
+            },
+        );
+    }
+    sync(&mut running).await;
+
+    until(&running, |network| {
+        network.sent().len() == 1 + MAX_SENT_EDITS as usize
+    })
+    .await;
+    let last = running.network.sent().pop().map(|sent| sent.outgoing);
+    let body = MessageBody::new(format!("v{MAX_SENT_EDITS}"));
+    assert!(matches!(last, Some(Outgoing::Edit { body: sent, .. }) if sent == body));
     stop(running).await;
 }
 
@@ -2748,6 +2783,7 @@ fn timed_incoming(from: u128, sent_at: u64, body: &str, seconds: u32) -> Incomin
         sender: service_id(from),
         group: None,
         timestamp: Timestamp::from_millis(sent_at),
+        server_at: Timestamp::from_millis(sent_at),
         content: Content::text(body),
         expire_timer: Some(seconds),
     })
@@ -2934,6 +2970,7 @@ async fn timer_changes_stay_in_the_log() {
         sender: service_id(1),
         group: None,
         timestamp: Timestamp::from_millis(NOW),
+        server_at: Timestamp::from_millis(NOW),
         content: Content::TimerChanged(Some(60)),
         expire_timer: Some(60),
     }));
@@ -3842,6 +3879,7 @@ async fn groups_are_requests_unless_an_accepted_contact_added_us() {
             sender: service_id(by),
             group: Some(group_ref(n, 3)),
             timestamp: Timestamp::from_millis(100),
+            server_at: Timestamp::from_millis(100),
             content: Content::GroupChanged(vec![GroupUpdate::Added(service_id(OWN_ID))]),
             expire_timer: None,
         })

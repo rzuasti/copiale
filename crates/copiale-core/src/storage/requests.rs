@@ -248,6 +248,7 @@ mod tests {
             at(sent_at),
             &content,
             None,
+            Some(at(sent_at)),
             at(0),
         )
         .await

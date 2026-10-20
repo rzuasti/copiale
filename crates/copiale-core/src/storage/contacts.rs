@@ -154,6 +154,7 @@ mod tests {
             Timestamp::from_millis(100),
             &Content::text("hi"),
             None,
+            Some(Timestamp::from_millis(100)),
             Timestamp::from_millis(0),
         )
         .await

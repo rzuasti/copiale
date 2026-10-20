@@ -302,7 +302,7 @@ mod tests {
             sent_at: Timestamp::from_millis(id as u64),
             received_at: Timestamp::from_millis(id as u64),
             content: Content::text(body),
-            edited: false,
+            edits: 0,
             read: false,
             status: None,
             expiry: None,

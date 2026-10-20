@@ -49,7 +49,7 @@ macro_rules! summary_query {
 macro_rules! message_columns {
     () => {
         "id, conversation_id, outgoing, author, sent_at, received_at, body, content, read, status, \
-         delivery, edited_at, expires_in, expires_at"
+         delivery, edits, expires_in, expires_at"
     };
 }
 pub(super) use message_columns;
@@ -86,7 +86,7 @@ pub(super) struct MessageRow {
     read: bool,
     status: Option<String>,
     delivery: Option<String>,
-    edited_at: Option<i64>,
+    edits: i64,
     expires_in: Option<i64>,
     expires_at: Option<i64>,
 }
@@ -120,7 +120,9 @@ impl Database {
     ///
     /// With `expire_timer`, the countdown starts at once for messages that
     /// arrive read: at `sent_at` for ours, `now` for others'. System lines
-    /// don't disappear.
+    /// don't disappear. `server_at`, when the server received others'
+    /// messages, bounds their later changes.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn add_message(
         &self,
         destination: &Destination,
@@ -128,6 +130,7 @@ impl Database {
         sent_at: Timestamp,
         content: &Content,
         expire_timer: Option<u32>,
+        server_at: Option<Timestamp>,
         now: Timestamp,
     ) -> Result<Option<Message>, StorageError> {
         let mut tx = self.begin_write().await?;
@@ -152,6 +155,7 @@ impl Database {
             sent_at,
             content,
             expiry,
+            server_at,
             now,
         )
         .await?;
@@ -193,6 +197,7 @@ impl Database {
             sent_at,
             content,
             expiry,
+            None,
             now,
         )
         .await?;
@@ -703,6 +708,7 @@ pub(super) async fn insert_message(
     sent_at: Timestamp,
     content: &Content,
     expiry: Option<Expiry>,
+    server_at: Option<Timestamp>,
     received_at: Timestamp,
 ) -> Result<Option<Message>, StorageError> {
     let outgoing = author.is_none();
@@ -711,9 +717,9 @@ pub(super) async fn insert_message(
     let (body, json) = content_columns(content)?;
     let id: Option<i64> = sqlx::query_scalar(
         "INSERT INTO messages
-             (conversation_id, outgoing, author, sent_at, received_at, body, content, read, status,
-              expires_in, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             (conversation_id, outgoing, author, sent_at, server_at, received_at, body, content,
+              read, status, expires_in, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT DO NOTHING
          RETURNING id",
     )
@@ -721,6 +727,7 @@ pub(super) async fn insert_message(
     .bind(outgoing)
     .bind(author_bytes.unwrap_or_default())
     .bind(millis(sent_at))
+    .bind(server_at.map(millis))
     .bind(millis(received_at))
     .bind(body)
     .bind(json)
@@ -753,7 +760,7 @@ pub(super) async fn insert_message(
         sent_at,
         received_at,
         content: content.clone(),
-        edited: false,
+        edits: 0,
         read,
         status,
         expiry,
@@ -839,7 +846,7 @@ pub(super) fn message(row: MessageRow) -> Result<Message, StorageError> {
         sent_at: timestamp(row.sent_at),
         received_at: timestamp(row.received_at),
         content: content_from(row.body, row.content)?,
-        edited: row.edited_at.is_some(),
+        edits: u32::try_from(row.edits).unwrap_or(u32::MAX),
         read: row.read,
         status,
         expiry: row.expires_in.map(|timer| Expiry {
@@ -934,6 +941,7 @@ mod tests {
             Timestamp::from_millis(sent_at),
             &Content::text(body),
             None,
+            Some(Timestamp::from_millis(sent_at)),
             Timestamp::from_millis(sent_at),
         )
         .await
@@ -959,6 +967,7 @@ mod tests {
             Timestamp::from_millis(sent_at),
             &Content::text("hi all"),
             None,
+            Some(Timestamp::from_millis(sent_at)),
             Timestamp::from_millis(0),
         )
         .await
@@ -1401,6 +1410,7 @@ mod tests {
             Timestamp::from_millis(sent_at),
             &content,
             None,
+            Some(Timestamp::from_millis(sent_at)),
             Timestamp::from_millis(0),
         )
         .await
@@ -1479,6 +1489,7 @@ mod tests {
                 Timestamp::from_millis(4),
                 &Content::TimerChanged(None),
                 None,
+                None,
                 Timestamp::from_millis(0),
             )
             .await
@@ -1501,6 +1512,7 @@ mod tests {
             at(sent_at),
             &content,
             Some(60),
+            Some(at(sent_at)),
             at(now),
         )
         .await

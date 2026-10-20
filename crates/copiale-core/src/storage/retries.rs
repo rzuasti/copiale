@@ -59,6 +59,7 @@ impl Database {
             sent_at,
             &Content::Undecryptable,
             None,
+            None,
             now,
         )
         .await?;
@@ -193,6 +194,7 @@ mod tests {
             at(sent_at),
             &Content::text("hi"),
             None,
+            None,
             at(sent_at),
         )
         .await
@@ -260,6 +262,7 @@ mod tests {
             at(10),
             &Content::text("hi"),
             None,
+            Some(at(10)),
             at(10),
         )
         .await
@@ -311,6 +314,7 @@ mod tests {
             destination: Destination::Contact(peer(1)),
             author: Some(peer(1)),
             target: at(10),
+            server_at: at(10),
             change: Change::Edit {
                 content: Content::text("edited"),
                 at: at(20),
@@ -328,6 +332,7 @@ mod tests {
                 at(10),
                 &Content::text("original"),
                 None,
+                Some(at(10)),
                 at(70),
             )
             .await
@@ -438,6 +443,7 @@ mod tests {
             destination: Destination::Contact(peer(1)),
             author: None,
             target: at(10),
+            server_at: at(10),
             change: Change::Delete,
         };
         db.apply_change(&delete, at(40)).await.unwrap().unwrap();

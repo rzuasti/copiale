@@ -181,6 +181,7 @@ fn identifiers_and_secrets_are_redacted_in_logs() {
             revision: 1,
         }),
         timestamp: Timestamp::from_millis(1),
+        server_at: Timestamp::from_millis(1),
         content: Content::text(body.as_str()),
         expire_timer: None,
     };
@@ -192,7 +193,7 @@ fn identifiers_and_secrets_are_redacted_in_logs() {
         sent_at: Timestamp::from_millis(1),
         received_at: Timestamp::from_millis(2),
         content: Content::text(body.as_str()),
-        edited: false,
+        edits: 0,
         read: false,
         status: None,
         expiry: None,

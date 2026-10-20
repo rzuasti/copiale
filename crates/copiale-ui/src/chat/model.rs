@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use copiale_core::{
     BackendError, ChatState, Command, Contact, Content, ConversationId, ConversationSummary,
-    DELETE_WINDOW, Direction, EDIT_WINDOW, Event, Identity, Message, MessageBody, MessageId,
-    MessageStatus, Peer, ServiceId, TYPING_TIMEOUT, Timestamp, Verification,
+    DELETE_WINDOW, Direction, EDIT_WINDOW, Event, Identity, MAX_SENT_EDITS, Message, MessageBody,
+    MessageId, MessageStatus, Peer, ServiceId, TYPING_TIMEOUT, Timestamp, Verification,
 };
 
 use super::content::{placeholders, quote_line, system_lines};
@@ -1088,7 +1088,7 @@ impl Chat {
         );
         Actions {
             reply: shown,
-            edit: own_sent && plain_text && within(EDIT_WINDOW),
+            edit: own_sent && plain_text && within(EDIT_WINDOW) && message.edits < MAX_SENT_EDITS,
             delete_for_everyone: own_sent && shown && within(DELETE_WINDOW),
         }
     }
@@ -1487,7 +1487,7 @@ mod tests {
             sent_at: Timestamp::from_millis(sent_at),
             received_at: Timestamp::from_millis(sent_at),
             content: Content::text(format!("message {id}")),
-            edited: false,
+            edits: 0,
             read: outgoing,
             status: outgoing.then_some(MessageStatus::Sent),
             expiry: None,
@@ -2184,6 +2184,13 @@ mod tests {
             ..mine(6, recent)
         };
         assert!(!actions(&image).edit && actions(&image).delete_for_everyone);
+        let edited = |edits| Message {
+            edits,
+            ..mine(7, recent)
+        };
+        assert!(actions(&edited(MAX_SENT_EDITS - 1)).edit);
+        let spent = actions(&edited(MAX_SENT_EDITS));
+        assert!(!spent.edit && spent.delete_for_everyone);
     }
 
     #[test]

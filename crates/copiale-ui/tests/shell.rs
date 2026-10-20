@@ -277,7 +277,7 @@ fn message(id: i64, direction: Direction, status: Option<MessageStatus>) -> Mess
         sent_at: Timestamp::from_millis(id as u64 * 1000),
         received_at: Timestamp::from_millis(id as u64 * 1000),
         content: Content::text(format!("*message* {id}")),
-        edited: false,
+        edits: 0,
         read: true,
         status,
         expiry: None,
@@ -861,7 +861,7 @@ fn renders_every_kind_of_content(cx: &mut TestAppContext) {
         .zip(contents)
         .map(|(id, content)| Message {
             content,
-            edited: id % 2 == 0,
+            edits: u32::from(id % 2 == 0),
             expiry: (id % 3 == 0).then_some(Expiry {
                 timer: 3600,
                 at: None,
