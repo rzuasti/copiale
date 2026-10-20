@@ -37,8 +37,22 @@ impl OsKeychain {
         }
     }
 
-    fn entry(&self) -> Result<keyring::Entry, SecretError> {
-        keyring::Entry::new(&self.service, &self.user).map_err(map_error)
+    #[cfg(not(windows))]
+    fn entry(&self) -> Result<keyring_core::Entry, SecretError> {
+        keyring::Entry::new(&self.service, &self.user)
+            .map(|entry| entry.inner)
+            .map_err(map_error)
+    }
+
+    /// A Local credential: Credential Manager's default, Enterprise, roams
+    /// with domain profiles. Applies when the secret is written.
+    #[cfg(windows)]
+    fn entry(&self) -> Result<keyring_core::Entry, SecretError> {
+        // Sets the default store.
+        keyring::Entry::new(&self.service, &self.user).map_err(map_error)?;
+        let modifiers = std::collections::HashMap::from([("persistence", "Local")]);
+        keyring_core::Entry::new_with_modifiers(&self.service, &self.user, &modifiers)
+            .map_err(map_error)
     }
 }
 
@@ -75,5 +89,18 @@ fn map_error(error: keyring::Error) -> SecretError {
         | keyring::Error::NoStorageAccess(_)
         | keyring::Error::PlatformFailure(_) => SecretError::Unavailable(error.to_string()),
         error => SecretError::Failed(error.to_string()),
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn windows_credentials_stay_on_this_machine() {
+        // Building an entry doesn't touch the store.
+        let entry = OsKeychain::new().entry().unwrap();
+
+        assert!(format!("{entry:?}").contains("persistence: Local"));
     }
 }

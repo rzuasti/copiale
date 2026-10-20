@@ -31,6 +31,8 @@ interprocess = "2.4"
 # GPUI snapshots may break the API between releases; upgrade deliberately.
 gpui-kit = "=0.7.3"
 keyring = "4.2"
+# Entry modifiers; same version as keyring uses.
+keyring-core = "1"
 libc = "0.2"
 log = "0.4"
 notify = "8"
@@ -58,6 +60,8 @@ tracing = "0.1"
 tracing-log = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = "1"
+# Same version as keyring's Windows store.
+windows-sys = "0.61"
 zeroize = "1"
 
 # Patched until upstream merges the changes; see vendor/README.md.

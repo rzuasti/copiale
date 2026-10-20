@@ -1321,6 +1321,7 @@ dependencies = [
  "futures",
  "gethostname",
  "keyring",
+ "keyring-core",
  "libc",
  "log",
  "notify",
@@ -1340,6 +1341,7 @@ dependencies = [
  "tracing-log",
  "tracing-subscriber",
  "uuid",
+ "windows-sys 0.61.2",
  "zeroize",
 ]
 

@@ -15,6 +15,7 @@ directories.workspace = true
 futures.workspace = true
 gethostname.workspace = true
 keyring.workspace = true
+keyring-core.workspace = true
 notify.workspace = true
 presage.workspace = true
 presage-store-sqlite.workspace = true
@@ -34,6 +35,9 @@ zeroize.workspace = true
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_System_ErrorReporting"] }
+
 [dev-dependencies]
 copiale-testkit.workspace = true
 log.workspace = true
@@ -42,3 +46,6 @@ reqwest = { version = "0.13", default-features = false }
 tempfile.workspace = true
 tracing-log.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "macros", "time", "test-util"] }
+
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { workspace = true, features = ["Win32_System_ErrorReporting", "Win32_System_Registry"] }

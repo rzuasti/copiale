@@ -34,8 +34,37 @@ pub fn disable_core_dumps() -> io::Result<()> {
     Ok(())
 }
 
-/// Does nothing yet on Windows.
-#[cfg(not(unix))]
+/// Excludes this executable from Windows Error Reporting, which can keep
+/// a dump locally and upload it; reports still made leave out the heap.
+/// Dumps an administrator enabled through `LocalDumps` are still written.
+#[cfg(windows)]
+pub fn disable_core_dumps() -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::System::ErrorReporting::{
+        WER_FAULT_REPORTING_FLAG_NOHEAP, WerAddExcludedApplication, WerSetFlags,
+    };
+
+    // SAFETY: takes no pointers.
+    let no_heap = check(unsafe { WerSetFlags(WER_FAULT_REPORTING_FLAG_NOHEAP) });
+    let exe = std::env::current_exe()?;
+    let name = exe
+        .file_name()
+        .ok_or_else(|| io::Error::other("no executable name"))?;
+    let name: Vec<u16> = name.encode_wide().chain([0]).collect();
+    // SAFETY: `name` is NUL-terminated; per user, no elevation needed.
+    let excluded = check(unsafe { WerAddExcludedApplication(name.as_ptr(), 0) });
+    no_heap.and(excluded)
+}
+
+#[cfg(windows)]
+fn check(result: windows_sys::core::HRESULT) -> io::Result<()> {
+    if result < 0 {
+        return Err(io::Error::from_raw_os_error(result));
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
 pub fn disable_core_dumps() -> io::Result<()> {
     Ok(())
 }

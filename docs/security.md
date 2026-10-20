@@ -12,11 +12,17 @@ process memory, and the copies it can't control.
     and xdg-desktop-portal then rejects every request ("Unable to open
     /proc/<pid>/root"). It wouldn't stop piped dumps with
     `fs.suid_dumpable = 2` anyway.
-  - Windows: nothing yet; Windows Error Reporting may keep a dump.
-  - `COPIALE_UNSAFE_CORE_DUMPS=1` skips it, for debugging crashes.
+  - Windows: the executable is excluded from Windows Error Reporting for
+    the user (`WerAddExcludedApplication`), and reports still made leave
+    out the heap. Dumps an administrator enables through `LocalDumps` are
+    still written.
+  - `COPIALE_UNSAFE_CORE_DUMPS=1` skips it, for debugging crashes. On
+    Windows the exclusion stays in the registry; use `LocalDumps`.
 - **Database closed on every exit from the core**, panics included:
   SQLCipher frees its global state at exit, crashing connections still
   closing.
+- **Key kept on this machine**: on Windows, a Local credential;
+  Credential Manager's default, Enterprise, roams with domain profiles.
 - **Zeroed on drop**: `DatabaseKey`, `Passphrase`, the keychain secret, and
   Argon2's working memory.
 
