@@ -3,11 +3,11 @@
 
 use super::StorageError;
 use super::database::{Database, database_error};
-use super::messages::{conversation_id, insert_message, millis};
-use crate::backend::Resendable;
-use crate::model::{
-    Content, ConversationId, Destination, GroupId, Message, MessageId, ServiceId, Timestamp,
+use super::messages::{
+    Removed, RemovedRow, conversation_id, insert_message, millis, removed, removed_columns,
 };
+use crate::backend::Resendable;
+use crate::model::{Content, Destination, GroupId, Message, ServiceId, Timestamp};
 
 impl Database {
     /// Stores a placeholder for `sender`'s message sent at `sent_at` that
@@ -72,21 +72,19 @@ impl Database {
         &self,
         author: ServiceId,
         sent_at: Timestamp,
-    ) -> Result<Vec<(ConversationId, MessageId)>, StorageError> {
-        let rows: Vec<(i64, i64)> = sqlx::query_as(
+    ) -> Result<Vec<Removed>, StorageError> {
+        let rows: Vec<RemovedRow> = sqlx::query_as(concat!(
             "DELETE FROM messages WHERE author = ? AND sent_at = ? AND content = ?
-             RETURNING conversation_id, id",
-        )
+             RETURNING ",
+            removed_columns!()
+        ))
         .bind(author.uuid().as_bytes().as_slice())
         .bind(millis(sent_at))
         .bind(placeholder_json()?)
         .fetch_all(&self.app)
         .await
         .map_err(database_error)?;
-        Ok(rows
-            .into_iter()
-            .map(|(conversation, id)| (ConversationId::new(conversation), MessageId::new(id)))
-            .collect())
+        rows.into_iter().map(removed).collect()
     }
 
     /// Keeps a send, at `now`, to resend on request: `sent_at` is its own
@@ -175,8 +173,10 @@ pub(super) fn placeholder_json() -> Result<String, StorageError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Change, GroupInfo, GroupMasterKey, GroupRef, Member, MessageChange};
-    use crate::storage::testing::{at, db, peer};
+    use crate::model::{
+        Change, ConversationId, GroupInfo, GroupMasterKey, GroupRef, Member, MessageChange,
+    };
+    use crate::storage::testing::{at, db, peer, removed_of};
 
     /// Sent to device 1 of each recipient.
     fn resendable(recipients: &[u128], content: &[u8]) -> Resendable {
@@ -290,7 +290,7 @@ mod tests {
         let taken = db.take_placeholders(peer(1), at(10)).await.unwrap();
         let again = db.take_placeholders(peer(1), at(10)).await.unwrap();
 
-        assert_eq!(taken, [(placeholder.conversation, placeholder.id)]);
+        assert_eq!(taken, [removed_of(&placeholder)]);
         assert_eq!(again, []);
         let left = db
             .messages(placeholder.conversation, None, 10)

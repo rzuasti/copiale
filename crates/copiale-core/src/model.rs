@@ -233,25 +233,33 @@ impl fmt::Debug for Content {
     }
 }
 
-/// The message a reply quotes, as the reply carries it. `Debug` hides the
-/// text.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// The message a reply quotes. Only which one is stored; what it says
+/// comes from storage, never from the reply.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Quote {
     /// The quoted message's author; `None` for this account.
     pub author: Option<ServiceId>,
     pub sent_at: Timestamp,
+    /// The quoted message as stored now; `None` if it isn't, e.g. never
+    /// received, deleted or disappeared.
+    #[serde(skip)]
+    pub original: Option<Quoted>,
+}
+
+/// What a quoted text message says. `Debug` hides the text.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Quoted {
     /// Its text, possibly empty.
     pub text: String,
     /// Its first attachment, for quotes of attachments without text.
     pub attachment: Option<Attachment>,
 }
 
-impl fmt::Debug for Quote {
+impl fmt::Debug for Quoted {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Quote")
-            .field("author", &self.author)
-            .field("sent_at", &self.sent_at)
+        f.debug_struct("Quoted")
             .field("text_bytes", &self.text.len())
+            .field("attachment", &self.attachment)
             .finish()
     }
 }

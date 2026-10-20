@@ -11,9 +11,9 @@ use copiale_core::{
     Contact, Content, ConversationId, ConversationSummary, CoreHandle, CoreOptions, Destination,
     Direction, EDIT_WINDOW, Event, Events, Expiry, GroupId, GroupInfo, GroupRef, GroupUpdate,
     Identity, Incoming, IncomingMessage, Member, Message, MessageBody, MessageChange,
-    MessagePreview, MessageRef, MessageStatus, Outgoing, Peer, PhoneNumber, Quote, ReceiptKind,
-    RequestResponse, RetryRequest, SentMessage, StorageFailure, StoredChat, StoredChats, Timestamp,
-    Undecryptable, Verification,
+    MessagePreview, MessageRef, MessageStatus, Outgoing, Peer, PhoneNumber, Quote, Quoted,
+    ReceiptKind, RequestResponse, RetryRequest, SentMessage, StorageFailure, StoredChat,
+    StoredChats, Timestamp, Undecryptable, Verification,
 };
 use copiale_testkit::{
     DEVICE_NAME, FAKE_LINK_URL, FakeNetwork, FakePhone, ManualClock, MemorySecretStore, OWN_ID,
@@ -2274,8 +2274,7 @@ async fn quotes_of_our_messages_name_no_author() {
         quote: Some(Quote {
             author: Some(service_id(author)),
             sent_at: Timestamp::from_millis(50),
-            text: "really?".into(),
-            attachment: None,
+            original: None,
         }),
     };
 
@@ -2306,6 +2305,107 @@ async fn quotes_of_our_messages_name_no_author() {
         panic!("expected a quote");
     };
     assert_eq!(quote.author, Some(service_id(2)));
+    stop(running).await;
+}
+
+/// `from`'s reply at `sent_at` to their message at `quoted`, claiming it
+/// said something else.
+fn reply_to(from: u128, sent_at: u64, quoted: u64) -> Incoming {
+    Incoming::Message(IncomingMessage {
+        sender: service_id(from),
+        group: None,
+        timestamp: Timestamp::from_millis(sent_at),
+        content: Content::Text {
+            body: MessageBody::new("yes"),
+            attachments: Vec::new(),
+            quote: Some(Quote {
+                author: Some(service_id(from)),
+                sent_at: Timestamp::from_millis(quoted),
+                original: Some(Quoted {
+                    text: "send money".into(),
+                    attachment: None,
+                }),
+            }),
+        },
+        expire_timer: None,
+    })
+}
+
+/// What `reply` quotes, as shown: `None` if not found.
+fn quoted(reply: &Message) -> Option<String> {
+    match &reply.content {
+        Content::Text {
+            quote: Some(quote), ..
+        } => quote
+            .original
+            .as_ref()
+            .map(|original| original.text.clone()),
+        other => panic!("expected a reply, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn replies_show_their_original_as_it_is_now() {
+    let (_dir, mut running) = ready().await;
+    running.network.deliver(reply_to(1, 200, 100));
+    let reply = message_added(&mut running.events).await;
+    assert_eq!(quoted(&reply), None, "not the claimed text");
+    conversation_updated(&mut running.events).await;
+
+    running.network.deliver(incoming(1, 100, "teh"));
+    message_added(&mut running.events).await;
+    let updated = message_updated(&mut running.events).await;
+    assert_eq!(updated.id, reply.id);
+    assert_eq!(quoted(&updated).as_deref(), Some("teh"));
+    conversation_updated(&mut running.events).await;
+
+    running.network.deliver(changed(1, 100, edit("the", 150)));
+    message_updated(&mut running.events).await;
+    assert_eq!(
+        quoted(&message_updated(&mut running.events).await).as_deref(),
+        Some("the")
+    );
+    conversation_updated(&mut running.events).await;
+
+    running.network.deliver(changed(1, 100, Change::Delete));
+    message_updated(&mut running.events).await;
+    assert_eq!(quoted(&message_updated(&mut running.events).await), None);
+    conversation_updated(&mut running.events).await;
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn replies_lose_originals_deleted_here() {
+    let (_dir, mut running) = ready().await;
+    running.network.deliver(incoming(1, 100, "bye"));
+    let original = message_added(&mut running.events).await;
+    conversation_updated(&mut running.events).await;
+    running.network.deliver(reply_to(1, 200, 100));
+    let reply = message_added(&mut running.events).await;
+    assert_eq!(quoted(&reply).as_deref(), Some("bye"));
+    conversation_updated(&mut running.events).await;
+
+    running.network.deliver(Incoming::DeletedForMe {
+        messages: vec![MessageRef {
+            chat: ChatRef::Contact(service_id(1)),
+            author: Some(service_id(1)),
+            sent_at: original.sent_at,
+        }],
+        conversations: Vec::new(),
+    });
+
+    expect(
+        &mut running.events,
+        Event::MessageRemoved {
+            conversation: original.conversation,
+            id: original.id,
+        },
+    )
+    .await;
+    let updated = message_updated(&mut running.events).await;
+    assert_eq!(updated.id, reply.id);
+    assert_eq!(quoted(&updated), None);
+    conversation_updated(&mut running.events).await;
     stop(running).await;
 }
 
@@ -2394,8 +2494,10 @@ async fn replies_quote_the_message() {
     let quote = Quote {
         author: Some(service_id(1)),
         sent_at: Timestamp::from_millis(100),
-        text: "ship it?".into(),
-        attachment: None,
+        original: Some(Quoted {
+            text: "ship it?".into(),
+            attachment: None,
+        }),
     };
     assert_eq!(
         reply.content,

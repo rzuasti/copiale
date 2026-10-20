@@ -32,6 +32,7 @@ pub use model::{
     Content, ConversationId, ConversationSummary, Destination, Direction, Expiry, GroupId,
     GroupInfo, GroupMasterKey, GroupMembers, GroupRef, GroupUpdate, Identity, IdentityKey,
     IncomingMessage, Member, Message, MessageBody, MessageChange, MessageId, MessagePreview,
-    MessageRef, MessageStatus, Outgoing, Peer, PhoneNumber, Quote, ReceiptKind, RequestResponse,
-    SafetyNumber, SentMessage, ServiceId, StoredChat, Timestamp, Unsupported, Verification,
+    MessageRef, MessageStatus, Outgoing, Peer, PhoneNumber, Quote, Quoted, ReceiptKind,
+    RequestResponse, SafetyNumber, SentMessage, ServiceId, StoredChat, Timestamp, Unsupported,
+    Verification,
 };

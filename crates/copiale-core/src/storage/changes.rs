@@ -2,7 +2,10 @@
 
 use super::StorageError;
 use super::database::{Database, database_error};
-use super::messages::{content_columns, load_message, millis};
+use super::messages::{
+    Removed, RemovedRow, author_bytes, content_columns, load_message, millis, removed,
+    removed_columns,
+};
 use super::retries::placeholder_json;
 use crate::model::{
     Change, ChatRef, Content, ConversationId, Destination, Message, MessageChange, MessageId,
@@ -82,28 +85,28 @@ impl Database {
         Ok(message)
     }
 
-    /// Deletes messages for good; returns the ones that were stored, by
-    /// conversation.
+    /// Deletes messages for good; returns the ones that were stored.
     pub(crate) async fn delete_messages(
         &self,
         messages: &[MessageRef],
-    ) -> Result<Vec<(ConversationId, MessageId)>, StorageError> {
+    ) -> Result<Vec<Removed>, StorageError> {
         let mut deleted = Vec::new();
         for message in messages {
             let Some(conversation) = self.chat_conversation(message.chat).await? else {
                 continue;
             };
-            let id: Option<i64> = sqlx::query_scalar(
+            let row: Option<RemovedRow> = sqlx::query_as(concat!(
                 "DELETE FROM messages WHERE conversation_id = ? AND author = ? AND sent_at = ?
-                 RETURNING id",
-            )
+                 RETURNING ",
+                removed_columns!()
+            ))
             .bind(conversation.get())
             .bind(author_bytes(message.author))
             .bind(millis(message.sent_at))
             .fetch_optional(&self.app)
             .await
             .map_err(database_error)?;
-            deleted.extend(id.map(|id| (conversation, MessageId::new(id))));
+            deleted.extend(row.map(removed).transpose()?);
         }
         Ok(deleted)
     }
@@ -243,10 +246,6 @@ async fn update(
     Ok(result.rows_affected() > 0)
 }
 
-fn author_bytes(author: Option<crate::model::ServiceId>) -> Vec<u8> {
-    author.map_or_else(Vec::new, |author| author.uuid().as_bytes().to_vec())
-}
-
 fn json(content: &Content) -> Result<String, StorageError> {
     serde_json::to_string(content).map_err(|error| StorageError::Database(error.to_string()))
 }
@@ -254,8 +253,8 @@ fn json(content: &Content) -> Result<String, StorageError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{GroupMasterKey, GroupRef, GroupUpdate, MessageBody, Quote};
-    use crate::storage::testing::{at, db, peer};
+    use crate::model::{GroupMasterKey, GroupRef, GroupUpdate, MessageBody, Quote, Quoted};
+    use crate::storage::testing::{at, db, peer, removed_of};
 
     async fn incoming(db: &Database, from: u128, sent_at: u64, body: &str) -> Option<Message> {
         db.add_message(
@@ -479,35 +478,124 @@ mod tests {
         db.close().await;
     }
 
-    #[tokio::test]
-    async fn quotes_are_kept() {
-        let (_dir, db) = db().await;
-        let reply = Content::Text {
+    /// A reply from `from` at `sent_at` quoting `author`'s message at
+    /// `quoted`, claiming it said `claimed`.
+    async fn reply(
+        db: &Database,
+        from: u128,
+        sent_at: u64,
+        author: Option<u128>,
+        quoted: u64,
+        claimed: &str,
+    ) -> Message {
+        let content = Content::Text {
             body: MessageBody::new("agreed"),
             attachments: Vec::new(),
             quote: Some(Quote {
-                author: Some(peer(2)),
-                sent_at: at(50),
-                text: "ship it?".into(),
-                attachment: None,
+                author: author.map(peer),
+                sent_at: at(quoted),
+                original: Some(Quoted {
+                    text: claimed.into(),
+                    attachment: None,
+                }),
             }),
         };
+        db.add_message(
+            &Destination::Contact(peer(from)),
+            Some(peer(from)),
+            at(sent_at),
+            &content,
+            None,
+            at(0),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+    }
 
-        let message = db
-            .add_message(
-                &Destination::Contact(peer(1)),
-                Some(peer(1)),
-                at(100),
-                &reply,
-                None,
-                Timestamp::from_millis(0),
-            )
+    /// What `message` quotes, as shown: `None` if not found.
+    fn quoted(message: &Message) -> Option<String> {
+        match &message.content {
+            Content::Text {
+                quote: Some(quote), ..
+            } => quote
+                .original
+                .as_ref()
+                .map(|original| original.text.clone()),
+            _ => panic!("expected a reply"),
+        }
+    }
+
+    #[tokio::test]
+    async fn quotes_show_the_stored_original() {
+        let (_dir, db) = db().await;
+        let original = incoming(&db, 1, 50, "ship it?").await.unwrap();
+        db.add_message(
+            &Destination::Contact(peer(1)),
+            None,
+            at(70),
+            &Content::text("mine"),
+            None,
+            at(0),
+        )
+        .await
+        .unwrap();
+        incoming(&db, 2, 50, "elsewhere").await.unwrap();
+
+        let theirs = reply(&db, 1, 100, Some(1), 50, "send money").await;
+        let wrong_author = reply(&db, 1, 101, Some(2), 50, "send money").await;
+        let missing = reply(&db, 1, 102, Some(1), 60, "send money").await;
+        let ours = reply(&db, 1, 103, None, 70, "send money").await;
+        let other_chat = reply(&db, 2, 104, Some(1), 50, "send money").await;
+
+        assert_eq!(quoted(&theirs).as_deref(), Some("ship it?"));
+        assert_eq!(quoted(&wrong_author), None);
+        assert_eq!(quoted(&missing), None);
+        assert_eq!(quoted(&ours).as_deref(), Some("mine"));
+        assert_eq!(quoted(&other_chat), None, "only quotes its own chat");
+        let stored = db.messages(original.conversation, None, 10).await.unwrap();
+        assert_eq!(stored.iter().find(|m| m.id == theirs.id), Some(&theirs));
+        let json: String = sqlx::query_scalar("SELECT content FROM messages WHERE id = ?")
+            .bind(theirs.id.get())
+            .fetch_one(db.pool())
             .await
-            .unwrap()
             .unwrap();
+        assert!(!json.contains("send money") && !json.contains("ship it?"));
+        db.close().await;
+    }
 
-        let stored = db.messages(message.conversation, None, 10).await.unwrap();
-        assert_eq!(stored[0].content, reply);
+    #[tokio::test]
+    async fn replies_follow_their_original() {
+        let (_dir, db) = db().await;
+        let conversation = incoming(&db, 1, 50, "teh").await.unwrap().conversation;
+        incoming(&db, 1, 51, "oops").await.unwrap();
+        let removed = incoming(&db, 1, 52, "bye").await.unwrap();
+        let to_edited = reply(&db, 1, 100, Some(1), 50, "").await;
+        reply(&db, 1, 101, Some(1), 51, "").await;
+        reply(&db, 1, 102, Some(1), 52, "").await;
+        let replies = |sent_at| db.replies(conversation, Some(peer(1)), at(sent_at));
+
+        db.apply_change(&change(1, 50, edit("the", 60)), at(0))
+            .await
+            .unwrap();
+        db.apply_change(&change(1, 51, Change::Delete), at(0))
+            .await
+            .unwrap();
+        db.delete_messages(&[MessageRef {
+            chat: ChatRef::Contact(peer(1)),
+            author: Some(peer(1)),
+            sent_at: removed.sent_at,
+        }])
+        .await
+        .unwrap();
+
+        let to_edited_now = replies(50).await.unwrap();
+        assert_eq!(to_edited_now.len(), 1);
+        assert_eq!(to_edited_now[0].id, to_edited.id);
+        assert_eq!(quoted(&to_edited_now[0]).as_deref(), Some("the"));
+        assert_eq!(quoted(&replies(51).await.unwrap()[0]), None);
+        assert_eq!(quoted(&replies(52).await.unwrap()[0]), None);
+        assert_eq!(db.replies(conversation, None, at(50)).await.unwrap(), []);
         db.close().await;
     }
 
@@ -551,13 +639,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            deleted,
-            [
-                (first.conversation, first.id),
-                (first.conversation, mine.id)
-            ]
-        );
+        assert_eq!(deleted, [removed_of(&first), removed_of(&mine)]);
         let left = db.messages(first.conversation, None, 10).await.unwrap();
         assert_eq!(left.len(), 1);
 

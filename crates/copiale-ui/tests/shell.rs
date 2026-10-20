@@ -10,8 +10,8 @@ use copiale_core::config::{
 use copiale_core::{
     Account, AccountSettings, Attachment, BackendError, ChatState, Command, Contact, Content,
     ConversationId, ConversationSummary, Direction, Event, Expiry, GroupMasterKey, GroupUpdate,
-    Identity, Member, Message, MessageBody, MessageId, MessageStatus, Peer, Quote, SafetyNumber,
-    ServiceId, StorageFailure, Timestamp, Unsupported, Verification,
+    Identity, Member, Message, MessageBody, MessageId, MessageStatus, Peer, Quote, Quoted,
+    SafetyNumber, ServiceId, StorageFailure, Timestamp, Unsupported, Verification,
 };
 use copiale_ui::chat::{
     COMPACT_BELOW, ChatView, Compose, Field, Layout, Notice, NoticeAction, NoticeKey, Overlay,
@@ -850,8 +850,10 @@ fn renders_every_kind_of_content(cx: &mut TestAppContext) {
             quote: Some(Quote {
                 author: None,
                 sent_at: Timestamp::from_millis(1),
-                text: "ship it?".into(),
-                attachment: None,
+                original: Some(Quoted {
+                    text: "ship it?".into(),
+                    attachment: None,
+                }),
             }),
         },
     ];

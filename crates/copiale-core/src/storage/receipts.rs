@@ -141,6 +141,7 @@ impl Database {
                 changed.push(message(row)?);
             }
         }
+        self.resolve_quotes(&mut changed).await?;
         Ok(changed)
     }
 
@@ -226,7 +227,8 @@ impl Database {
 mod tests {
     use super::*;
     use crate::model::{
-        Content, Destination, GroupInfo, GroupMasterKey, GroupRef, Member, MessageStatus,
+        Content, Destination, GroupInfo, GroupMasterKey, GroupRef, Member, MessageBody,
+        MessageStatus, Quote,
     };
     use crate::storage::testing::{at, db, peer};
 
@@ -401,6 +403,45 @@ mod tests {
         assert_eq!(changed, [at(100), at(101)]);
         let summary = db.conversation(first.conversation).await.unwrap().unwrap();
         assert_eq!(summary.unread, 1);
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn reads_elsewhere_fill_in_quotes() {
+        let (_dir, db) = db().await;
+        incoming(&db, 1, 100).await;
+        let reply = Content::Text {
+            body: MessageBody::new("yes"),
+            attachments: Vec::new(),
+            quote: Some(Quote {
+                author: Some(peer(1)),
+                sent_at: at(100),
+                original: None,
+            }),
+        };
+        db.add_message(
+            &Destination::Contact(peer(1)),
+            Some(peer(1)),
+            at(101),
+            &reply,
+            None,
+            at(0),
+        )
+        .await
+        .unwrap();
+
+        let changed = db
+            .mark_read_elsewhere(&[(peer(1), at(101))], at(0))
+            .await
+            .unwrap();
+
+        let Content::Text {
+            quote: Some(quote), ..
+        } = &changed[1].content
+        else {
+            panic!("expected the reply");
+        };
+        assert_eq!(quote.original.as_ref().unwrap().text, "in");
         db.close().await;
     }
 

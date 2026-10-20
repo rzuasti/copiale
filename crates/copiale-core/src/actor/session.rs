@@ -25,7 +25,7 @@ use crate::model::{
     Outgoing, Peer, Quote, ReceiptKind, RequestResponse, SentMessage, ServiceId, Timestamp,
     Verification,
 };
-use crate::storage::{Database, StorageError};
+use crate::storage::{Database, Removed, StorageError};
 
 /// Why serving the account ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -929,7 +929,9 @@ impl<'a, B: SignalBackend> Session<'a, B> {
         match self.db.apply_change(&change, self.now()).await {
             Ok(Some(message)) => {
                 let conversation = message.conversation;
+                let (author, sent_at) = (message.sender, message.sent_at);
                 self.emit(Event::MessageUpdated(message));
+                self.quote_changed(conversation, author, sent_at).await;
                 self.send_conversation(conversation).await;
             }
             Ok(None) => tracing::debug!("change kept or ignored"),
@@ -1580,17 +1582,42 @@ impl<'a, B: SignalBackend> Session<'a, B> {
         }
     }
 
-    /// Reports deleted messages, then their conversations.
-    async fn removed(&self, deleted: Vec<(ConversationId, MessageId)>) {
+    /// Reports deleted messages, replies to them, then their conversations.
+    async fn removed(&self, deleted: Vec<Removed>) {
         let mut changed = Vec::new();
-        for (conversation, id) in deleted {
-            self.emit(Event::MessageRemoved { conversation, id });
-            if !changed.contains(&conversation) {
-                changed.push(conversation);
+        for removed in &deleted {
+            self.emit(Event::MessageRemoved {
+                conversation: removed.conversation,
+                id: removed.id,
+            });
+            if !changed.contains(&removed.conversation) {
+                changed.push(removed.conversation);
             }
+        }
+        for removed in deleted {
+            self.quote_changed(removed.conversation, removed.author, removed.sent_at)
+                .await;
         }
         for conversation in changed {
             self.send_conversation(conversation).await;
+        }
+    }
+
+    /// Reports replies to a message again, as it was stored, changed or
+    /// deleted.
+    async fn quote_changed(
+        &self,
+        conversation: ConversationId,
+        author: Option<ServiceId>,
+        sent_at: Timestamp,
+    ) {
+        match self.db.replies(conversation, author, sent_at).await {
+            Ok(replies) => {
+                for reply in replies {
+                    self.emit(Event::MessageUpdated(reply));
+                }
+            }
+            Err(error) => self.database_error(error),
         }
     }
 
@@ -1768,7 +1795,9 @@ impl<'a, B: SignalBackend> Session<'a, B> {
         match self.db.apply_change(change, self.now()).await {
             Ok(Some(message)) => {
                 let conversation = message.conversation;
+                let (author, sent_at) = (message.sender, message.sent_at);
                 self.emit(Event::MessageUpdated(message));
+                self.quote_changed(conversation, author, sent_at).await;
                 self.send_conversation(conversation).await;
                 true
             }
@@ -1838,6 +1867,8 @@ impl<'a, B: SignalBackend> Session<'a, B> {
                 tracing::debug!(conversation = conversation.get(), "message stored");
                 self.schedule(&message);
                 self.emit(Event::MessageAdded(message));
+                // Replies may arrive first.
+                self.quote_changed(conversation, author, sent_at).await;
                 self.send_conversation(conversation).await;
             }
             Ok(None) => tracing::debug!("duplicate message ignored"),
@@ -1975,20 +2006,12 @@ fn text_of(content: &Content) -> Outgoing {
     }
 }
 
-/// How a reply quotes `message`.
+/// How a reply quotes `message`; storage fills in what it says.
 fn quote_of(message: &Message) -> Option<Quote> {
-    let (text, attachment) = match &message.content {
-        Content::Text {
-            body, attachments, ..
-        } => (body.as_str().to_string(), attachments.first().cloned()),
-        Content::Deleted => return None,
-        _ => (String::new(), None),
-    };
-    Some(Quote {
+    (message.content != Content::Deleted).then_some(Quote {
         author: message.sender,
         sent_at: message.sent_at,
-        text,
-        attachment,
+        original: None,
     })
 }
 

@@ -50,11 +50,18 @@ pub fn quote_line(
     else {
         return None;
     };
-    let text = quote.text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let Some(original) = &quote.original else {
+        return Some("↳ original message not found".into());
+    };
+    let text = original
+        .text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     let quoted = if !text.is_empty() {
         text
     } else {
-        match &quote.attachment {
+        match &original.attachment {
             Some(attachment) => attachment_lines(std::slice::from_ref(attachment))
                 .first()
                 .and_then(|line| line.split(']').next())
@@ -286,8 +293,10 @@ mod tests {
             quote: Some(copiale_core::Quote {
                 author,
                 sent_at: copiale_core::Timestamp::from_millis(1),
-                text: text.into(),
-                attachment,
+                original: Some(copiale_core::Quoted {
+                    text: text.into(),
+                    attachment,
+                }),
             }),
         }
     }
@@ -307,6 +316,23 @@ mod tests {
         assert_eq!(
             quote_line(&reply(None, "", None), author).as_deref(),
             Some("↳ you: …")
+        );
+        let Content::Text {
+            quote: Some(mut quote),
+            ..
+        } = reply(Some(id(2)), "ship it?", None)
+        else {
+            unreachable!();
+        };
+        quote.original = None;
+        let not_found = Content::Text {
+            body: MessageBody::new("yes"),
+            attachments: Vec::new(),
+            quote: Some(quote),
+        };
+        assert_eq!(
+            quote_line(&not_found, author).as_deref(),
+            Some("↳ original message not found")
         );
     }
 

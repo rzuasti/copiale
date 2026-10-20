@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 pub use database::Database;
 pub(crate) use identities::VerifiedKeys;
 pub use key::{DatabaseKey, KdfParams, Passphrase};
+pub(crate) use messages::Removed;
 pub use secrets::{OsKeychain, SecretError, SecretStore};
 
 use key::KeyFile;

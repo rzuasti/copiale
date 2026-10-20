@@ -11,7 +11,7 @@ use super::database::{Database, database_error};
 use crate::model::{
     ChatState, Content, ConversationId, ConversationSummary, Destination, Direction, Expiry,
     GroupId, GroupInfo, GroupMasterKey, GroupRef, Member, Message, MessageBody, MessageId,
-    MessagePreview, MessageStatus, Peer, ServiceId, Timestamp,
+    MessagePreview, MessageStatus, Peer, Quoted, ServiceId, Timestamp,
 };
 
 /// [`SummaryRow`] columns; the peer's names come from presage's tables. A
@@ -92,6 +92,26 @@ pub(super) struct MessageRow {
 }
 
 type DestinationRow = (Option<Vec<u8>>, Option<Vec<u8>>, Option<i64>);
+
+/// [`RemovedRow`] columns.
+macro_rules! removed_columns {
+    () => {
+        "conversation_id, id, author, sent_at"
+    };
+}
+pub(super) use removed_columns;
+
+/// A message deleted from storage.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Removed {
+    pub conversation: ConversationId,
+    pub id: MessageId,
+    /// `None` for this account.
+    pub author: Option<ServiceId>,
+    pub sent_at: Timestamp,
+}
+
+pub(super) type RemovedRow = (i64, i64, Vec<u8>, i64);
 
 impl Database {
     /// Stores a received message, or one sent from another device, unless
@@ -220,7 +240,9 @@ impl Database {
         .fetch_optional(&self.app)
         .await
         .map_err(database_error)?;
-        row.map(message).transpose()
+        let mut message = row.map(message).transpose()?;
+        self.resolve_quotes(message.as_mut_slice()).await?;
+        Ok(message)
     }
 
     /// Marks a failed message pending again; returns it with where it goes,
@@ -238,9 +260,10 @@ impl Database {
         .fetch_optional(&mut *tx)
         .await
         .map_err(database_error)?;
-        let Some(message) = row.map(message).transpose()? else {
+        let Some(mut message) = row.map(message).transpose()? else {
             return Ok(None);
         };
+        resolve_quote(&mut tx, &mut message).await?;
         let destination = load_destination(&mut *tx, message.conversation.get())
             .await?
             .ok_or_else(|| database_error(sqlx::Error::RowNotFound))?;
@@ -387,7 +410,45 @@ impl Database {
         .fetch_all(&self.app)
         .await
         .map_err(database_error)?;
-        rows.into_iter().rev().map(message).collect()
+        let mut messages = rows
+            .into_iter()
+            .rev()
+            .map(message)
+            .collect::<Result<Vec<_>, _>>()?;
+        self.resolve_quotes(&mut messages).await?;
+        Ok(messages)
+    }
+
+    /// Replies in `conversation` quoting `author`'s message sent at
+    /// `sent_at`, oldest first.
+    pub(crate) async fn replies(
+        &self,
+        conversation: ConversationId,
+        author: Option<ServiceId>,
+        sent_at: Timestamp,
+    ) -> Result<Vec<Message>, StorageError> {
+        // Matches `messages_by_quote`, sorted here so SQLite uses it.
+        // Authors are UUID strings, or null for this account.
+        let rows: Vec<MessageRow> = sqlx::query_as(concat!(
+            "SELECT ",
+            message_columns!(),
+            " FROM messages
+             WHERE conversation_id = ?1 AND json_extract(content, '$.text.quote.sent_at') = ?2
+               AND json_extract(content, '$.text.quote.author') IS ?3"
+        ))
+        .bind(conversation.get())
+        .bind(millis(sent_at))
+        .bind(author.map(|author| author.uuid().to_string()))
+        .fetch_all(&self.app)
+        .await
+        .map_err(database_error)?;
+        let mut messages = rows
+            .into_iter()
+            .map(message)
+            .collect::<Result<Vec<_>, _>>()?;
+        messages.sort_by_key(|message| (message.sent_at, message.id));
+        self.resolve_quotes(&mut messages).await?;
+        Ok(messages)
     }
 
     pub(crate) async fn message(&self, id: MessageId) -> Result<Option<Message>, StorageError> {
@@ -418,27 +479,26 @@ impl Database {
             .map(message)
             .collect::<Result<Vec<_>, _>>()?;
         messages.sort_by_key(|message| (message.sent_at, message.id));
+        self.resolve_quotes(&mut messages).await?;
         Ok(messages)
     }
 
     /// Deletes messages whose countdown ended by `now`; returns them by
     /// conversation.
-    pub(crate) async fn expire(
-        &self,
-        now: Timestamp,
-    ) -> Result<Vec<(ConversationId, MessageId)>, StorageError> {
-        let rows: Vec<(i64, i64)> = sqlx::query_as(
-            "DELETE FROM messages WHERE expires_at <= ? RETURNING conversation_id, id",
-        )
+    pub(crate) async fn expire(&self, now: Timestamp) -> Result<Vec<Removed>, StorageError> {
+        let rows: Vec<RemovedRow> = sqlx::query_as(concat!(
+            "DELETE FROM messages WHERE expires_at <= ? RETURNING ",
+            removed_columns!()
+        ))
         .bind(millis(now))
         .fetch_all(&self.app)
         .await
         .map_err(database_error)?;
-        let mut expired: Vec<_> = rows
+        let mut expired = rows
             .into_iter()
-            .map(|(conversation, id)| (ConversationId::new(conversation), MessageId::new(id)))
-            .collect();
-        expired.sort();
+            .map(removed)
+            .collect::<Result<Vec<_>, _>>()?;
+        expired.sort_by_key(|removed| (removed.conversation, removed.id));
         Ok(expired)
     }
 
@@ -450,6 +510,18 @@ impl Database {
                 .await
                 .map_err(database_error)?;
         Ok(at.map(timestamp))
+    }
+
+    /// Fills in what `messages` quote.
+    pub(super) async fn resolve_quotes(
+        &self,
+        messages: &mut [Message],
+    ) -> Result<(), StorageError> {
+        let mut conn = self.app.acquire().await.map_err(database_error)?;
+        for message in messages {
+            resolve_quote(&mut conn, message).await?;
+        }
+        Ok(())
     }
 
     async fn members(&self, conversation: i64) -> Result<Vec<Member>, StorageError> {
@@ -543,7 +615,48 @@ pub(super) async fn load_message(
     .fetch_optional(&mut *conn)
     .await
     .map_err(database_error)?;
-    row.map(message).transpose()
+    let mut message = row.map(message).transpose()?;
+    if let Some(message) = &mut message {
+        resolve_quote(conn, message).await?;
+    }
+    Ok(message)
+}
+
+/// Fills in what `message` quotes: the text message by the quote's author
+/// at its sent time in the same conversation, as stored now.
+pub(super) async fn resolve_quote(
+    conn: &mut sqlx::SqliteConnection,
+    message: &mut Message,
+) -> Result<(), StorageError> {
+    let Content::Text {
+        quote: Some(quote), ..
+    } = &mut message.content
+    else {
+        return Ok(());
+    };
+    let row: Option<(String, Option<String>)> = sqlx::query_as(
+        "SELECT body, content FROM messages
+         WHERE conversation_id = ? AND author = ? AND sent_at = ?",
+    )
+    .bind(message.conversation.get())
+    .bind(author_bytes(quote.author))
+    .bind(millis(quote.sent_at))
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(database_error)?;
+    quote.original = match row
+        .map(|(body, json)| content_from(body, json))
+        .transpose()?
+    {
+        Some(Content::Text {
+            body, attachments, ..
+        }) => Some(Quoted {
+            text: body.as_str().to_string(),
+            attachment: attachments.into_iter().next(),
+        }),
+        _ => None,
+    };
+    Ok(())
 }
 
 /// The conversation with `destination`, created if new.
@@ -632,7 +745,7 @@ pub(super) async fn insert_message(
     .await
     .map_err(database_error)?;
 
-    Ok(Some(Message {
+    let mut message = Message {
         id: MessageId::new(id),
         conversation: ConversationId::new(conversation),
         direction: direction(outgoing),
@@ -644,7 +757,9 @@ pub(super) async fn insert_message(
         read,
         status,
         expiry,
-    }))
+    };
+    resolve_quote(tx, &mut message).await?;
+    Ok(Some(message))
 }
 
 /// The `body` and `content` columns for `content`.
@@ -734,6 +849,24 @@ pub(super) fn message(row: MessageRow) -> Result<Message, StorageError> {
     })
 }
 
+pub(super) fn removed(
+    (conversation, id, author, sent_at): RemovedRow,
+) -> Result<Removed, StorageError> {
+    Ok(Removed {
+        conversation: ConversationId::new(conversation),
+        id: MessageId::new(id),
+        author: (!author.is_empty())
+            .then(|| service_id(&author))
+            .transpose()?,
+        sent_at: timestamp(sent_at),
+    })
+}
+
+/// The `author` column's value: empty for this account.
+pub(super) fn author_bytes(author: Option<ServiceId>) -> Vec<u8> {
+    author.map_or_else(Vec::new, |author| author.uuid().as_bytes().to_vec())
+}
+
 pub(super) fn service_id(peer: &[u8]) -> Result<ServiceId, StorageError> {
     Uuid::from_slice(peer)
         .map(ServiceId::new)
@@ -785,7 +918,7 @@ mod tests {
     use super::*;
     use crate::model::{Attachment, GroupUpdate, Unsupported};
     use crate::storage::DatabaseKey;
-    use crate::storage::testing::{at, db, peer};
+    use crate::storage::testing::{at, db, peer, removed_of};
 
     async fn add(
         db: &Database,
@@ -1460,18 +1593,71 @@ mod tests {
         assert_eq!(db.next_expiry().await.unwrap(), Some(at(61_000)));
 
         assert!(db.expire(at(60_999)).await.unwrap().is_empty());
-        assert_eq!(
-            db.expire(at(61_000)).await.unwrap(),
-            [(first.conversation, first.id)]
-        );
+        assert_eq!(db.expire(at(61_000)).await.unwrap(), [removed_of(&first)]);
         assert_eq!(db.message(first.id).await.unwrap(), None);
         assert_eq!(db.next_expiry().await.unwrap(), Some(at(62_000)));
-        assert_eq!(
-            db.expire(at(100_000)).await.unwrap(),
-            [(second.conversation, second.id)]
-        );
+        assert_eq!(db.expire(at(100_000)).await.unwrap(), [removed_of(&second)]);
         assert_eq!(db.next_expiry().await.unwrap(), None);
         assert!(db.message(kept.id).await.unwrap().is_some());
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn stored_quote_texts_are_dropped() {
+        let (_dir, db) = db().await;
+        let original = add(&db, 1, Direction::Incoming, 50, "ship it?")
+            .await
+            .unwrap();
+        let reply = add(&db, 1, Direction::Incoming, 100, "agreed")
+            .await
+            .unwrap();
+        let old = format!(
+            r#"{{"text":{{"body":"agreed","attachments":[],"quote":{{"author":"{}","sent_at":50,"text":"forged","attachment":"image"}}}}}}"#,
+            peer(1).uuid()
+        );
+        sqlx::query("UPDATE messages SET content = ? WHERE id = ?")
+            .bind(&old)
+            .bind(reply.id.get())
+            .execute(db.pool())
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO pending_changes (author, target, content, edited_at, received_at)
+             VALUES (x'', 1, ?, 2, 0)",
+        )
+        .bind(&old)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let migration = include_str!("../../migrations/20261026120000_quotes.sql");
+        sqlx::raw_sql("DROP INDEX messages_by_quote")
+            .execute(db.pool())
+            .await
+            .unwrap();
+        sqlx::raw_sql(migration).execute(db.pool()).await.unwrap();
+
+        let left: Vec<String> = sqlx::query_scalar(
+            "SELECT content FROM messages WHERE content IS NOT NULL
+             UNION ALL SELECT content FROM pending_changes",
+        )
+        .fetch_all(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(left.len(), 2);
+        assert!(left.iter().all(|json| !json.contains("forged")
+            && !json.contains("image")
+            && json.contains("sent_at")));
+        let Content::Text {
+            quote: Some(quote), ..
+        } = db.message(reply.id).await.unwrap().unwrap().content
+        else {
+            panic!("expected a quote");
+        };
+        assert_eq!(
+            quote.original.map(|original| original.text).as_deref(),
+            original.content.body().map(MessageBody::as_str)
+        );
         db.close().await;
     }
 

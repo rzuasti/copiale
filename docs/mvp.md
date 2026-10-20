@@ -93,7 +93,8 @@ Scope, UI design, architecture and work items for the first usable release.
 - Typing: `alice is typing…` as a line after the last message, replaced by
   their message or removed when they stop; `typing…` in the chat list.
 - Quoted replies render as a one-line muted quote above the message, e.g.
-  `↳ alice: ship it?`.
+  `↳ alice: ship it?`, showing the quoted message as stored now, or
+  `↳ original message not found`.
 - Edits replace the text and add a muted `edited`; remote deletes leave a
   muted `this message was deleted`. "Delete for me" on another device removes
   the message, or the whole chat, here too.

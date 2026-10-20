@@ -948,7 +948,10 @@ fn proto_quote(quote: Quote, me: uuid::Uuid) -> data_message::Quote {
     data_message::Quote {
         id: Some(quote.sent_at.as_millis()),
         author_aci: Some(quote.author.map_or(me, |author| author.uuid()).to_string()),
-        text: (!quote.text.is_empty()).then_some(quote.text),
+        text: quote
+            .original
+            .map(|original| original.text)
+            .filter(|text| !text.is_empty()),
         r#type: Some(data_message::quote::Type::Normal.into()),
         ..Default::default()
     }
@@ -965,13 +968,20 @@ mod tests {
         let quote = |author| Quote {
             author,
             sent_at: Timestamp::from_millis(50),
-            text: "ship it?".into(),
-            attachment: None,
+            original: Some(crate::model::Quoted {
+                text: "ship it?".into(),
+                attachment: None,
+            }),
         };
         let theirs = proto_quote(quote(Some(ServiceId::new(OTHER))), SENDER);
         assert_eq!(theirs.author_aci, Some(OTHER.to_string()));
         assert_eq!(theirs.id, Some(50));
         assert_eq!(theirs.text.as_deref(), Some("ship it?"));
+        let gone = Quote {
+            original: None,
+            ..quote(None)
+        };
+        assert_eq!(proto_quote(gone, SENDER).text, None);
         let ours = proto_quote(quote(None), SENDER);
         assert_eq!(
             ours.author_aci,

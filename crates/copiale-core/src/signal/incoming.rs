@@ -552,28 +552,17 @@ fn attachment_kind(kind: &str, flags: u32, file_name: Option<&str>) -> Attachmen
     }
 }
 
-/// The message a reply quotes; `None` without its author or time.
+/// The message a reply quotes; `None` without its author or time. What the
+/// reply says it said is ignored: it's shown as stored.
 pub(super) fn quote(quote: &data_message::Quote) -> Option<Quote> {
     let author = service_id(
         quote.author_aci_binary.as_deref(),
         quote.author_aci.as_deref(),
     )?;
-    let attachment = quote.attachments.first().map(|attachment| {
-        attachment_kind(
-            attachment.content_type.as_deref().unwrap_or(""),
-            attachment
-                .thumbnail
-                .as_ref()
-                .and_then(|t| t.flags)
-                .unwrap_or(0),
-            attachment.file_name.as_deref(),
-        )
-    });
     Some(Quote {
         author: Some(author),
         sent_at: Timestamp::from_millis(quote.id?),
-        text: quote.text.clone().unwrap_or_default(),
-        attachment,
+        original: None,
     })
 }
 
@@ -1468,7 +1457,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn replies_carry_their_quote() {
+    fn replies_name_the_quoted_message_only() {
         let message = DataMessage {
             body: Some("agreed".into()),
             quote: Some(data_message::Quote {
@@ -1497,14 +1486,18 @@ pub(super) mod tests {
                 quote: Some(Quote {
                     author: Some(ServiceId::new(OTHER)),
                     sent_at: Timestamp::from_millis(50),
-                    text: "ship it?".into(),
-                    attachment: None,
+                    original: None,
                 }),
             })
         );
-        let quoted = quote(&attachment_only).unwrap();
-        assert_eq!(quoted.text, "");
-        assert_eq!(quoted.attachment, Some(Attachment::Image));
+        assert_eq!(
+            quote(&attachment_only),
+            Some(Quote {
+                author: Some(ServiceId::new(OTHER)),
+                sent_at: Timestamp::from_millis(51),
+                original: None,
+            })
+        );
         assert_eq!(quote(&data_message::Quote::default()), None);
     }
 

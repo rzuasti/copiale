@@ -1372,9 +1372,15 @@ impl Chat {
             log.forget(message.id);
         }
         match error {
-            Some(error) => log.errors.insert(message.id, error),
-            None => log.errors.remove(&message.id),
-        };
+            Some(error) => {
+                log.errors.insert(message.id, error);
+            }
+            // Still failed, e.g. its quote changed: the error stands.
+            None if message.status == Some(MessageStatus::Failed) => {}
+            None => {
+                log.errors.remove(&message.id);
+            }
+        }
         Effects::log(LogChange::Changed(ix))
     }
 }
@@ -1800,6 +1806,11 @@ mod tests {
         assert_eq!(row.message, &failed);
         assert_eq!(row.error, Some(&BackendError::new("offline")));
         assert!(matches!(chat.retry(pending.id), Some(Command::RetrySend(id)) if id == pending.id));
+        chat.apply(&Event::MessageUpdated(failed.clone()), true);
+        assert_eq!(
+            chat.row(0).unwrap().error,
+            Some(&BackendError::new("offline"))
+        );
 
         chat.apply(&Event::MessageUpdated(pending.clone()), true);
         assert_eq!(chat.row(0).unwrap().error, None);
