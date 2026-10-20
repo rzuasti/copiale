@@ -8,9 +8,10 @@ use std::time::Duration;
 
 use copiale_core::storage::{Database, SecretError, SecretStore};
 use copiale_core::{
-    BackendError, Clock, Contact, Destination, GroupInfo, GroupMasterKey, GroupMembers,
-    IdentityKey, Incoming, Linker, MessageBody, Outgoing, PeerIdentity, Resendable, RetryRequest,
-    SafetyNumber, ServiceId, SignalBackend, Timestamp,
+    BackendError, BlockedList, ChatRef, Clock, Contact, Destination, GroupInfo, GroupMasterKey,
+    GroupMembers, IdentityKey, Incoming, Linker, MessageBody, Outgoing, PeerIdentity,
+    RequestResponse, Resendable, RetryRequest, SafetyNumber, ServiceId, SignalBackend, StoredChats,
+    Timestamp,
 };
 use futures::future::LocalBoxFuture;
 use futures::stream::LocalBoxStream;
@@ -145,6 +146,16 @@ struct State {
     identities: HashMap<ServiceId, IdentityKey>,
     /// Devices of each account, if not only device 1.
     devices: HashMap<ServiceId, Vec<u32>>,
+    /// Answers to message requests synced to other devices.
+    request_responses: Vec<(ChatRef, RequestResponse)>,
+    /// Blocked lists synced to other devices.
+    blocked_syncs: Vec<BlockedList>,
+    blocked_sync_requests: usize,
+    /// Accounts this account's profile was shared with.
+    profile_keys_sent: Vec<ServiceId>,
+    /// Storage Service's chats, if any.
+    stored: Option<StoredChats>,
+    stored_reads: usize,
 }
 
 type DeletedForMe = (Destination, Vec<(Option<ServiceId>, Timestamp)>);
@@ -429,6 +440,55 @@ impl SignalBackend for FakeBackend {
     ) -> LocalBoxFuture<'static, Result<(), BackendError>> {
         self.record(|state| state.typing.push((destination, typing)));
         async { Ok(()) }.boxed_local()
+    }
+
+    fn sync_request_response(
+        &mut self,
+        chat: ChatRef,
+        response: RequestResponse,
+    ) -> LocalBoxFuture<'static, Result<(), BackendError>> {
+        self.record(|state| state.request_responses.push((chat, response)));
+        async { Ok(()) }.boxed_local()
+    }
+
+    fn sync_blocked(
+        &mut self,
+        list: BlockedList,
+    ) -> LocalBoxFuture<'static, Result<(), BackendError>> {
+        self.record(|state| state.blocked_syncs.push(list));
+        async { Ok(()) }.boxed_local()
+    }
+
+    /// Counted once sent: hangs while the network is down.
+    fn request_blocked_sync(&mut self) -> LocalBoxFuture<'static, Result<(), BackendError>> {
+        self.sync_request(|state| state.blocked_sync_requests += 1)
+    }
+
+    fn send_profile_key(
+        &mut self,
+        peer: ServiceId,
+    ) -> LocalBoxFuture<'static, Result<(), BackendError>> {
+        self.record(|state| state.profile_keys_sent.push(peer));
+        async { Ok(()) }.boxed_local()
+    }
+
+    /// The scripted chats, unless at `known`; fails while offline.
+    fn stored_chats(
+        &mut self,
+        known: Option<u64>,
+    ) -> LocalBoxFuture<'static, Result<Option<StoredChats>, BackendError>> {
+        let offline = self.link.borrow().offline;
+        let stored = self.record(|state| {
+            state.stored_reads += 1;
+            state.stored.clone()
+        });
+        async move {
+            if offline {
+                return Err(BackendError::network("offline"));
+            }
+            Ok(stored.filter(|stored| Some(stored.version) != known))
+        }
+        .boxed_local()
     }
 
     /// Fails as scripted; otherwise counted once sent, hanging while the
@@ -736,6 +796,35 @@ impl FakeNetwork {
     /// Null messages sent so far, by recipient.
     pub fn null_messages(&self) -> Vec<ServiceId> {
         self.state.lock().unwrap().null_messages.clone()
+    }
+
+    /// Answers to message requests synced to the account's other devices.
+    pub fn request_responses(&self) -> Vec<(ChatRef, RequestResponse)> {
+        self.state.lock().unwrap().request_responses.clone()
+    }
+
+    /// Blocked lists synced to the account's other devices.
+    pub fn blocked_syncs(&self) -> Vec<BlockedList> {
+        self.state.lock().unwrap().blocked_syncs.clone()
+    }
+
+    pub fn blocked_sync_requests(&self) -> usize {
+        self.state.lock().unwrap().blocked_sync_requests
+    }
+
+    /// Accounts this account's profile was shared with.
+    pub fn profile_keys_sent(&self) -> Vec<ServiceId> {
+        self.state.lock().unwrap().profile_keys_sent.clone()
+    }
+
+    /// Sets what Storage Service holds.
+    pub fn set_stored_chats(&self, stored: StoredChats) {
+        self.state.lock().unwrap().stored = Some(stored);
+    }
+
+    /// Storage Service reads so far.
+    pub fn stored_reads(&self) -> usize {
+        self.state.lock().unwrap().stored_reads
     }
 
     /// Saves contacts to presage's store, as a sync from the phone does, and

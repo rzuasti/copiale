@@ -124,7 +124,8 @@ impl Database {
         Ok(Some(conversation))
     }
 
-    async fn chat_conversation(
+    /// The conversation `chat` names, if any.
+    pub(crate) async fn chat_conversation(
         &self,
         chat: ChatRef,
     ) -> Result<Option<ConversationId>, StorageError> {

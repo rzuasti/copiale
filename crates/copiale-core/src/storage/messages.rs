@@ -9,27 +9,39 @@ use super::changes::apply_pending;
 use super::contacts::display_name;
 use super::database::{Database, database_error};
 use crate::model::{
-    Content, ConversationId, ConversationSummary, Destination, Direction, Expiry, GroupId,
-    GroupInfo, GroupMasterKey, GroupRef, Member, Message, MessageBody, MessageId, MessagePreview,
-    MessageStatus, Peer, ServiceId, Timestamp,
+    ChatState, Content, ConversationId, ConversationSummary, Destination, Direction, Expiry,
+    GroupId, GroupInfo, GroupMasterKey, GroupRef, Member, Message, MessageBody, MessageId,
+    MessagePreview, MessageStatus, Peer, ServiceId, Timestamp,
 };
 
 /// [`SummaryRow`] columns; the peer's names come from presage's tables. A
-/// macro so queries stay string literals, which sqlx requires.
+/// conversation is a request once the other side wrote, a changed safety
+/// number aside, until accepted (`chat_states`). A macro so queries stay
+/// string literals, which sqlx requires.
 macro_rules! summary_query {
     () => {
         "SELECT c.id, c.peer, c.group_id, c.group_title, c.last_activity,
                 (SELECT count(*) FROM messages u WHERE u.conversation_id = c.id AND u.read = 0)
                     AS unread,
                 m.outgoing, m.body, m.content,
-                ct.name AS contact_name, p.given_name, p.family_name
+                ct.name AS contact_name, p.given_name, p.family_name,
+                CASE
+                    WHEN coalesce(s.blocked, 0) THEN 'blocked'
+                    WHEN coalesce(s.accepted, 0) OR NOT EXISTS (
+                        SELECT 1 FROM messages i
+                        WHERE i.conversation_id = c.id AND i.outgoing = 0
+                          AND i.content IS NOT '\"safety_number_changed\"'
+                    ) THEN 'accepted'
+                    ELSE 'request'
+                END AS state
          FROM conversations c
          LEFT JOIN messages m ON m.id = (
              SELECT id FROM messages WHERE conversation_id = c.id
              ORDER BY sent_at DESC, id DESC LIMIT 1
          )
          LEFT JOIN contacts ct ON ct.uuid = c.peer
-         LEFT JOIN profiles p ON p.uuid = c.peer"
+         LEFT JOIN profiles p ON p.uuid = c.peer
+         LEFT JOIN chat_states s ON s.chat = coalesce(c.peer, c.group_id)"
     };
 }
 
@@ -57,6 +69,7 @@ struct SummaryRow {
     contact_name: Option<String>,
     given_name: Option<String>,
     family_name: Option<String>,
+    state: String,
 }
 
 #[derive(sqlx::FromRow)]
@@ -500,9 +513,15 @@ fn summary(row: SummaryRow, members: Vec<Member>) -> Result<ConversationSummary,
         }
         (None, None) => return Err(StorageError::Database("conversation without peer".into())),
     };
+    let state = match row.state.as_str() {
+        "blocked" => ChatState::Blocked,
+        "request" => ChatState::Request,
+        _ => ChatState::Accepted,
+    };
     Ok(ConversationSummary {
         id: ConversationId::new(row.id),
         peer,
+        state,
         title,
         members,
         last_activity: row.last_activity.map(timestamp),
@@ -1476,6 +1495,7 @@ mod tests {
         let summary = ConversationSummary {
             id: ConversationId::new(1),
             peer: Peer::Contact(peer(1)),
+            state: ChatState::Accepted,
             title: Some("Alice Secret".into()),
             members: Vec::new(),
             last_activity: None,

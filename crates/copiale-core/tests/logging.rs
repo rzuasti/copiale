@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use copiale_core::logging::{DEFAULT_FILTER, Options, subscriber};
 use copiale_core::storage::{DatabaseKey, Passphrase};
 use copiale_core::{
-    Command, Content, ConversationId, ConversationSummary, Direction, Event, GroupId,
+    ChatState, Command, Content, ConversationId, ConversationSummary, Direction, Event, GroupId,
     GroupMasterKey, GroupRef, IncomingMessage, Member, Message, MessageBody, MessageId, Peer,
     PhoneNumber, ServiceId, Timestamp,
 };
@@ -184,6 +184,7 @@ fn identifiers_and_secrets_are_redacted_in_logs() {
     let summary = Event::ConversationUpdated(ConversationSummary {
         id: ConversationId::new(1),
         peer: Peer::Contact(service_id),
+        state: ChatState::Accepted,
         title: Some("Alice Liddell".into()),
         members: vec![Member {
             id: service_id,

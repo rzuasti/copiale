@@ -6,9 +6,9 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use copiale_core::{
-    BackendError, Command, Contact, Content, ConversationId, ConversationSummary, DELETE_WINDOW,
-    Direction, EDIT_WINDOW, Event, Identity, Message, MessageBody, MessageId, MessageStatus, Peer,
-    ServiceId, TYPING_TIMEOUT, Timestamp, Verification,
+    BackendError, ChatState, Command, Contact, Content, ConversationId, ConversationSummary,
+    DELETE_WINDOW, Direction, EDIT_WINDOW, Event, Identity, Message, MessageBody, MessageId,
+    MessageStatus, Peer, ServiceId, TYPING_TIMEOUT, Timestamp, Verification,
 };
 
 use super::content::{placeholders, quote_line, system_lines};
@@ -108,6 +108,14 @@ pub enum Compose {
     New,
     Reply(MessageId),
     Edit(MessageId),
+}
+
+/// What the open chat shows in place of the composer until accepted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RequestBanner {
+    pub text: String,
+    /// Offers unblocking, rather than accepting and blocking.
+    pub blocked: bool,
 }
 
 /// What covers the window, taking the keyboard.
@@ -704,7 +712,87 @@ impl Chat {
             .iter()
             .filter(|summary| self.listed(summary) && Some(summary.id) != self.open_id())
             .map(|summary| (summary.id, title(summary)));
-        palette::entries(chats, self.safety_number_entries(), &self.picker.query)
+        let block = self
+            .open_conversation()
+            .filter(|summary| summary.state == ChatState::Accepted)
+            .map(|summary| (PaletteAction::Block(summary.id), "Block".to_owned()));
+        let contextual = self
+            .request_entries()
+            .into_iter()
+            .chain(self.safety_number_entries())
+            .chain(block);
+        palette::entries(chats, contextual, &self.picker.query)
+    }
+
+    /// Answers to the open chat's request, or unblocking it, as palette
+    /// entries.
+    fn request_entries(&self) -> Vec<(PaletteAction, String)> {
+        let Some(summary) = self.open_conversation() else {
+            return Vec::new();
+        };
+        let id = summary.id;
+        match summary.state {
+            ChatState::Request => vec![
+                (PaletteAction::Accept(id), "Accept request".into()),
+                (PaletteAction::DeleteRequest(id), "Delete request".into()),
+                (PaletteAction::Block(id), "Block".into()),
+            ],
+            ChatState::Blocked => vec![
+                (PaletteAction::Unblock(id), "Unblock".into()),
+                (PaletteAction::DeleteRequest(id), "Delete chat".into()),
+            ],
+            ChatState::Accepted => Vec::new(),
+        }
+    }
+
+    /// Why the open chat has no composer, while it's a request or blocked.
+    pub fn request_banner(&self) -> Option<RequestBanner> {
+        let summary = self.open_conversation()?;
+        let group = matches!(summary.peer, Peer::Group(_));
+        let name = title(summary);
+        let text = match (summary.state, group) {
+            (ChatState::Accepted, _) => return None,
+            (ChatState::Request, false) => format!(
+                "{name} isn't in your contacts. Accept to reply and share your profile with them."
+            ),
+            (ChatState::Request, true) => "You haven't accepted this group. Accept to reply and \
+                 share your profile with its members."
+                .into(),
+            (ChatState::Blocked, false) => {
+                format!("You blocked {name}. Messages from them are dropped.")
+            }
+            (ChatState::Blocked, true) => {
+                "You blocked this group. Its messages are dropped.".into()
+            }
+        };
+        Some(RequestBanner {
+            text,
+            blocked: summary.state == ChatState::Blocked,
+        })
+    }
+
+    /// Accepts the open chat's request.
+    pub fn accept_request(&self) -> Option<Command> {
+        let summary = self.open_conversation()?;
+        (summary.state == ChatState::Request).then_some(Command::Accept(summary.id))
+    }
+
+    /// Unblocks the open chat.
+    pub fn unblock(&self) -> Option<Command> {
+        let summary = self.open_conversation()?;
+        (summary.state == ChatState::Blocked).then_some(Command::Accept(summary.id))
+    }
+
+    /// Blocks the open chat.
+    pub fn block(&self) -> Option<Command> {
+        let summary = self.open_conversation()?;
+        (summary.state != ChatState::Blocked).then_some(Command::Block(summary.id))
+    }
+
+    /// Deletes the open chat, while it's a request or blocked.
+    pub fn delete_request(&self) -> Option<Command> {
+        let summary = self.open_conversation()?;
+        (summary.state != ChatState::Accepted).then_some(Command::DeleteRequest(summary.id))
     }
 
     /// The open 1:1 chat's safety number, or in a group, those of members
@@ -955,6 +1043,9 @@ impl Chat {
     /// The command for the composer's text: a message, reply or edit.
     /// Ends a reply or edit.
     pub fn submit(&mut self, text: &str) -> Option<Command> {
+        if self.request_banner().is_some() {
+            return None;
+        }
         let log = self.open.as_mut()?;
         let text = text.trim();
         if text.is_empty() {
@@ -1371,6 +1462,7 @@ mod tests {
         ConversationSummary {
             id: ConversationId::new(id),
             peer: Peer::Contact(peer(id as u128)),
+            state: ChatState::Accepted,
             title: title.map(Into::into),
             members: Vec::new(),
             last_activity: Some(Timestamp::from_millis(activity)),
@@ -2476,8 +2568,8 @@ mod tests {
         chat.toggle_palette();
         assert_eq!(chat.overlay(), Some(Overlay::Palette));
         assert_eq!(
-            &palette_labels(&chat)[..4],
-            ["Bob", "Carol", "Safety number", "New chat"]
+            &palette_labels(&chat)[..5],
+            ["Bob", "Carol", "Safety number", "Block", "New chat"]
         );
         assert_eq!(chat.picker_selected(), Some(0));
 
@@ -2627,6 +2719,101 @@ mod tests {
         assert_eq!(
             safety_entries(&chat),
             ["Safety number: Bob", "Safety number: Unknown (0003)"]
+        );
+    }
+
+    fn command_labels(chat: &Chat) -> Vec<String> {
+        chat.palette_entries()
+            .into_iter()
+            .filter(|entry| !matches!(entry.action, PaletteAction::Open(_)))
+            .map(|entry| entry.label)
+            .collect()
+    }
+
+    fn in_state(chat: &mut Chat, state: ChatState) {
+        let summary = ConversationSummary {
+            state,
+            ..summary(1, NOW, 1, Some("Alice"))
+        };
+        chat.apply(&Event::ConversationUpdated(summary), true);
+    }
+
+    #[test]
+    fn requests_offer_answers_instead_of_the_composer() {
+        let mut chat = opened(Vec::new());
+        in_state(&mut chat, ChatState::Request);
+
+        let banner = chat.request_banner().unwrap();
+        assert_eq!(
+            banner.text,
+            "Alice isn't in your contacts. Accept to reply and share your profile with them."
+        );
+        assert!(!banner.blocked);
+        assert!(chat.submit("hi").is_none());
+        assert!(matches!(chat.accept_request(), Some(Command::Accept(id)) if id.get() == 1));
+        assert!(matches!(
+            chat.delete_request(),
+            Some(Command::DeleteRequest(_))
+        ));
+        assert!(matches!(chat.block(), Some(Command::Block(_))));
+        assert!(chat.unblock().is_none());
+        chat.toggle_palette();
+        assert_eq!(
+            &command_labels(&chat)[..4],
+            ["Accept request", "Delete request", "Block", "Safety number"]
+        );
+        chat.close_overlay();
+
+        in_state(&mut chat, ChatState::Accepted);
+        assert!(chat.request_banner().is_none());
+        assert!(chat.accept_request().is_none());
+        assert!(chat.delete_request().is_none());
+        assert!(chat.submit("hi").is_some());
+    }
+
+    #[test]
+    fn blocked_chats_offer_unblocking() {
+        let mut chat = opened(Vec::new());
+        in_state(&mut chat, ChatState::Blocked);
+
+        let banner = chat.request_banner().unwrap();
+        assert_eq!(
+            banner.text,
+            "You blocked Alice. Messages from them are dropped."
+        );
+        assert!(banner.blocked);
+        assert!(matches!(chat.unblock(), Some(Command::Accept(_))));
+        assert!(chat.accept_request().is_none());
+        assert!(chat.block().is_none());
+        assert!(matches!(
+            chat.delete_request(),
+            Some(Command::DeleteRequest(_))
+        ));
+        chat.toggle_palette();
+        assert_eq!(
+            &command_labels(&chat)[..3],
+            ["Unblock", "Delete chat", "Safety number"]
+        );
+    }
+
+    #[test]
+    fn group_requests_explain_themselves() {
+        let mut chat = chat();
+        let group = ConversationSummary {
+            peer: Peer::Group(GroupMasterKey::new([5; 32]).id()),
+            state: ChatState::Request,
+            ..summary(5, NOW, 0, Some("Dev"))
+        };
+        chat.apply(&Event::Conversations(vec![group]), true);
+        chat.open(ConversationId::new(5));
+
+        assert_eq!(
+            chat.request_banner().map(|banner| banner.text),
+            Some(
+                "You haven't accepted this group. Accept to reply and share your profile with \
+                 its members."
+                    .into()
+            )
         );
     }
 }

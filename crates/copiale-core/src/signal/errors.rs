@@ -1,5 +1,6 @@
 //! presage errors as [`BackendError`]s.
 
+use presage::libsignal_service::StorageServiceError;
 use presage::libsignal_service::protocol::SignalProtocolError;
 use presage::libsignal_service::push_service::ServiceError;
 use presage::libsignal_service::sender::MessageSenderError;
@@ -40,6 +41,16 @@ pub(super) fn presage_error<S: std::error::Error>(error: presage::Error<S>) -> B
         BackendError::network(error.to_string())
     } else {
         BackendError::new(error.to_string())
+    }
+}
+
+/// Marks connection failures.
+pub(super) fn storage_service_error(error: StorageServiceError) -> BackendError {
+    match &error {
+        StorageServiceError::Service(service) if is_network(service) => {
+            BackendError::network(error.to_string())
+        }
+        _ => BackendError::new(error.to_string()),
     }
 }
 

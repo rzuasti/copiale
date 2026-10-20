@@ -169,7 +169,10 @@ impl ChatView {
                             )
                             .test_support()
                     }))
-                    .child(Textarea::new(&self.inputs().composer)),
+                    .map(|composer| match self.render_request_banner(cx) {
+                        Some(banner) => composer.child(banner),
+                        None => composer.child(Textarea::new(&self.inputs().composer)),
+                    }),
             )
             .into_any_element()
     }

@@ -7,9 +7,9 @@ use futures::stream::LocalBoxStream;
 use tokio::sync::oneshot;
 
 use crate::model::{
-    ChatRef, Destination, GroupId, GroupInfo, GroupMasterKey, GroupMembers, IdentityKey,
-    IncomingMessage, MessageChange, MessageRef, Outgoing, ReceiptKind, SafetyNumber, SentMessage,
-    ServiceId, Timestamp,
+    BlockedList, ChatRef, Destination, GroupId, GroupInfo, GroupMasterKey, GroupMembers,
+    IdentityKey, IncomingMessage, MessageChange, MessageRef, Outgoing, ReceiptKind,
+    RequestResponse, SafetyNumber, SentMessage, ServiceId, StoredChat, Timestamp,
 };
 use crate::storage::Database;
 
@@ -56,6 +56,16 @@ pub enum Incoming {
         key: IdentityKey,
         verified: bool,
     },
+    /// The user answered `chat`'s message request on another device.
+    RequestResponse {
+        chat: ChatRef,
+        response: RequestResponse,
+    },
+    /// The phone's blocked list, whole.
+    Blocked(BlockedList),
+    /// Storage Service changed: read it again
+    /// ([`SignalBackend::stored_chats`]).
+    StorageChanged,
     /// Settings synced from the phone; `None` fields are unchanged.
     Settings {
         read_receipts: Option<bool>,
@@ -82,6 +92,13 @@ pub enum Incoming {
 pub struct PeerIdentity {
     pub key: IdentityKey,
     pub safety_number: SafetyNumber,
+}
+
+/// Chats as Storage Service holds them, at a manifest version.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredChats {
+    pub version: u64,
+    pub chats: Vec<StoredChat>,
 }
 
 /// A message that couldn't be decrypted.
@@ -364,6 +381,40 @@ pub trait SignalBackend {
         destination: Destination,
         typing: bool,
     ) -> LocalBoxFuture<'static, Result<(), BackendError>>;
+
+    /// Tells this account's other devices how the user answered `chat`'s
+    /// message request. Doesn't borrow the backend.
+    fn sync_request_response(
+        &mut self,
+        chat: ChatRef,
+        response: RequestResponse,
+    ) -> LocalBoxFuture<'static, Result<(), BackendError>>;
+
+    /// Tells this account's other devices the whole blocked list. Doesn't
+    /// borrow the backend.
+    fn sync_blocked(
+        &mut self,
+        list: BlockedList,
+    ) -> LocalBoxFuture<'static, Result<(), BackendError>>;
+
+    /// Asks the phone for its blocked list; it arrives as
+    /// [`Incoming::Blocked`]. Doesn't borrow the backend.
+    fn request_blocked_sync(&mut self) -> LocalBoxFuture<'static, Result<(), BackendError>>;
+
+    /// Shares this account's profile with `peer`, as accepting their message
+    /// request does. Doesn't borrow the backend.
+    fn send_profile_key(
+        &mut self,
+        peer: ServiceId,
+    ) -> LocalBoxFuture<'static, Result<(), BackendError>>;
+
+    /// Accepted and blocked chats from Storage Service, unless its manifest
+    /// is still at `known`; `None` then, and before the account's storage
+    /// key is known. Doesn't borrow the backend.
+    fn stored_chats(
+        &mut self,
+        known: Option<u64>,
+    ) -> LocalBoxFuture<'static, Result<Option<StoredChats>, BackendError>>;
 
     /// Removes this device from the account, so the phone stops listing it.
     /// Doesn't borrow the backend.

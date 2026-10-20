@@ -13,6 +13,7 @@ mod identities;
 mod key;
 mod messages;
 mod receipts;
+mod requests;
 mod retries;
 mod secrets;
 #[cfg(test)]

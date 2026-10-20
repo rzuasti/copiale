@@ -13,7 +13,8 @@ mod view;
 
 pub use layout::{COMPACT_BELOW, Layout};
 pub use model::{
-    Actions, Chat, Compose, Connection, Effects, LogChange, Overlay, PAGE, Row, member_list, title,
+    Actions, Chat, Compose, Connection, Effects, LogChange, Overlay, PAGE, RequestBanner, Row,
+    member_list, title,
 };
 pub use new_chat::{Candidate, MAX_CANDIDATES};
 pub use notices::{Notice, NoticeAction, NoticeKey, Notices};

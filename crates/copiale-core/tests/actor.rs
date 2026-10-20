@@ -7,12 +7,13 @@ use std::time::Duration;
 
 use copiale_core::storage::{KdfParams, Passphrase, Storage, StoragePaths};
 use copiale_core::{
-    Account, AccountSettings, BackendError, Change, ChatRef, Command, Contact, Content,
-    ConversationId, ConversationSummary, CoreHandle, CoreOptions, Destination, Direction,
-    EDIT_WINDOW, Event, Events, Expiry, GroupId, GroupInfo, GroupRef, GroupUpdate, Identity,
-    Incoming, IncomingMessage, Member, Message, MessageBody, MessageChange, MessagePreview,
-    MessageRef, MessageStatus, Outgoing, Peer, PhoneNumber, Quote, ReceiptKind, RetryRequest,
-    SentMessage, StorageFailure, Timestamp, Undecryptable, Verification,
+    Account, AccountSettings, BackendError, BlockedList, Change, ChatRef, ChatState, Command,
+    Contact, Content, ConversationId, ConversationSummary, CoreHandle, CoreOptions, Destination,
+    Direction, EDIT_WINDOW, Event, Events, Expiry, GroupId, GroupInfo, GroupRef, GroupUpdate,
+    Identity, Incoming, IncomingMessage, Member, Message, MessageBody, MessageChange,
+    MessagePreview, MessageRef, MessageStatus, Outgoing, Peer, PhoneNumber, Quote, ReceiptKind,
+    RequestResponse, RetryRequest, SentMessage, StorageFailure, StoredChat, StoredChats, Timestamp,
+    Undecryptable, Verification,
 };
 use copiale_testkit::{
     DEVICE_NAME, FAKE_LINK_URL, FakeNetwork, FakePhone, ManualClock, MemorySecretStore, OWN_ID,
@@ -2049,6 +2050,8 @@ async fn each_setting_combination() {
         message_added(&mut running.events).await;
         conversation_updated(&mut running.events).await;
         let chat = message.conversation;
+        send(&running, Command::Accept(chat));
+        conversation_updated(&mut running.events).await;
         send(&running, Command::MarkRead(chat));
         conversation_updated(&mut running.events).await;
         let expected = read_receipts.then(|| {
@@ -3384,5 +3387,368 @@ async fn unconfirmed_identities_are_reported_once_ready() {
     )
     .await;
     expect(&mut running.events, Event::Connected).await;
+    stop(running).await;
+}
+
+// Message requests
+
+/// Delivers a message from `from` and returns its chat as it then is.
+async fn receive(running: &mut Running, from: u128, sent_at: u64) -> ConversationSummary {
+    running.network.deliver(incoming(from, sent_at, "hi"));
+    message_added(&mut running.events).await;
+    conversation_updated(&mut running.events).await
+}
+
+fn contact_chat(n: u128) -> ChatRef {
+    ChatRef::Contact(service_id(n))
+}
+
+#[tokio::test]
+async fn messages_from_strangers_are_requests_until_accepted() {
+    let (_dir, mut running) = ready_with(true, true).await;
+    let request = receive(&mut running, 1, 100).await;
+    assert_eq!(request.state, ChatState::Request);
+
+    send(&running, Command::MarkRead(request.id));
+    conversation_updated(&mut running.events).await;
+    send(
+        &running,
+        Command::Typing {
+            conversation: request.id,
+            typing: true,
+        },
+    );
+    sync(&mut running).await;
+    assert!(running.network.read_receipts().is_empty());
+    assert!(running.network.typing().is_empty());
+    assert_eq!(running.network.read_syncs().len(), 1, "our devices learn");
+
+    send(&running, Command::Accept(request.id));
+    let accepted = conversation_updated(&mut running.events).await;
+    assert_eq!(accepted.state, ChatState::Accepted);
+    until(&running, |network| !network.profile_keys_sent().is_empty()).await;
+    assert_eq!(running.network.profile_keys_sent(), [service_id(1)]);
+    assert_eq!(
+        running.network.request_responses(),
+        [(contact_chat(1), RequestResponse::Accept)]
+    );
+
+    let later = receive(&mut running, 1, 101).await;
+    assert_eq!(later.state, ChatState::Accepted);
+    send(&running, Command::MarkRead(later.id));
+    conversation_updated(&mut running.events).await;
+    until(&running, |network| !network.read_receipts().is_empty()).await;
+    assert_eq!(
+        running.network.read_receipts(),
+        [(service_id(1), vec![Timestamp::from_millis(101)])]
+    );
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn replying_accepts_a_request() {
+    let (_dir, mut running) = ready().await;
+    let request = receive(&mut running, 1, 100).await;
+
+    send_text(&running, request.id, "who's this?");
+
+    message_added(&mut running.events).await;
+    let summary = conversation_updated(&mut running.events).await;
+    assert_eq!(summary.state, ChatState::Accepted);
+    sync(&mut running).await;
+    assert!(
+        running.network.request_responses().is_empty(),
+        "the reply carries our profile"
+    );
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn chats_we_wrote_in_first_are_no_requests() {
+    let (_dir, mut running) = ready().await;
+    let chat = open_chat(&mut running, 1).await;
+    sent_text(&mut running, chat, "hi").await;
+    running.network.deliver(Incoming::Sent(SentMessage {
+        destination: Destination::Contact(service_id(2)),
+        timestamp: Timestamp::from_millis(50),
+        content: Content::text("from my phone"),
+        expire_timer: None,
+    }));
+    message_added(&mut running.events).await;
+    conversation_updated(&mut running.events).await;
+
+    assert_eq!(
+        receive(&mut running, 1, 100).await.state,
+        ChatState::Accepted
+    );
+    assert_eq!(
+        receive(&mut running, 2, 100).await.state,
+        ChatState::Accepted
+    );
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn blocked_accounts_are_dropped_until_unblocked() {
+    let (_dir, mut running) = ready_with(true, true).await;
+    let request = receive(&mut running, 1, 100).await;
+
+    send(&running, Command::Block(request.id));
+
+    let blocked = conversation_updated(&mut running.events).await;
+    assert_eq!(blocked.state, ChatState::Blocked);
+    until(&running, |network| !network.blocked_syncs().is_empty()).await;
+    assert_eq!(
+        running.network.blocked_syncs(),
+        [BlockedList {
+            accounts: vec![service_id(1)],
+            ..BlockedList::default()
+        }]
+    );
+    assert_eq!(
+        running.network.request_responses(),
+        [(contact_chat(1), RequestResponse::Block)]
+    );
+    running.network.deliver(incoming(1, 101, "let me in"));
+    running.network.deliver(Incoming::Typing {
+        sender: service_id(1),
+        group: None,
+        typing: true,
+    });
+    assert!(flush(&mut running).await.is_empty());
+    send_text(&running, request.id, "no");
+    sync(&mut running).await;
+    assert_eq!(running.network.sends_started(), 0);
+
+    send(&running, Command::Accept(request.id));
+
+    let unblocked = conversation_updated(&mut running.events).await;
+    assert_eq!(unblocked.state, ChatState::Accepted);
+    until(&running, |network| network.blocked_syncs().len() == 2).await;
+    assert_eq!(running.network.blocked_syncs()[1], BlockedList::default());
+    assert!(running.network.profile_keys_sent().is_empty());
+    assert_eq!(receive(&mut running, 1, 102).await.unread, 2);
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn deleting_a_request_removes_the_chat_and_keeps_a_block() {
+    let (_dir, mut running) = ready().await;
+    let request = receive(&mut running, 1, 100).await;
+    send(&running, Command::Block(request.id));
+    conversation_updated(&mut running.events).await;
+
+    send(&running, Command::DeleteRequest(request.id));
+
+    expect(&mut running.events, Event::ConversationRemoved(request.id)).await;
+    until(&running, |network| network.request_responses().len() == 2).await;
+    assert_eq!(
+        running.network.request_responses()[1],
+        (contact_chat(1), RequestResponse::Delete)
+    );
+    running.network.deliver(incoming(1, 101, "again"));
+    assert!(flush(&mut running).await.is_empty());
+
+    let accepted = open_chat(&mut running, 2).await;
+    send(&running, Command::DeleteRequest(accepted));
+    send(&running, Command::Block(ConversationId::new(999)));
+    assert!(flush(&mut running).await.is_empty(), "not a request");
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn note_to_self_is_never_a_request_nor_blocked() {
+    let (_dir, mut running) = ready().await;
+    let note = receive(&mut running, OWN_ID, 100).await;
+    assert_eq!(note.state, ChatState::Accepted);
+
+    send(&running, Command::Block(note.id));
+
+    assert!(flush(&mut running).await.is_empty());
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn answers_and_blocks_on_the_phone_apply_here() {
+    let (_dir, mut running) = ready().await;
+    let alice = receive(&mut running, 1, 100).await;
+    let bob = receive(&mut running, 2, 100).await;
+
+    running.network.deliver(Incoming::RequestResponse {
+        chat: contact_chat(1),
+        response: RequestResponse::Accept,
+    });
+    let summary = conversation_updated(&mut running.events).await;
+    assert_eq!((summary.id, summary.state), (alice.id, ChatState::Accepted));
+
+    running.network.deliver(Incoming::Blocked(BlockedList {
+        accounts: vec![service_id(1)],
+        groups: Vec::new(),
+        numbers: vec![PhoneNumber::new("+14155550123")],
+    }));
+    let summary = conversation_updated(&mut running.events).await;
+    assert_eq!((summary.id, summary.state), (alice.id, ChatState::Blocked));
+
+    running.network.deliver(Incoming::RequestResponse {
+        chat: contact_chat(2),
+        response: RequestResponse::BlockAndDelete,
+    });
+    let summary = conversation_updated(&mut running.events).await;
+    assert_eq!((summary.id, summary.state), (bob.id, ChatState::Blocked));
+    expect(&mut running.events, Event::ConversationRemoved(bob.id)).await;
+
+    // Blocking here syncs the phone's list back whole.
+    let carol = receive(&mut running, 3, 100).await;
+    send(&running, Command::Block(carol.id));
+    conversation_updated(&mut running.events).await;
+    until(&running, |network| !network.blocked_syncs().is_empty()).await;
+    assert_eq!(
+        running.network.blocked_syncs(),
+        [BlockedList {
+            accounts: vec![service_id(1), service_id(2), service_id(3)],
+            groups: Vec::new(),
+            numbers: vec![PhoneNumber::new("+14155550123")],
+        }]
+    );
+    assert!(running.network.sent().is_empty(), "no echoes to the phone");
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn storage_service_accepts_and_blocks_chats() {
+    let (_dir, mut running) = ready().await;
+    until(&running, |network| network.stored_reads() == 1).await;
+    until(&running, |network| network.blocked_sync_requests() == 1).await;
+    let alice = receive(&mut running, 1, 100).await;
+    let bob = receive(&mut running, 2, 100).await;
+    let stored = |chat, accepted, blocked| StoredChat {
+        chat,
+        accepted,
+        blocked,
+    };
+    running.network.set_stored_chats(StoredChats {
+        version: 3,
+        chats: vec![
+            stored(contact_chat(1), true, false),
+            stored(contact_chat(2), false, true),
+            stored(contact_chat(9), true, false),
+        ],
+    });
+
+    running.network.deliver(Incoming::StorageChanged);
+
+    let summary = conversation_updated(&mut running.events).await;
+    assert_eq!((summary.id, summary.state), (alice.id, ChatState::Accepted));
+    let summary = conversation_updated(&mut running.events).await;
+    assert_eq!((summary.id, summary.state), (bob.id, ChatState::Blocked));
+    running.network.deliver(Incoming::StorageChanged);
+    until(&running, |network| network.stored_reads() == 3).await;
+    assert!(flush(&mut running).await.is_empty(), "unchanged");
+    assert_eq!(
+        receive(&mut running, 9, 100).await.state,
+        ChatState::Accepted
+    );
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn the_blocked_list_is_asked_for_until_storage_service_is_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = MemorySecretStore::default();
+    let mut running = start(dir.path(), &secrets, true);
+    expect_ready(&mut running.events).await;
+    expect(&mut running.events, Event::Connected).await;
+    until(&running, |network| network.blocked_sync_requests() == 1).await;
+    receive(&mut running, 1, 100).await;
+    running.network.set_stored_chats(StoredChats {
+        version: 1,
+        chats: vec![StoredChat {
+            chat: contact_chat(1),
+            accepted: true,
+            blocked: false,
+        }],
+    });
+    running.network.deliver(Incoming::StorageChanged);
+    conversation_updated(&mut running.events).await;
+    stop(running).await;
+
+    let mut running = start(dir.path(), &secrets, true);
+    expect_ready(&mut running.events).await;
+    expect(&mut running.events, Event::Connected).await;
+    until(&running, |network| network.stored_reads() == 1).await;
+    sync(&mut running).await;
+    assert_eq!(running.network.blocked_sync_requests(), 0);
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn groups_are_requests_unless_an_accepted_contact_added_us() {
+    let (_dir, mut running) = ready().await;
+    for n in [1, 2] {
+        running.network.set_group(group_key(n), named_dev_group(3));
+    }
+    let alice = open_chat(&mut running, 1).await;
+    sent_text(&mut running, alice, "hi").await;
+    let added = |n: u8, by: u128| {
+        Incoming::Message(IncomingMessage {
+            sender: service_id(by),
+            group: Some(group_ref(n, 3)),
+            timestamp: Timestamp::from_millis(100),
+            content: Content::GroupChanged(vec![GroupUpdate::Added(service_id(OWN_ID))]),
+            expire_timer: None,
+        })
+    };
+
+    running.network.deliver(added(1, 1));
+    message_added(&mut running.events).await;
+    let by_alice = conversation_updated(&mut running.events).await;
+    running.network.deliver(added(2, 2));
+    message_added(&mut running.events).await;
+    let by_bob = conversation_updated(&mut running.events).await;
+
+    assert_eq!(by_alice.state, ChatState::Accepted);
+    assert_eq!(by_bob.state, ChatState::Request);
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn blocked_groups_and_members_are_dropped() {
+    let (_dir, mut running) = ready().await;
+    running.network.set_group(group_key(1), named_dev_group(3));
+    let (_, group) = receive_in_group(&mut running, group_ref(1, 3), 1, 100).await;
+    conversation_updated(&mut running.events).await;
+    running.network.deliver(Incoming::Blocked(BlockedList {
+        accounts: vec![service_id(2)],
+        ..BlockedList::default()
+    }));
+    flush(&mut running).await;
+
+    running.network.deliver(group_incoming(
+        group_ref(1, 3),
+        2,
+        101,
+        "from a blocked member",
+    ));
+    assert!(flush(&mut running).await.is_empty());
+
+    send(&running, Command::Block(group.id));
+    let blocked = conversation_updated(&mut running.events).await;
+    assert_eq!(blocked.state, ChatState::Blocked);
+    running.network.deliver(group_incoming(
+        group_ref(1, 3),
+        1,
+        102,
+        "in a blocked group",
+    ));
+    assert!(flush(&mut running).await.is_empty());
+    until(&running, |network| !network.blocked_syncs().is_empty()).await;
+    assert_eq!(
+        running.network.blocked_syncs(),
+        [BlockedList {
+            accounts: vec![service_id(2)],
+            groups: vec![group_key(1).id()],
+            numbers: Vec::new(),
+        }]
+    );
     stop(running).await;
 }

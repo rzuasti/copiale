@@ -51,9 +51,16 @@ fn notification(notice: &Notice) -> Notification {
         .body(&escape(&notice.body))
         .action("default", "Open");
     #[cfg(all(unix, not(target_os = "macos")))]
-    notification
-        .hint(notify_rust::Hint::DesktopEntry(crate::APP_ID.into()))
-        .hint(notify_rust::Hint::Category("im.received".into()));
+    {
+        notification
+            .hint(notify_rust::Hint::DesktopEntry(crate::APP_ID.into()))
+            .hint(notify_rust::Hint::Category("im.received".into()));
+        if notice.quiet {
+            notification
+                .urgency(notify_rust::Urgency::Low)
+                .hint(notify_rust::Hint::SuppressSound(true));
+        }
+    }
     notification
 }
 

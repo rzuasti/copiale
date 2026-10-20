@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use copiale_core::{Command, ConversationSummary, Peer};
+use copiale_core::{ChatState, Command, ConversationSummary, Peer};
 use gpui_kit::base::{Easing, Presence, PresencePhase, Transition};
 use gpui_kit::component::input::{Escape, Input};
 use gpui_kit::component::list::ListItem;
@@ -205,6 +205,10 @@ impl ChatView {
         let typing = self.chat.is_typing(id);
         let age = if typing {
             "typing…".into()
+        } else if summary.state == ChatState::Request {
+            "request".into()
+        } else if summary.state == ChatState::Blocked {
+            "blocked".into()
         } else {
             summary
                 .last_activity
@@ -247,7 +251,7 @@ impl ChatView {
                     .child(
                         div()
                             .text_xs()
-                            .text_color(if typing {
+                            .text_color(if typing || summary.state == ChatState::Request {
                                 cx.palette().accent
                             } else {
                                 cx.palette().text_muted

@@ -257,7 +257,7 @@ impl fmt::Debug for Quote {
 }
 
 /// A conversation as another device names it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ChatRef {
     Contact(ServiceId),
     Group(GroupId),
@@ -683,11 +683,52 @@ pub struct Expiry {
     pub at: Option<Timestamp>,
 }
 
+/// Whether the user let a conversation in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ChatState {
+    /// Accepted, or nothing from the other side yet.
+    #[default]
+    Accepted,
+    /// A message request: an account or group the user hasn't accepted
+    /// wrote. No read receipts or typing go out until accepted.
+    Request,
+    /// Their messages are dropped.
+    Blocked,
+}
+
+/// How the user answered a message request, here or on the phone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RequestResponse {
+    Accept,
+    Delete,
+    Block,
+    BlockAndDelete,
+}
+
+/// Blocked accounts and groups, as the phone syncs the list.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BlockedList {
+    pub accounts: Vec<ServiceId>,
+    pub groups: Vec<GroupId>,
+    /// Numbers blocked without a known account.
+    pub numbers: Vec<PhoneNumber>,
+}
+
+/// A chat as Storage Service holds it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StoredChat {
+    pub chat: ChatRef,
+    /// Accepted ("whitelisted"): shares this account's profile.
+    pub accepted: bool,
+    pub blocked: bool,
+}
+
 /// A conversation as the chat list shows it. `Debug` hides the title.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ConversationSummary {
     pub id: ConversationId,
     pub peer: Peer,
+    pub state: ChatState,
     /// Synced contact name or group title, if known.
     pub title: Option<String>,
     /// A group's other members; empty for 1:1.
@@ -703,6 +744,7 @@ impl fmt::Debug for ConversationSummary {
         f.debug_struct("ConversationSummary")
             .field("id", &self.id)
             .field("peer", &self.peer)
+            .field("state", &self.state)
             .field("titled", &self.title.is_some())
             .field("members", &self.members)
             .field("last_activity", &self.last_activity)

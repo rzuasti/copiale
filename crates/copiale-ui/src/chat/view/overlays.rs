@@ -84,6 +84,13 @@ impl ChatView {
         match action {
             PaletteAction::Open(id) => self.open(id, window, cx),
             PaletteAction::SafetyNumber(peer) => self.show_safety_number(peer, window, cx),
+            PaletteAction::Accept(id) | PaletteAction::Unblock(id) => {
+                self.answer_request(Command::Accept(id), window, cx)
+            }
+            PaletteAction::Block(id) => self.answer_request(Command::Block(id), window, cx),
+            PaletteAction::DeleteRequest(id) => {
+                self.answer_request(Command::DeleteRequest(id), window, cx)
+            }
             PaletteAction::NewChat => self.start_new_chat(&NewChat, window, cx),
             PaletteAction::Settings => self.open_settings(&OpenSettings, window, cx),
             PaletteAction::Theme(mode) => {
@@ -232,7 +239,11 @@ impl ChatView {
             .map(|(ix, entry)| {
                 let (glyph, hint) = match entry.action {
                     PaletteAction::Open(_) => ("#", None),
-                    PaletteAction::SafetyNumber(_) => (">", None),
+                    PaletteAction::SafetyNumber(_)
+                    | PaletteAction::Accept(_)
+                    | PaletteAction::Block(_)
+                    | PaletteAction::Unblock(_)
+                    | PaletteAction::DeleteRequest(_) => (">", None),
                     PaletteAction::NewChat => (">", key_hint(&NewChat, window)),
                     PaletteAction::Settings => (">", key_hint(&OpenSettings, window)),
                     PaletteAction::Theme(mode) => (">", (mode == theme).then(|| "current".into())),

@@ -54,6 +54,12 @@ went unsolved until 2011.
     group as last fetched, with this account in it (one fetch first on a
     mismatch); group change lines only from server-signed changes newer
     than the stored group. Edits are text only.
+  - Message requests: a chat the other side wrote in is a request until
+    accepted (here, on the phone, in Storage Service, or by replying);
+    requests send no read receipts or typing and notify without name or
+    text. Blocked accounts and groups are dropped. Accept/block state
+    syncs both ways with the phone (`chat_states`); Storage Service is
+    read only.
   - No telemetry.
   - No core dumps (`copiale_core::hardening`); key and passphrase copies
     left in memory are listed in `docs/security.md`.

@@ -8,10 +8,10 @@ use copiale_core::config::{
     Config, ConfigFile, Density, MessageStyle, NotificationContent, Setting, ThemeMode, TimeFormat,
 };
 use copiale_core::{
-    Account, AccountSettings, Attachment, BackendError, Command, Contact, Content, ConversationId,
-    ConversationSummary, Direction, Event, Expiry, GroupMasterKey, GroupUpdate, Identity, Member,
-    Message, MessageBody, MessageId, MessageStatus, Peer, Quote, SafetyNumber, ServiceId,
-    StorageFailure, Timestamp, Unsupported, Verification,
+    Account, AccountSettings, Attachment, BackendError, ChatState, Command, Contact, Content,
+    ConversationId, ConversationSummary, Direction, Event, Expiry, GroupMasterKey, GroupUpdate,
+    Identity, Member, Message, MessageBody, MessageId, MessageStatus, Peer, Quote, SafetyNumber,
+    ServiceId, StorageFailure, Timestamp, Unsupported, Verification,
 };
 use copiale_ui::chat::{
     COMPACT_BELOW, ChatView, Compose, Field, Layout, Notice, NoticeAction, NoticeKey, Overlay,
@@ -255,6 +255,7 @@ fn summary(id: i64, name: &str, unread: u32) -> ConversationSummary {
     ConversationSummary {
         id: ConversationId::new(id),
         peer: Peer::Contact(peer(id)),
+        state: ChatState::Accepted,
         title: Some(name.into()),
         members: Vec::new(),
         last_activity: Some(Timestamp::from_millis(1_000 - id as u64)),
@@ -781,6 +782,7 @@ fn group_header_lists_members(cx: &mut TestAppContext) {
     let ui = Ui::ready(cx);
     let group = ConversationSummary {
         peer: Peer::Group(GroupMasterKey::new([3; 32]).id()),
+        state: ChatState::Accepted,
         members: vec![
             Member {
                 id: peer(1),
@@ -1426,6 +1428,7 @@ fn messages_in_unfocused_chats_notify_and_clicks_open_them(cx: &mut TestAppConte
             key: NoticeKey::Chat(ConversationId::new(2)),
             title: "Bob".into(),
             body: "New message".into(),
+            quiet: false,
         })]
     );
 
@@ -1546,6 +1549,56 @@ fn alice_identity(verification: Verification) -> Event {
         safety_number: Some(SafetyNumber::new("0123456789".repeat(6))),
         verification,
     })
+}
+
+fn alice_in(state: ChatState) -> Event {
+    Event::ConversationUpdated(ConversationSummary {
+        state,
+        ..summary(1, "Alice", 0)
+    })
+}
+
+#[gpui_kit::test]
+fn requests_are_answered_from_the_banner(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.event(alice_in(ChatState::Request), cx);
+    ui.open_alice(cx);
+    assert!(ui.shows("request-banner", cx));
+    assert!(!composer_focused(&ui, cx));
+
+    ui.press("a", cx);
+    assert!(matches!(
+        ui.core.take().as_slice(),
+        [Command::Accept(id)] if id.get() == 1
+    ));
+    ui.event(alice_in(ChatState::Accepted), cx);
+    ui.frame(cx);
+
+    assert!(!ui.shows("request-banner", cx));
+    assert!(composer_focused(&ui, cx));
+}
+
+#[gpui_kit::test]
+fn blocked_chats_can_be_unblocked_or_deleted(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.event(alice_in(ChatState::Blocked), cx);
+    ui.open_alice(cx);
+    assert!(ui.shows("request-banner", cx));
+    assert!(!ui.shows("accept-request", cx));
+
+    ui.press("b", cx);
+    ui.press("a", cx);
+    assert!(ui.core.take().is_empty(), "already blocked, not a request");
+    ui.click("unblock", cx);
+    assert!(matches!(
+        ui.core.take().as_slice(),
+        [Command::Accept(id)] if id.get() == 1
+    ));
+    ui.press("d", cx);
+    assert!(matches!(
+        ui.core.take().as_slice(),
+        [Command::DeleteRequest(id)] if id.get() == 1
+    ));
 }
 
 #[gpui_kit::test]

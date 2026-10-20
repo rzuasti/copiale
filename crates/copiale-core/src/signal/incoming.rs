@@ -6,7 +6,9 @@ use presage::libsignal_service::groups_v2::{GroupChange, GroupOperations, Role};
 use presage::libsignal_service::prelude::{GroupSecretParams, ProtobufMessage as _};
 use presage::libsignal_service::proto;
 use presage::libsignal_service::proto::call_message::offer;
-use presage::libsignal_service::proto::sync_message::{Content as SyncContent, Sent};
+use presage::libsignal_service::proto::sync_message::{
+    Content as SyncContent, Sent, fetch_latest, message_request_response,
+};
 use presage::libsignal_service::proto::{
     AddressableMessage, AttachmentPointer, CallMessage, ConversationIdentifier, DataMessage,
     EditMessage, GroupContextV2, ReceiptMessage, SyncMessage, TypingMessage, addressable_message,
@@ -20,9 +22,9 @@ use presage::model::messages::Received;
 
 use crate::backend::{Incoming, RetryRequest, Undecryptable};
 use crate::model::{
-    self, Attachment, Change, ChatRef, Destination, GroupId, GroupMasterKey, GroupRef, GroupUpdate,
-    IdentityKey, IncomingMessage, MessageBody, MessageChange, MessageRef, Quote, ReceiptKind,
-    SentMessage, ServiceId, Timestamp, Unsupported,
+    self, Attachment, BlockedList, Change, ChatRef, Destination, GroupId, GroupMasterKey, GroupRef,
+    GroupUpdate, IdentityKey, IncomingMessage, MessageBody, MessageChange, MessageRef, PhoneNumber,
+    Quote, ReceiptKind, RequestResponse, SentMessage, ServiceId, Timestamp, Unsupported,
 };
 
 /// What the core cares about so far; everything else is dropped, as are
@@ -84,8 +86,8 @@ fn undecryptable(failure: &DecryptionFailure) -> Undecryptable {
     }
 }
 
-/// Receipts, typing, and reads, settings and verifications synced from
-/// other devices.
+/// Receipts, typing, and reads, settings, verifications, message request
+/// answers and blocks synced from other devices.
 fn signal(content: &Content) -> Option<Incoming> {
     let sender = ServiceId::new(content.metadata.sender.raw_uuid());
     match &content.body {
@@ -200,8 +202,73 @@ fn signal(content: &Content) -> Option<Incoming> {
                 verified,
             })
         }
+        ContentBody::SynchronizeMessage(SyncMessage {
+            content: Some(SyncContent::MessageRequestResponse(answer)),
+            ..
+        }) => {
+            let chat = match &answer.group_id {
+                Some(id) => ChatRef::Group(group_id(id)?),
+                None => ChatRef::Contact(service_id(
+                    answer.thread_aci_binary.as_deref(),
+                    answer.thread_aci.as_deref(),
+                )?),
+            };
+            use message_request_response::Type;
+            let response = match Type::try_from(answer.r#type?).ok()? {
+                Type::Accept => RequestResponse::Accept,
+                Type::Delete => RequestResponse::Delete,
+                Type::Block | Type::BlockAndSpam => RequestResponse::Block,
+                Type::BlockAndDelete => RequestResponse::BlockAndDelete,
+                Type::Spam | Type::Unknown => return None,
+            };
+            Some(Incoming::RequestResponse { chat, response })
+        }
+        ContentBody::SynchronizeMessage(SyncMessage {
+            content: Some(SyncContent::Blocked(blocked)),
+            ..
+        }) => {
+            let binary = blocked
+                .acis_binary
+                .iter()
+                .filter_map(|id| service_id(Some(id), None));
+            let strings = blocked
+                .acis
+                .iter()
+                .filter_map(|id| service_id(None, Some(id)));
+            let mut accounts = Vec::new();
+            for account in binary.chain(strings) {
+                if !accounts.contains(&account) {
+                    accounts.push(account);
+                }
+            }
+            Some(Incoming::Blocked(BlockedList {
+                accounts,
+                groups: blocked
+                    .group_ids
+                    .iter()
+                    .filter_map(|id| group_id(id))
+                    .collect(),
+                numbers: blocked
+                    .numbers
+                    .iter()
+                    .filter(|number| !number.is_empty())
+                    .map(PhoneNumber::new)
+                    .collect(),
+            }))
+        }
+        ContentBody::SynchronizeMessage(SyncMessage {
+            content: Some(SyncContent::FetchLatest(fetch)),
+            ..
+        }) if fetch.r#type == Some(fetch_latest::Type::StorageManifest.into()) => {
+            Some(Incoming::StorageChanged)
+        }
         _ => None,
     }
+}
+
+/// A group's public ID; `None` if malformed.
+fn group_id(id: &[u8]) -> Option<GroupId> {
+    Some(GroupId::new(<[u8; 32]>::try_from(id).ok()?))
 }
 
 /// A conversation as another device names it; `None` for phone numbers
@@ -216,9 +283,9 @@ fn chat_ref(conversation: &ConversationIdentifier) -> Option<ChatRef> {
             let id = SignalServiceId::parse_from_service_id_binary(id)?;
             Some(ChatRef::Contact(ServiceId::new(id.raw_uuid())))
         }
-        conversation_identifier::Identifier::ThreadGroupId(id) => Some(ChatRef::Group(
-            GroupId::new(<[u8; 32]>::try_from(id.as_slice()).ok()?),
-        )),
+        conversation_identifier::Identifier::ThreadGroupId(id) => {
+            Some(ChatRef::Group(group_id(id)?))
+        }
         conversation_identifier::Identifier::ThreadE164(_) => None,
     }
 }
@@ -599,7 +666,7 @@ fn group_ref(context: &GroupContextV2) -> Option<GroupRef> {
 }
 
 /// A service ID from its binary field, else its string field.
-fn service_id(binary: Option<&[u8]>, string: Option<&str>) -> Option<ServiceId> {
+pub(super) fn service_id(binary: Option<&[u8]>, string: Option<&str>) -> Option<ServiceId> {
     let id = binary
         .and_then(SignalServiceId::parse_from_service_id_binary)
         .or_else(|| string.and_then(SignalServiceId::parse_from_service_id_string))?;
@@ -1309,6 +1376,95 @@ pub(super) mod tests {
             None,
             "not a key"
         );
+    }
+
+    fn sync(content: SyncContent) -> Option<Incoming> {
+        synced(ContentBody::SynchronizeMessage(SyncMessage {
+            content: Some(content),
+            ..Default::default()
+        }))
+    }
+
+    #[test]
+    fn maps_request_answers_from_the_phone() {
+        use message_request_response::Type;
+        let answer = |thread: Option<Uuid>, group: Option<Vec<u8>>, kind: Type| {
+            sync(SyncContent::MessageRequestResponse(
+                sync_message::MessageRequestResponse {
+                    thread_aci_binary: thread.map(|id| id.as_bytes().to_vec()),
+                    group_id: group,
+                    r#type: Some(kind.into()),
+                    ..Default::default()
+                },
+            ))
+        };
+        let contact = ChatRef::Contact(ServiceId::new(OTHER));
+        let cases = [
+            (Type::Accept, Some(RequestResponse::Accept)),
+            (Type::Delete, Some(RequestResponse::Delete)),
+            (Type::Block, Some(RequestResponse::Block)),
+            (Type::BlockAndSpam, Some(RequestResponse::Block)),
+            (Type::BlockAndDelete, Some(RequestResponse::BlockAndDelete)),
+            (Type::Spam, None),
+            (Type::Unknown, None),
+        ];
+        for (kind, expected) in cases {
+            let expected = expected.map(|response| Incoming::RequestResponse {
+                chat: contact,
+                response,
+            });
+            assert_eq!(answer(Some(OTHER), None, kind), expected, "{kind:?}");
+        }
+        assert_eq!(
+            answer(None, Some(vec![3; 32]), Type::Accept),
+            Some(Incoming::RequestResponse {
+                chat: ChatRef::Group(GroupId::new([3; 32])),
+                response: RequestResponse::Accept,
+            })
+        );
+        assert_eq!(answer(None, Some(vec![3; 5]), Type::Accept), None);
+        assert_eq!(answer(None, None, Type::Accept), None);
+    }
+
+    #[test]
+    fn maps_the_blocked_list_from_the_phone() {
+        let blocked = sync(SyncContent::Blocked(sync_message::Blocked {
+            numbers: vec!["+14155550123".into(), String::new()],
+            acis: vec![OTHER.to_string(), SENDER.to_string(), "nonsense".into()],
+            acis_binary: vec![OTHER.as_bytes().to_vec()],
+            group_ids: vec![vec![3; 32], vec![4; 2]],
+        }));
+        assert_eq!(
+            blocked,
+            Some(Incoming::Blocked(BlockedList {
+                accounts: vec![ServiceId::new(OTHER), ServiceId::new(SENDER)],
+                groups: vec![GroupId::new([3; 32])],
+                numbers: vec![PhoneNumber::new("+14155550123")],
+            }))
+        );
+    }
+
+    #[test]
+    fn storage_service_changes_are_noticed() {
+        let fetch = |kind: fetch_latest::Type| {
+            sync(SyncContent::FetchLatest(sync_message::FetchLatest {
+                r#type: Some(kind.into()),
+            }))
+        };
+        assert_eq!(
+            fetch(fetch_latest::Type::StorageManifest),
+            Some(Incoming::StorageChanged)
+        );
+        assert_eq!(fetch(fetch_latest::Type::LocalProfile), None);
+    }
+
+    #[test]
+    fn requests_and_blocks_only_come_from_this_account() {
+        let blocked = ContentBody::SynchronizeMessage(SyncMessage {
+            content: Some(SyncContent::Blocked(sync_message::Blocked::default())),
+            ..Default::default()
+        });
+        assert_eq!(received(blocked), None);
     }
 
     #[test]

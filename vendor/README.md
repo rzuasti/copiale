@@ -64,6 +64,14 @@ libsignal-service git hash back to `nix/package.nix`.
     fetches and stores a group's state whatever revision is stored, to
     check a sender missing from it before dropping their message.
     Upstream PR: [whisperfish/presage#468](https://github.com/whisperfish/presage/pull/468).
+  - `patches/presage-storage-service.patch`. `Manager::storage_service`
+    authenticates against Storage Service with the account's storage key,
+    to read which contacts and groups the user accepted or blocked. Not
+    upstream yet.
+  - `patches/presage-linked-sync-requests.patch`. Only the primary device
+    answers sync requests; a linked one answered a blocked list request
+    with an empty list, which could clear the list on the device asking.
+    Not upstream yet.
 - **Used via:** `[patch."https://github.com/whisperfish/presage"]` in the
   root `Cargo.toml`.
 

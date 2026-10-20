@@ -15,6 +15,7 @@ use libsignal_service::{
     content::{Content, ContentBody, Metadata},
     encrypt_device_name,
     groups_v2::{decrypt_group, GroupsManager, InMemoryCredentialsCache},
+    master_key::{MasterKey, StorageServiceKey},
     messagepipe::{Incoming, MessagePipe, ServiceCredentials},
     prelude::{phonenumber::PhoneNumber, MessageSenderError, ProtobufMessage, Uuid},
     profile_cipher::ProfileCipher,
@@ -46,7 +47,7 @@ use libsignal_service::{
         groups::{GroupMasterKey, GroupSecretParams},
         profiles::ProfileKey,
     },
-    AccountManager, Profile, ServiceIdExt,
+    AccountManager, Profile, ServiceIdExt, StorageService,
 };
 use libsignal_service::{
     libsignal_account_keys::AccountEntropyPool, proto::addressable_message::Author,
@@ -574,6 +575,22 @@ impl<S: Store> Manager<S, Registered> {
         Ok(())
     }
 
+    /// Authenticates against the storage service with the account's storage
+    /// key, derived from its account entropy pool, else its master key;
+    /// `None` without either.
+    pub async fn storage_service(&self) -> Result<Option<StorageService>, Error<S::Error>> {
+        let master_key = match self.store.fetch_account_entropy_pool().await? {
+            Some(aep) => MasterKey::from_slice(aep.derive_svr_key().as_slice()).ok(),
+            None => self.store.fetch_master_key().await?,
+        };
+        let Some(master_key) = master_key else {
+            return Ok(None);
+        };
+        let storage_key = StorageServiceKey::from_master_key(&master_key);
+        let service = StorageService::new(self.identified_push_service(), storage_key).await?;
+        Ok(Some(service))
+    }
+
     async fn groups_manager(
         &self,
     ) -> Result<GroupsManager<InMemoryCredentialsCache>, Error<S::Error>> {
@@ -739,6 +756,12 @@ impl<S: Store> Manager<S, Registered> {
                                         use libsignal_service::content::sync_message::request::Type as RequestType;
 
                                         match request.r#type() {
+                                            // only the primary device answers
+                                            _ if state.registration_type
+                                                != RegistrationType::Primary =>
+                                            {
+                                                debug!("not answering a sync request as a linked device")
+                                            }
                                             RequestType::Contacts => {
                                                 let contacts = state
                                                     .store

@@ -7,11 +7,14 @@ use presage::Manager;
 use presage::libsignal_service::configuration::{ServiceConfiguration, SignalServers};
 use presage::libsignal_service::content::ContentBody;
 use presage::libsignal_service::prelude::ProtobufMessage as _;
-use presage::libsignal_service::proto::sync_message::{self, Content as SyncContent};
+use presage::libsignal_service::proto::manifest_record::identifier;
+use presage::libsignal_service::proto::sync_message::{
+    self, Content as SyncContent, message_request_response,
+};
 use presage::libsignal_service::proto::{
     self, AddressableMessage, ConversationIdentifier, DataMessage, EditMessage, GroupContextV2,
-    ReceiptMessage, SyncMessage, TypingMessage, addressable_message, conversation_identifier,
-    data_message, receipt_message, typing_message,
+    ReceiptMessage, StorageRecord, SyncMessage, TypingMessage, addressable_message,
+    conversation_identifier, data_message, receipt_message, storage_record, typing_message,
 };
 use presage::libsignal_service::protocol::{
     Aci, DecryptionErrorMessage, Fingerprint, IdentityKeyStore as _, ProtocolAddress,
@@ -27,15 +30,17 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant};
 
-use super::errors::{presage_error, store_error};
-use super::incoming::incoming;
+use super::errors::{presage_error, storage_service_error, store_error};
+use super::incoming::{incoming, service_id};
 use super::store::AppStore;
 use crate::backend::{
     BackendError, Incoming, Linker, PeerIdentity, Resendable, RetryRequest, SignalBackend,
+    StoredChats,
 };
 use crate::model::{
-    Destination, GroupInfo, GroupMasterKey, GroupMembers, IdentityKey, Member, MessageBody,
-    Outgoing, Quote, SafetyNumber, ServiceId, Timestamp,
+    BlockedList, ChatRef, Destination, GroupInfo, GroupMasterKey, GroupMembers, IdentityKey,
+    Member, MessageBody, Outgoing, Quote, RequestResponse, SafetyNumber, ServiceId, StoredChat,
+    Timestamp,
 };
 use crate::storage::Database;
 
@@ -118,6 +123,22 @@ impl PresageBackend {
             receiver: None,
             identity_changes: Some(identity_changes),
         }
+    }
+}
+
+impl PresageBackend {
+    /// Sends `sync` to this account's other devices.
+    fn send_sync(&self, sync: SyncMessage) -> LocalBoxFuture<'static, Result<(), BackendError>> {
+        let mut manager = self.manager.clone();
+        async move {
+            let me = manager.registration_data().service_ids.aci();
+            manager
+                .send_message(me, sync, Timestamp::now().as_millis())
+                .await
+                .map(drop)
+                .map_err(presage_error)
+        }
+        .boxed_local()
     }
 }
 
@@ -327,8 +348,7 @@ impl SignalBackend for PresageBackend {
         destination: Destination,
         messages: Vec<(Option<ServiceId>, Timestamp)>,
     ) -> LocalBoxFuture<'static, Result<(), BackendError>> {
-        let mut manager = self.manager.clone();
-        let me = manager.registration_data().service_ids.aci;
+        let me = self.manager.registration_data().service_ids.aci;
         let conversation = ConversationIdentifier {
             identifier: Some(match destination {
                 Destination::Contact(peer) => {
@@ -358,15 +378,7 @@ impl SignalBackend for PresageBackend {
             })),
             ..SyncMessage::with_padding(&mut rand::rng())
         };
-        async move {
-            let me = manager.registration_data().service_ids.aci();
-            manager
-                .send_message(me, sync, Timestamp::now().as_millis())
-                .await
-                .map(drop)
-                .map_err(presage_error)
-        }
-        .boxed_local()
+        self.send_sync(sync)
     }
 
     /// Reads presage's copy, which it refreshes when a message shows a newer
@@ -582,20 +594,136 @@ impl SignalBackend for PresageBackend {
     }
 
     fn request_settings_sync(&mut self) -> LocalBoxFuture<'static, Result<(), BackendError>> {
-        let mut manager = self.manager.clone();
-        let request = SyncMessage {
-            content: Some(SyncContent::Request(sync_message::Request {
-                r#type: Some(sync_message::request::Type::Configuration.into()),
+        self.send_sync(sync_request(sync_message::request::Type::Configuration))
+    }
+
+    fn request_blocked_sync(&mut self) -> LocalBoxFuture<'static, Result<(), BackendError>> {
+        self.send_sync(sync_request(sync_message::request::Type::Blocked))
+    }
+
+    fn sync_request_response(
+        &mut self,
+        chat: ChatRef,
+        response: RequestResponse,
+    ) -> LocalBoxFuture<'static, Result<(), BackendError>> {
+        use message_request_response::Type;
+        let (thread_aci, group_id) = match chat {
+            ChatRef::Contact(peer) => (Some(peer.uuid().to_string()), None),
+            ChatRef::Group(group) => (None, Some(group.as_bytes().to_vec())),
+        };
+        let r#type = match response {
+            RequestResponse::Accept => Type::Accept,
+            RequestResponse::Delete => Type::Delete,
+            RequestResponse::Block => Type::Block,
+            RequestResponse::BlockAndDelete => Type::BlockAndDelete,
+        };
+        self.send_sync(SyncMessage {
+            content: Some(SyncContent::MessageRequestResponse(
+                sync_message::MessageRequestResponse {
+                    thread_aci,
+                    group_id,
+                    r#type: Some(r#type.into()),
+                    ..Default::default()
+                },
+            )),
+            ..SyncMessage::with_padding(&mut rand::rng())
+        })
+    }
+
+    fn sync_blocked(
+        &mut self,
+        list: BlockedList,
+    ) -> LocalBoxFuture<'static, Result<(), BackendError>> {
+        self.send_sync(SyncMessage {
+            content: Some(SyncContent::Blocked(sync_message::Blocked {
+                numbers: list
+                    .numbers
+                    .iter()
+                    .map(|number| number.as_str().to_owned())
+                    .collect(),
+                acis: list
+                    .accounts
+                    .iter()
+                    .map(|account| account.uuid().to_string())
+                    .collect(),
+                acis_binary: Vec::new(),
+                group_ids: list
+                    .groups
+                    .iter()
+                    .map(|group| group.as_bytes().to_vec())
+                    .collect(),
             })),
             ..SyncMessage::with_padding(&mut rand::rng())
+        })
+    }
+
+    /// An empty data message: presage adds this account's profile key.
+    fn send_profile_key(
+        &mut self,
+        peer: ServiceId,
+    ) -> LocalBoxFuture<'static, Result<(), BackendError>> {
+        let mut manager = self.manager.clone();
+        let now = Timestamp::now().as_millis();
+        let message = DataMessage {
+            flags: Some(data_message::Flags::ProfileKeyUpdate as u32),
+            timestamp: Some(now),
+            ..Default::default()
         };
         async move {
-            let me = manager.registration_data().service_ids.aci();
             manager
-                .send_message(me, request, Timestamp::now().as_millis())
+                .send_message(Aci::from(peer.uuid()), message, now)
                 .await
                 .map(drop)
                 .map_err(presage_error)
+        }
+        .boxed_local()
+    }
+
+    /// Reads contact and group records, [`STORAGE_READ_BATCH`] at a time.
+    fn stored_chats(
+        &mut self,
+        known: Option<u64>,
+    ) -> LocalBoxFuture<'static, Result<Option<StoredChats>, BackendError>> {
+        let manager = self.manager.clone();
+        async move {
+            let Some(service) = manager.storage_service().await.map_err(presage_error)? else {
+                return Ok(None);
+            };
+            let manifest = match known {
+                Some(version) => match service
+                    .manifest_if_changed(version)
+                    .await
+                    .map_err(storage_service_error)?
+                {
+                    Some(manifest) => manifest,
+                    None => return Ok(None),
+                },
+                None => service.manifest().await.map_err(storage_service_error)?,
+            };
+            let keys: Vec<_> = manifest
+                .identifiers
+                .iter()
+                .filter(|id| {
+                    matches!(
+                        id.r#type(),
+                        identifier::Type::Contact | identifier::Type::Groupv2
+                    )
+                })
+                .map(|id| id.raw.clone())
+                .collect();
+            let ikm = (!manifest.record_ikm.is_empty()).then_some(manifest.record_ikm.as_slice());
+            let mut chats = Vec::new();
+            for batch in keys.chunks(STORAGE_READ_BATCH) {
+                let records = service
+                    .read_items(batch.to_vec(), ikm)
+                    .await
+                    .map_err(storage_service_error)?;
+                chats.extend(records.into_iter().filter_map(stored_chat));
+            }
+            Ok(Some(StoredChats {
+                version: manifest.version,
+                chats,
+            }))
         }
         .boxed_local()
     }
@@ -628,7 +756,6 @@ impl SignalBackend for PresageBackend {
         &mut self,
         read: Vec<(ServiceId, Timestamp)>,
     ) -> LocalBoxFuture<'static, Result<(), BackendError>> {
-        let mut manager = self.manager.clone();
         let sync = SyncMessage {
             read: read
                 .into_iter()
@@ -640,15 +767,7 @@ impl SignalBackend for PresageBackend {
                 .collect(),
             ..SyncMessage::with_padding(&mut rand::rng())
         };
-        async move {
-            let me = manager.registration_data().service_ids.aci();
-            manager
-                .send_message(me, sync, Timestamp::now().as_millis())
-                .await
-                .map(drop)
-                .map_err(presage_error)
-        }
-        .boxed_local()
+        self.send_sync(sync)
     }
 
     fn send_typing(
@@ -760,6 +879,44 @@ async fn relay(
     }
 }
 
+/// Most Storage Service records read per request.
+const STORAGE_READ_BATCH: usize = 1000;
+
+/// A request to the phone for what it syncs.
+fn sync_request(kind: sync_message::request::Type) -> SyncMessage {
+    SyncMessage {
+        content: Some(SyncContent::Request(sync_message::Request {
+            r#type: Some(kind.into()),
+        })),
+        ..SyncMessage::with_padding(&mut rand::rng())
+    }
+}
+
+/// A contact's or group's state in a Storage Service record; `None` for
+/// other records, and contacts without an ACI.
+fn stored_chat(record: StorageRecord) -> Option<StoredChat> {
+    match record.record? {
+        storage_record::Record::Contact(contact) => {
+            let binary = (!contact.aci_binary.is_empty()).then_some(contact.aci_binary.as_slice());
+            let string = (!contact.aci.is_empty()).then_some(contact.aci.as_str());
+            Some(StoredChat {
+                chat: ChatRef::Contact(service_id(binary, string)?),
+                accepted: contact.whitelisted,
+                blocked: contact.blocked,
+            })
+        }
+        storage_record::Record::GroupV2(group) => {
+            let key = <[u8; 32]>::try_from(group.master_key.as_slice()).ok()?;
+            Some(StoredChat {
+                chat: ChatRef::Group(GroupMasterKey::new(key).id()),
+                accepted: group.whitelisted,
+                blocked: group.blocked,
+            })
+        }
+        _ => None,
+    }
+}
+
 /// Safety numbers as Signal's clients compute them: from ACIs, version 2.
 const FINGERPRINT_VERSION: u32 = 2;
 const FINGERPRINT_ITERATIONS: u32 = 5200;
@@ -823,6 +980,56 @@ mod tests {
         );
         let roundtrip = crate::signal::incoming::quote(&ours).unwrap();
         assert_eq!(roundtrip.author, Some(ServiceId::new(SENDER)));
+    }
+
+    #[test]
+    fn storage_records_name_their_chat() {
+        use presage::libsignal_service::proto::{AccountRecord, ContactRecord, GroupV2Record};
+
+        let record = |record| StorageRecord {
+            record: Some(record),
+        };
+        let contact = |aci: String, aci_binary: Vec<u8>| {
+            record(storage_record::Record::Contact(ContactRecord {
+                aci,
+                aci_binary,
+                whitelisted: true,
+                blocked: false,
+                ..Default::default()
+            }))
+        };
+        let peer = ChatRef::Contact(ServiceId::new(OTHER));
+        let accepted = |chat| StoredChat {
+            chat,
+            accepted: true,
+            blocked: false,
+        };
+        assert_eq!(
+            stored_chat(contact(OTHER.to_string(), Vec::new())),
+            Some(accepted(peer))
+        );
+        assert_eq!(
+            stored_chat(contact(String::new(), OTHER.as_bytes().to_vec())),
+            Some(accepted(peer))
+        );
+        assert_eq!(stored_chat(contact(String::new(), Vec::new())), None);
+
+        let group = record(storage_record::Record::GroupV2(GroupV2Record {
+            master_key: vec![7; 32],
+            blocked: true,
+            ..Default::default()
+        }));
+        assert_eq!(
+            stored_chat(group),
+            Some(StoredChat {
+                chat: ChatRef::Group(GroupMasterKey::new([7; 32]).id()),
+                accepted: false,
+                blocked: true,
+            })
+        );
+        let account = record(storage_record::Record::Account(AccountRecord::default()));
+        assert_eq!(stored_chat(account), None);
+        assert_eq!(stored_chat(StorageRecord { record: None }), None);
     }
 
     #[tokio::test]

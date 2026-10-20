@@ -46,7 +46,8 @@ pub enum Command {
     StartOver,
     /// Stores the text as pending ([`Event::MessageAdded`]) and sends it
     /// in the background: [`Event::MessageUpdated`] once sent, or
-    /// [`Event::SendFailed`]. Sends go out one at a time, in order.
+    /// [`Event::SendFailed`]. Sends go out one at a time, in order. Sending
+    /// accepts a message request; nothing is sent to a blocked chat.
     SendText {
         conversation: ConversationId,
         body: MessageBody,
@@ -82,11 +83,12 @@ pub enum Command {
     },
     /// Marks incoming messages read; [`Event::ConversationUpdated`] follows,
     /// after [`Event::MessageUpdated`] for disappearing ones, whose countdown
-    /// starts. Sends read receipts if the account allows them.
+    /// starts. Sends read receipts if the account allows them, unless it's a
+    /// message request.
     MarkRead(ConversationId),
     /// The user started or stopped typing in a conversation; tells the
-    /// other side if the account allows typing indicators. Repeat `true`
-    /// freely while typing.
+    /// other side if the account allows typing indicators, unless it's a
+    /// message request. Repeat `true` freely while typing.
     Typing {
         conversation: ConversationId,
         typing: bool,
@@ -100,6 +102,18 @@ pub enum Command {
     ///
     /// [`Verification::Changed`]: crate::model::Verification::Changed
     ConfirmIdentity(ServiceId),
+    /// Accepts a message request, or unblocks a chat: read receipts and
+    /// typing go out there again, and a 1:1 request's sender gets this
+    /// account's profile. The phone learns of it.
+    /// [`Event::ConversationUpdated`] follows.
+    Accept(ConversationId),
+    /// Blocks a chat: messages from the account, or in the group, are
+    /// dropped. The phone learns of it. [`Event::ConversationUpdated`]
+    /// follows.
+    Block(ConversationId),
+    /// Deletes a message request or a blocked chat, keeping a block: the
+    /// phone learns of it. [`Event::ConversationRemoved`] follows.
+    DeleteRequest(ConversationId),
     /// Removes this device from the account, unless the phone already did,
     /// then deletes all local data (database, salt, keychain key; not the
     /// config) and starts over: [`Event::Unlinking`], then

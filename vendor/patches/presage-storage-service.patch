@@ -1,0 +1,55 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ricardo Zuasti <rzuasti@pm.me>
+Date: Tue, 20 Oct 2026 12:00:00 -0400
+Subject: [PATCH] feat: authenticate against the storage service
+
+Manager::storage_service authenticates against Storage Service with the
+account's storage key, derived from its account entropy pool, else its
+master key, so clients can read contact and group records.
+
+Assisted-by: Claude Opus 5.5
+---
+diff --git a/src/manager/registered.rs b/src/manager/registered.rs
+index fa9d9ed..00f1f24 100644
+--- a/src/manager/registered.rs
++++ b/src/manager/registered.rs
+@@ -15,6 +15,7 @@ use libsignal_service::{
+     content::{Content, ContentBody, Metadata},
+     encrypt_device_name,
+     groups_v2::{decrypt_group, GroupsManager, InMemoryCredentialsCache},
++    master_key::{MasterKey, StorageServiceKey},
+     messagepipe::{Incoming, MessagePipe, ServiceCredentials},
+     prelude::{phonenumber::PhoneNumber, MessageSenderError, ProtobufMessage, Uuid},
+     profile_cipher::ProfileCipher,
+@@ -46,7 +47,7 @@ use libsignal_service::{
+         groups::{GroupMasterKey, GroupSecretParams},
+         profiles::ProfileKey,
+     },
+-    AccountManager, Profile, ServiceIdExt,
++    AccountManager, Profile, ServiceIdExt, StorageService,
+ };
+ use libsignal_service::{
+     libsignal_account_keys::AccountEntropyPool, proto::addressable_message::Author,
+@@ -574,6 +575,22 @@ impl<S: Store> Manager<S, Registered> {
+         Ok(())
+     }
+ 
++    /// Authenticates against the storage service with the account's storage
++    /// key, derived from its account entropy pool, else its master key;
++    /// `None` without either.
++    pub async fn storage_service(&self) -> Result<Option<StorageService>, Error<S::Error>> {
++        let master_key = match self.store.fetch_account_entropy_pool().await? {
++            Some(aep) => MasterKey::from_slice(aep.derive_svr_key().as_slice()).ok(),
++            None => self.store.fetch_master_key().await?,
++        };
++        let Some(master_key) = master_key else {
++            return Ok(None);
++        };
++        let storage_key = StorageServiceKey::from_master_key(&master_key);
++        let service = StorageService::new(self.identified_push_service(), storage_key).await?;
++        Ok(Some(service))
++    }
++
+     async fn groups_manager(
+         &self,
+     ) -> Result<GroupsManager<InMemoryCredentialsCache>, Error<S::Error>> {

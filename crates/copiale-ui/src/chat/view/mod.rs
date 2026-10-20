@@ -3,6 +3,7 @@
 
 mod log;
 mod overlays;
+mod requests;
 mod settings;
 mod sidebar;
 
@@ -71,6 +72,10 @@ actions!(
         SearchNext,
         HideWindow,
         ConfirmSafetyNumber,
+        AcceptRequest,
+        DeleteRequest,
+        BlockChat,
+        UnblockChat,
     ]
 );
 
@@ -89,6 +94,9 @@ const SETTINGS: &str = "Settings";
 const CONFIRM_UNLINK: &str = "ConfirmUnlink";
 /// Key context of the safety number card.
 const SAFETY_NUMBER: &str = "SafetyNumber";
+/// Key context of the banner standing in for the composer in a message
+/// request or blocked chat.
+const REQUEST: &str = "Request";
 
 /// Registers the chat key bindings. Composer bindings act on the input
 /// itself, ahead of its own, and pass keys on when they don't apply.
@@ -126,6 +134,10 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("escape", Cancel, Some(CONFIRM_UNLINK)),
         KeyBinding::new("escape", Cancel, Some(SAFETY_NUMBER)),
         KeyBinding::new("enter", ConfirmSafetyNumber, Some(SAFETY_NUMBER)),
+        KeyBinding::new("a", AcceptRequest, Some(REQUEST)),
+        KeyBinding::new("d", DeleteRequest, Some(REQUEST)),
+        KeyBinding::new("b", BlockChat, Some(REQUEST)),
+        KeyBinding::new("u", UnblockChat, Some(REQUEST)),
         KeyBinding::new("e", DeleteForEveryone, confirming),
         KeyBinding::new("m", DeleteForMe, confirming),
         KeyBinding::new("escape", Cancel, confirming),
@@ -160,6 +172,8 @@ pub struct ChatView {
     confirm_focus: FocusHandle,
     /// Held while a safety number shows.
     identity_focus: FocusHandle,
+    /// Held in a message request or blocked chat, which has no composer.
+    request_focus: FocusHandle,
     /// Device name and privacy settings, once the core reports them.
     account: Option<Account>,
     layout: Layout,
@@ -292,6 +306,7 @@ impl ChatView {
             settings_scroll: ScrollHandle::new(),
             confirm_focus: cx.focus_handle(),
             identity_focus: cx.focus_handle(),
+            request_focus: cx.focus_handle(),
             account: None,
             layout: Layout::default(),
             drawn: false,
@@ -462,8 +477,13 @@ impl ChatView {
         if let Event::Account(account) = event {
             self.account = Some(account.clone());
         }
+        let shown = self.open_state();
         let effects = self.chat.apply(event, self.active);
         self.run(effects, cx);
+        // Accepting brings the composer back; deleting closes the chat.
+        if self.open_state() != shown && self.chat.overlay().is_none() {
+            self.focus_pending = true;
+        }
         if let Some(id) = self.chat.take_requested_open() {
             self.open_later(id, cx);
         }
@@ -489,6 +509,12 @@ impl ChatView {
             Event::Messages { .. } | Event::MessageUpdated(_) => self.tick_timers(cx),
             _ => {}
         }
+    }
+
+    /// The open chat and whether it has a composer.
+    fn open_state(&self) -> Option<(ConversationId, bool)> {
+        let id = self.chat.open_id()?;
+        Some((id, self.chat.request_banner().is_none()))
     }
 
     /// Redraws as countdowns change, while any run in the open conversation.
@@ -587,6 +613,9 @@ impl ChatView {
             }
             composer.focus(window, cx);
         });
+        if self.chat.request_banner().is_some() {
+            window.focus(&self.request_focus, cx);
+        }
     }
 
     fn run(&mut self, effects: Effects, cx: &mut Context<Self>) {
@@ -817,7 +846,9 @@ impl ChatView {
 
     /// Focuses the composer, or the view without an open chat.
     fn restore_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.chat.open_id().is_some() {
+        if self.chat.request_banner().is_some() {
+            window.focus(&self.request_focus, cx);
+        } else if self.chat.open_id().is_some() {
             self.inputs()
                 .composer
                 .update(cx, |composer, cx| composer.focus(window, cx));

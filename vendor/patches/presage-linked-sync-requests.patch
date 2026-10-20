@@ -1,0 +1,28 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ricardo Zuasti <rzuasti@pm.me>
+Date: Tue, 20 Oct 2026 12:00:00 -0400
+Subject: [PATCH] fix: answer sync requests only as the primary device
+
+A linked device answered other devices' sync requests too, e.g. a
+blocked list request with an empty list, which could clear the list on
+the device asking. Only the primary answers them now.
+
+Assisted-by: Claude Opus 5.5
+---
+diff --git a/src/manager/registered.rs b/src/manager/registered.rs
+index fa9d9ed..00f1f24 100644
+--- a/src/manager/registered.rs
++++ b/src/manager/registered.rs
+@@ -739,6 +756,12 @@ impl<S: Store> Manager<S, Registered> {
+                                         use libsignal_service::content::sync_message::request::Type as RequestType;
+ 
+                                         match request.r#type() {
++                                            // only the primary device answers
++                                            _ if state.registration_type
++                                                != RegistrationType::Primary =>
++                                            {
++                                                debug!("not answering a sync request as a linked device")
++                                            }
+                                             RequestType::Contacts => {
+                                                 let contacts = state
+                                                     .store

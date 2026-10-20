@@ -16,13 +16,14 @@ use super::probe::{Check, Probe};
 use super::retries::Limiter;
 use super::run::{Core, ignored};
 use super::{Command, DELETE_WINDOW, EDIT_WINDOW, Event};
-use crate::backend::{BackendError, Incoming, SignalBackend, Undecryptable};
+use crate::backend::{BackendError, Incoming, SignalBackend, StoredChats, Undecryptable};
 use crate::clock::Clock;
 use crate::model::{
-    Account, AccountSettings, Change, ChatRef, Content, ConversationId, Destination, GroupId,
-    GroupMasterKey, GroupRef, Identity, IdentityKey, IncomingMessage, Message, MessageBody,
-    MessageChange, MessageId, MessageRef, MessageStatus, Outgoing, Peer, Quote, ReceiptKind,
-    SentMessage, ServiceId, Timestamp, Verification,
+    Account, AccountSettings, BlockedList, Change, ChatRef, ChatState, Content, ConversationId,
+    Destination, GroupId, GroupMasterKey, GroupRef, GroupUpdate, Identity, IdentityKey,
+    IncomingMessage, Message, MessageBody, MessageChange, MessageId, MessageRef, MessageStatus,
+    Outgoing, Peer, Quote, ReceiptKind, RequestResponse, SentMessage, ServiceId, Timestamp,
+    Verification,
 };
 use crate::storage::{Database, StorageError};
 
@@ -65,9 +66,19 @@ struct Session<'a, B> {
     /// Asked of the phone once connected.
     contacts_wanted: bool,
     settings_wanted: bool,
+    blocked_wanted: bool,
     /// Results of contact sync requests running in the background.
     contacts_asked_tx: UnboundedSender<Result<(), BackendError>>,
     contacts_asked_rx: UnboundedReceiver<Result<(), BackendError>>,
+    /// Results of Storage Service reads running in the background.
+    stored_tx: UnboundedSender<StoredRead>,
+    stored_rx: UnboundedReceiver<StoredRead>,
+    /// Set while reading Storage Service; with `storage_wanted`, it's read
+    /// again after.
+    storage_reading: bool,
+    storage_wanted: bool,
+    /// The Storage Service manifest version last applied.
+    storage_version: Option<u64>,
     incoming: Option<LocalBoxStream<'static, Incoming>>,
     connecting: Option<LocalBoxFuture<'static, Connecting>>,
     retry_at: Option<Instant>,
@@ -91,6 +102,7 @@ struct Session<'a, B> {
 impl<'a, B: SignalBackend> Session<'a, B> {
     fn new(core: &'a mut Core, db: &'a Database, mut backend: B) -> Self {
         let (contacts_asked_tx, contacts_asked_rx) = unbounded_channel();
+        let (stored_tx, stored_rx) = unbounded_channel();
         let options = &core.options;
         Self {
             device_name: backend.device_name(),
@@ -104,8 +116,14 @@ impl<'a, B: SignalBackend> Session<'a, B> {
             next_expiry: None,
             contacts_wanted: false,
             settings_wanted: false,
+            blocked_wanted: false,
             contacts_asked_tx,
             contacts_asked_rx,
+            stored_tx,
+            stored_rx,
+            storage_reading: false,
+            storage_wanted: false,
+            storage_version: None,
             incoming: None,
             connecting: None,
             retry_at: Some(Instant::now()),
@@ -157,6 +175,16 @@ impl<'a, B: SignalBackend> Session<'a, B> {
                 self.settings_wanted = true;
             }
         }
+        match self.db.storage_version().await {
+            Ok(version) => self.storage_version = version,
+            Err(error) => self.database_error(error),
+        }
+        // Before Storage Service was read, the phone's list is all there is.
+        self.blocked_wanted = linked_now || self.storage_version.is_none();
+        let me = ChatRef::Contact(self.backend.own_id());
+        if let Err(error) = self.db.mark_accepted(me).await {
+            self.database_error(error);
+        }
         self.send_account();
         self.check_unconfirmed().await;
     }
@@ -191,6 +219,10 @@ impl<'a, B: SignalBackend> Session<'a, B> {
                 }
                 Some(asked) = self.contacts_asked_rx.recv() => {
                     self.contacts_asked(asked).await;
+                    None
+                }
+                Some(read) = self.stored_rx.recv() => {
+                    self.stored_read(read).await;
                     None
                 }
                 check = self.probe.next() => self.probe_check(check).await,
@@ -255,6 +287,9 @@ impl<'a, B: SignalBackend> Session<'a, B> {
             Some(Command::MarkRead(conversation)) => self.mark_read(conversation).await,
             Some(Command::LoadIdentity(peer)) => self.load_identity(peer).await,
             Some(Command::ConfirmIdentity(peer)) => self.confirm_identity(peer).await,
+            Some(Command::Accept(conversation)) => self.accept(conversation).await,
+            Some(Command::Block(conversation)) => self.block(conversation).await,
+            Some(Command::DeleteRequest(conversation)) => self.delete_request(conversation).await,
             Some(Command::Typing {
                 conversation,
                 typing,
@@ -302,6 +337,11 @@ impl<'a, B: SignalBackend> Session<'a, B> {
                 verified,
             } => self.verified_synced(peer, key, verified).await,
             Incoming::ContactsSynced => self.contacts_synced().await,
+            Incoming::RequestResponse { chat, response } => {
+                self.request_answered(chat, response).await
+            }
+            Incoming::Blocked(list) => self.blocked_synced(list).await,
+            Incoming::StorageChanged => self.read_storage(),
             Incoming::Undecryptable(failure) => self.undecryptable(failure).await,
             Incoming::RetryRequested {
                 sender,
@@ -350,6 +390,11 @@ impl<'a, B: SignalBackend> Session<'a, B> {
                     let request = timed(timeout, self.backend.request_settings_sync());
                     spawn_logged("requesting settings", request);
                 }
+                if std::mem::take(&mut self.blocked_wanted) {
+                    let request = timed(timeout, self.backend.request_blocked_sync());
+                    spawn_logged("requesting the blocked list", request);
+                }
+                self.read_storage();
             }
             Err(error) if error.is_unauthorized() => {
                 tracing::warn!(%error, "credentials rejected");
@@ -525,6 +570,16 @@ impl<'a, B: SignalBackend> Session<'a, B> {
             }
             Err(error) => return self.database_error(error),
         };
+        // Replying accepts a request, as in Signal: it shares our profile.
+        let chat = chat_of(destination);
+        match self.db.is_blocked(chat).await {
+            Ok(true) => return tracing::debug!("not sending to a blocked chat"),
+            Ok(false) => {}
+            Err(error) => return self.database_error(error),
+        }
+        if let Err(error) = self.db.mark_accepted(chat).await {
+            return self.database_error(error);
+        }
         // presage applies the same timer when sending.
         let expire_timer = match self.backend.expire_timer(destination).await {
             Ok(timer) => timer,
@@ -725,7 +780,8 @@ impl<'a, B: SignalBackend> Session<'a, B> {
                     .filter_map(|message| Some((message.sender?, message.sent_at)))
                     .collect();
                 self.countdowns_started(&read);
-                self.send_receipts(receipts);
+                let accepted = self.accepted(conversation).await;
+                self.send_receipts(receipts, accepted);
                 self.send_conversation(conversation).await;
             }
             Err(error) => self.database_error(error),
@@ -753,6 +809,9 @@ impl<'a, B: SignalBackend> Session<'a, B> {
             Ok(None) => return,
             Err(error) => return self.database_error(error),
         };
+        if typing && !self.accepted(conversation).await {
+            return;
+        }
         if typing {
             self.typing_sent.insert(conversation, Instant::now());
         }
@@ -794,12 +853,20 @@ impl<'a, B: SignalBackend> Session<'a, B> {
     }
 
     async fn message_received(&mut self, mut message: IncomingMessage) {
+        let group_id = message.group.map(|group| group.key.id());
+        if self.blocked(Some(message.sender), group_id).await {
+            return;
+        }
         if let Some(group) = message.group
             && !self
                 .group_accepts(group, Some(message.sender), &message.content)
                 .await
         {
             return;
+        }
+        if let Some(group) = message.group {
+            self.added_by_accepted(group, message.sender, &message.content)
+                .await;
         }
         let destination = message
             .group
@@ -825,6 +892,10 @@ impl<'a, B: SignalBackend> Session<'a, B> {
         {
             return;
         }
+        // Sent with our profile, so accepted on the phone.
+        if let Err(error) = self.db.mark_accepted(chat_of(message.destination)).await {
+            self.database_error(error);
+        }
         own_quotes(&mut message.content, self.backend.own_id());
         self.store(
             &message.destination,
@@ -840,6 +911,13 @@ impl<'a, B: SignalBackend> Session<'a, B> {
     }
 
     async fn change_received(&mut self, mut change: MessageChange) {
+        let group_id = match change.destination {
+            Destination::Group(group) => Some(group.key.id()),
+            Destination::Contact(_) => None,
+        };
+        if self.blocked(change.author, group_id).await {
+            return;
+        }
         if let Destination::Group(group) = change.destination
             && !self.in_group(group, change.author).await
         {
@@ -912,7 +990,7 @@ impl<'a, B: SignalBackend> Session<'a, B> {
     }
 
     async fn typing_received(&self, sender: ServiceId, group: Option<GroupId>, typing: bool) {
-        if !self.settings.typing_indicators {
+        if !self.settings.typing_indicators || self.blocked(Some(sender), group).await {
             return;
         }
         match self.db.typing_conversation(sender, group).await {
@@ -952,6 +1030,9 @@ impl<'a, B: SignalBackend> Session<'a, B> {
     /// Asks the sender to resend a message that couldn't be decrypted, and
     /// shows a placeholder until it arrives.
     async fn undecryptable(&mut self, failure: Undecryptable) {
+        if self.blocked(Some(failure.sender), failure.group).await {
+            return;
+        }
         tracing::warn!(
             sender = ?failure.sender,
             device = failure.device,
@@ -1001,11 +1082,12 @@ impl<'a, B: SignalBackend> Session<'a, B> {
         sent_at: Timestamp,
         session_reset: bool,
     ) {
-        if !self
-            .retries_answered
-            .allow(sender, device, sent_at, Instant::now())
+        if self.blocked(Some(sender), None).await
+            || !self
+                .retries_answered
+                .allow(sender, device, sent_at, Instant::now())
         {
-            tracing::info!("retry request already answered, or too many");
+            tracing::info!("retry request blocked, already answered, or too many");
             return;
         }
         let since =
@@ -1037,6 +1119,255 @@ impl<'a, B: SignalBackend> Session<'a, B> {
                 .into_iter()
                 .for_each(|key| self.groups.refresh(key, &mut self.backend)),
             Err(error) => self.database_error(error),
+        }
+    }
+
+    // Message requests.
+
+    /// Accepts a request, or unblocks; tells the phone, and a 1:1 request's
+    /// sender who we are.
+    async fn accept(&mut self, conversation: ConversationId) {
+        let Some((chat, state)) = self.chat_state(conversation).await else {
+            return;
+        };
+        if state == ChatState::Accepted {
+            return;
+        }
+        if let Err(error) = self.db.accept(chat).await {
+            return self.database_error(error);
+        }
+        tracing::info!(conversation = conversation.get(), ?state, "chat accepted");
+        spawn_logged(
+            "syncing an accepted request",
+            self.backend
+                .sync_request_response(chat, RequestResponse::Accept),
+        );
+        match (state, chat) {
+            (ChatState::Blocked, _) => self.sync_blocked().await,
+            (ChatState::Request, ChatRef::Contact(peer)) => {
+                spawn_logged("sharing our profile", self.backend.send_profile_key(peer))
+            }
+            _ => {}
+        }
+        self.send_conversation(conversation).await;
+    }
+
+    async fn block(&mut self, conversation: ConversationId) {
+        let Some((chat, state)) = self.chat_state(conversation).await else {
+            return;
+        };
+        if chat == ChatRef::Contact(self.backend.own_id()) {
+            return;
+        }
+        match self.db.set_blocked(chat, true).await {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(error) => return self.database_error(error),
+        }
+        tracing::info!(conversation = conversation.get(), "chat blocked");
+        self.typing_sent.remove(&conversation);
+        if state == ChatState::Request {
+            spawn_logged(
+                "syncing a blocked request",
+                self.backend
+                    .sync_request_response(chat, RequestResponse::Block),
+            );
+        }
+        self.sync_blocked().await;
+        self.send_conversation(conversation).await;
+    }
+
+    /// Deletes a request or blocked chat here and on the phone.
+    async fn delete_request(&mut self, conversation: ConversationId) {
+        let Some((chat, state)) = self.chat_state(conversation).await else {
+            return;
+        };
+        if state == ChatState::Accepted {
+            return tracing::debug!("not a request");
+        }
+        self.delete_chat(chat).await;
+        spawn_logged(
+            "syncing a deleted request",
+            self.backend
+                .sync_request_response(chat, RequestResponse::Delete),
+        );
+    }
+
+    /// Applies an answer to a request given on another device.
+    async fn request_answered(&mut self, chat: ChatRef, response: RequestResponse) {
+        tracing::info!(?response, "request answered on another device");
+        let changed = match response {
+            RequestResponse::Accept => self.db.accept(chat).await,
+            RequestResponse::Block | RequestResponse::BlockAndDelete => {
+                self.db.set_blocked(chat, true).await
+            }
+            RequestResponse::Delete => Ok(false),
+        };
+        match changed {
+            Ok(true) => self.send_chats(&[chat]).await,
+            Ok(false) => {}
+            Err(error) => self.database_error(error),
+        }
+        if matches!(
+            response,
+            RequestResponse::Delete | RequestResponse::BlockAndDelete
+        ) {
+            self.delete_chat(chat).await;
+        }
+    }
+
+    async fn blocked_synced(&mut self, list: BlockedList) {
+        match self.db.set_blocked_list(&list).await {
+            Ok(changed) => {
+                tracing::info!(
+                    accounts = list.accounts.len(),
+                    groups = list.groups.len(),
+                    "blocked list synced"
+                );
+                self.send_chats(&changed).await;
+            }
+            Err(error) => self.database_error(error),
+        }
+    }
+
+    /// Reads Storage Service in the background, unless already reading.
+    fn read_storage(&mut self) {
+        if self.storage_reading {
+            self.storage_wanted = true;
+            return;
+        }
+        self.storage_reading = true;
+        let timeout = self.core.options.connect_timeout;
+        let request =
+            tokio::time::timeout(timeout, self.backend.stored_chats(self.storage_version));
+        let stored = self.stored_tx.clone();
+        tokio::task::spawn_local(async move {
+            let read = request
+                .await
+                .unwrap_or_else(|_| Err(BackendError::network("timed out")));
+            stored.send(read).ok();
+        });
+    }
+
+    /// Applies what Storage Service holds, if it changed.
+    async fn stored_read(&mut self, read: StoredRead) {
+        self.storage_reading = false;
+        match read {
+            Ok(Some(stored)) => match self
+                .db
+                .apply_stored_chats(&stored.chats, stored.version)
+                .await
+            {
+                Ok(changed) => {
+                    self.storage_version = Some(stored.version);
+                    tracing::info!(
+                        version = stored.version,
+                        chats = stored.chats.len(),
+                        changed = changed.len(),
+                        "storage service read"
+                    );
+                    self.send_chats(&changed).await;
+                }
+                Err(error) => self.database_error(error),
+            },
+            Ok(None) => tracing::debug!("storage service unchanged, or no storage key"),
+            Err(error) => tracing::info!(%error, "reading storage service failed"),
+        }
+        if std::mem::take(&mut self.storage_wanted) {
+            self.read_storage();
+        }
+    }
+
+    /// Tells this account's other devices the whole blocked list.
+    async fn sync_blocked(&mut self) {
+        match self.db.blocked().await {
+            Ok(list) => spawn_logged("syncing the blocked list", self.backend.sync_blocked(list)),
+            Err(error) => self.database_error(error),
+        }
+    }
+
+    /// Accepts the group if an accepted account added us.
+    async fn added_by_accepted(&mut self, group: GroupRef, author: ServiceId, content: &Content) {
+        let me = self.backend.own_id();
+        let Content::GroupChanged(updates) = content else {
+            return;
+        };
+        if !updates.contains(&GroupUpdate::Added(me)) {
+            return;
+        }
+        match self.db.is_accepted(ChatRef::Contact(author)).await {
+            Ok(true) => {
+                if let Err(error) = self.db.mark_accepted(ChatRef::Group(group.key.id())).await {
+                    self.database_error(error);
+                }
+            }
+            Ok(false) => {}
+            Err(error) => self.database_error(error),
+        }
+    }
+
+    /// Whether `sender` (`None` for this account) or `group` is blocked.
+    async fn blocked(&self, sender: Option<ServiceId>, group: Option<GroupId>) -> bool {
+        let sender = sender.filter(|sender| *sender != self.backend.own_id());
+        let chats = sender
+            .map(ChatRef::Contact)
+            .into_iter()
+            .chain(group.map(ChatRef::Group));
+        for chat in chats {
+            match self.db.is_blocked(chat).await {
+                Ok(true) => {
+                    tracing::debug!("dropped content from a blocked account or group");
+                    return true;
+                }
+                Ok(false) => {}
+                Err(error) => self.database_error(error),
+            }
+        }
+        false
+    }
+
+    /// Whether the user accepted `conversation`, or nobody wrote there yet.
+    async fn accepted(&self, conversation: ConversationId) -> bool {
+        self.chat_state(conversation)
+            .await
+            .is_some_and(|(_, state)| state == ChatState::Accepted)
+    }
+
+    /// Who `conversation` is with, and its state.
+    async fn chat_state(&self, conversation: ConversationId) -> Option<(ChatRef, ChatState)> {
+        match self.db.conversation(conversation).await {
+            Ok(Some(summary)) => {
+                let chat = match summary.peer {
+                    Peer::Contact(peer) => ChatRef::Contact(peer),
+                    Peer::Group(group) => ChatRef::Group(group),
+                };
+                Some((chat, summary.state))
+            }
+            Ok(None) => None,
+            Err(error) => {
+                self.database_error(error);
+                None
+            }
+        }
+    }
+
+    /// Deletes the conversation with `chat`, if any.
+    async fn delete_chat(&self, chat: ChatRef) {
+        match self.db.delete_conversation(chat).await {
+            Ok(Some(conversation)) => self.emit(Event::ConversationRemoved(conversation)),
+            Ok(None) => {}
+            Err(error) => self.database_error(error),
+        }
+    }
+
+    /// Reports the conversations with `chats` whose state changed.
+    async fn send_chats(&self, chats: &[ChatRef]) {
+        for chat in chats {
+            match self.db.chat_conversation(*chat).await {
+                Ok(Some(conversation)) => self.send_conversation(conversation).await,
+                Ok(None) => {}
+                Err(error) => self.database_error(error),
+            }
         }
     }
 
@@ -1302,9 +1633,9 @@ impl<'a, B: SignalBackend> Session<'a, B> {
     }
 
     /// Tells our other devices we read these messages, and their authors too
-    /// if the account sends read receipts.
-    fn send_receipts(&mut self, read: Vec<(ServiceId, Timestamp)>) {
-        if self.settings.read_receipts {
+    /// if `to_authors` and the account sends read receipts.
+    fn send_receipts(&mut self, read: Vec<(ServiceId, Timestamp)>, to_authors: bool) {
+        if to_authors && self.settings.read_receipts {
             let me = self.backend.own_id();
             let mut by_author: Vec<(ServiceId, Vec<Timestamp>)> = Vec::new();
             for (author, sent_at) in read.iter().filter(|(author, _)| *author != me) {
@@ -1574,6 +1905,9 @@ impl<'a, B: SignalBackend> Session<'a, B> {
 /// A connection attempt's result.
 type Connecting = Result<LocalBoxStream<'static, Incoming>, BackendError>;
 
+/// A Storage Service read's result.
+type StoredRead = Result<Option<StoredChats>, BackendError>;
+
 /// When expiring fails, how long until trying again.
 const EXPIRY_RETRY_MS: u64 = 60_000;
 
@@ -1616,6 +1950,14 @@ fn verification(verified: Option<&IdentityKey>, current: Option<&IdentityKey>) -
         (None, _) => Verification::Unverified,
         (Some(verified), Some(current)) if verified != current => Verification::Changed,
         (Some(_), _) => Verification::Verified,
+    }
+}
+
+/// The chat messages to `destination` go to.
+fn chat_of(destination: Destination) -> ChatRef {
+    match destination {
+        Destination::Contact(peer) => ChatRef::Contact(peer),
+        Destination::Group(group) => ChatRef::Group(group.key.id()),
     }
 }
 

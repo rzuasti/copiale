@@ -17,6 +17,12 @@ pub enum PaletteAction {
     Open(ConversationId),
     /// Shows an account's safety number.
     SafetyNumber(ServiceId),
+    /// Accepts a message request.
+    Accept(ConversationId),
+    Block(ConversationId),
+    Unblock(ConversationId),
+    /// Deletes a message request or blocked chat.
+    DeleteRequest(ConversationId),
     NewChat,
     Settings,
     Theme(ThemeMode),

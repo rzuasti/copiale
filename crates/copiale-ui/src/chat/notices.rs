@@ -4,7 +4,9 @@
 use std::collections::{HashMap, HashSet};
 
 use copiale_core::config::NotificationContent;
-use copiale_core::{Content, ConversationId, ConversationSummary, Direction, Event, Message, Peer};
+use copiale_core::{
+    ChatState, Content, ConversationId, ConversationSummary, Direction, Event, Message, Peer,
+};
 
 use super::content::placeholders;
 use super::model::{sender_name, title};
@@ -26,6 +28,8 @@ pub struct Notice {
     pub key: NoticeKey,
     pub title: String,
     pub body: String,
+    /// No sound, low urgency: for message requests.
+    pub quiet: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -166,7 +170,8 @@ fn notable(message: &Message) -> bool {
     message.direction == Direction::Incoming && !message.read && !message.content.is_quiet()
 }
 
-/// The chat's notice after `count` unseen messages, `latest` the newest.
+/// The chat's notice after `count` unseen messages, `latest` the newest. A
+/// request's shows neither its name, which its sender chose, nor its text.
 fn chat_notice(
     summary: &ConversationSummary,
     latest: &Message,
@@ -174,6 +179,23 @@ fn chat_notice(
     content: NotificationContent,
 ) -> Notice {
     let group = matches!(summary.peer, Peer::Group(_));
+    if summary.state == ChatState::Request {
+        let from = if group {
+            "a group you haven't accepted"
+        } else {
+            "someone not in your contacts"
+        };
+        let body = match count {
+            1 => format!("From {from}"),
+            count => format!("{count} messages from {from}"),
+        };
+        return Notice {
+            key: NoticeKey::Chat(summary.id),
+            title: "Message request".into(),
+            body,
+            quiet: true,
+        };
+    }
     let sender = latest.sender.map(|author| sender_name(summary, author));
     let body = match (content, count, sender) {
         (NotificationContent::Message, _, Some(sender)) if group => {
@@ -188,6 +210,7 @@ fn chat_notice(
         key: NoticeKey::Chat(summary.id),
         title: title(summary),
         body,
+        quiet: false,
     }
 }
 
@@ -204,6 +227,7 @@ fn backlog_notice(backlog: &Backlog) -> Notice {
         key: NoticeKey::Backlog,
         title: "Copiale".into(),
         body,
+        quiet: false,
     }
 }
 
@@ -228,8 +252,8 @@ fn preview(content: &Content) -> String {
 #[cfg(test)]
 mod tests {
     use copiale_core::{
-        Attachment, ConversationSummary, GroupId, Member, MessageBody, MessageId, ServiceId,
-        Timestamp,
+        Attachment, ChatState, ConversationSummary, GroupId, Member, MessageBody, MessageId,
+        ServiceId, Timestamp,
     };
     use uuid::Uuid;
 
@@ -247,6 +271,7 @@ mod tests {
         ConversationSummary {
             id: chat_id(n),
             peer: Peer::Contact(peer(n as u128)),
+            state: ChatState::Accepted,
             title: Some(format!("Contact {n}")),
             members: Vec::new(),
             last_activity: Some(Timestamp::from_millis(1)),
@@ -258,6 +283,7 @@ mod tests {
     fn group(unread: u32) -> ConversationSummary {
         ConversationSummary {
             peer: Peer::Group(GroupId::new([7; 32])),
+            state: ChatState::Accepted,
             title: Some("Dev".into()),
             members: vec![Member {
                 id: peer(1),
@@ -326,6 +352,56 @@ mod tests {
         from_alice.sender = Some(peer(1));
         let actions = receive(&mut text, from_alice, group(1), None);
         assert_eq!(shown(&actions), [("Dev", "Alice: ship it")]);
+    }
+
+    #[test]
+    fn requests_notify_quietly_without_name_or_text() {
+        let mut notices = Notices::new(NotificationContent::Message);
+        let request = |n: i64, unread| ConversationSummary {
+            state: ChatState::Request,
+            title: Some("Mom".into()),
+            ..summary(n, unread)
+        };
+
+        let actions = receive(&mut notices, message(1, 1, "it's me"), request(1, 1), None);
+        let actions = actions.into_iter().chain(receive(
+            &mut notices,
+            message(2, 1, "new number"),
+            request(1, 2),
+            None,
+        ));
+        let notices: Vec<_> = actions
+            .map(|action| match action {
+                NoticeAction::Show(notice) => (notice.title, notice.body, notice.quiet),
+                NoticeAction::Close(_) => panic!("nothing to close"),
+            })
+            .collect();
+        assert_eq!(
+            notices,
+            [
+                (
+                    "Message request".into(),
+                    "From someone not in your contacts".into(),
+                    true
+                ),
+                (
+                    "Message request".into(),
+                    "2 messages from someone not in your contacts".into(),
+                    true
+                ),
+            ]
+        );
+
+        let mut groups = Notices::new(NotificationContent::Message);
+        let group_request = ConversationSummary {
+            state: ChatState::Request,
+            ..group(1)
+        };
+        let actions = receive(&mut groups, message(3, 9, "hi"), group_request, None);
+        assert_eq!(
+            shown(&actions),
+            [("Message request", "From a group you haven't accepted")]
+        );
     }
 
     #[test]
