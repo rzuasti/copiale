@@ -1,8 +1,10 @@
 //! Redacts identifiers from formatted log output.
 //!
-//! - UUIDs (`8-4-4-4-12` hex) and runs of 32+ hex digits become `…` plus
-//!   the last 4 digits, matching `ServiceId`'s `Debug`.
-//! - `+` followed by 7–15 digits (E.164) becomes `+…` plus the last 2.
+//! - UUIDs (`8-4-4-4-12` hex) and runs of 32+ hex digits become the
+//!   [`Tag`] of the bytes they spell, matching `ServiceId`'s and `GroupId`'s
+//!   `Debug`.
+//! - `+` followed by 7–15 digits (E.164) becomes its [`Tag`], matching
+//!   `PhoneNumber`'s `Debug`.
 //! - `Debug`-formatted byte lists of 16+ bytes (raw IDs, server responses)
 //!   become `[N bytes]`.
 //!
@@ -11,6 +13,8 @@
 use std::io::Write;
 
 use tracing_subscriber::fmt::MakeWriter;
+
+use super::Tag;
 
 const HEX_RUN_MIN: usize = 32;
 const UUID_GROUPS: [usize; 5] = [8, 4, 4, 4, 12];
@@ -53,8 +57,7 @@ pub(crate) fn scrub(text: &str) -> String {
             let token = &text[i..end];
             let hex_digits = token.bytes().filter(u8::is_ascii_hexdigit).count();
             if token.contains('-') || hex_digits >= HEX_RUN_MIN {
-                out.push('…');
-                out.push_str(&token[token.len() - 4..]);
+                out.push_str(&hex_tag(token).to_string());
             } else {
                 out.push_str(token);
             }
@@ -67,8 +70,7 @@ pub(crate) fn scrub(text: &str) -> String {
         } else if bytes[i] == b'+'
             && let Some(end) = phone_end(bytes, i)
         {
-            out.push_str("+…");
-            out.push_str(&text[end - 2..end]);
+            out.push_str(&Tag::new(&bytes[i..end]).to_string());
             i = end;
         } else {
             let len = utf8_len(bytes[i]);
@@ -77,6 +79,25 @@ pub(crate) fn scrub(text: &str) -> String {
         }
     }
     out
+}
+
+/// Tag of the bytes the hex digits in `token` spell; of the lowercase digits
+/// if their count is odd.
+fn hex_tag(token: &str) -> Tag {
+    let digits: Vec<u8> = token
+        .chars()
+        .filter_map(|c| c.to_digit(16))
+        .map(|digit| digit as u8)
+        .collect();
+    if digits.len() % 2 == 1 {
+        let lowercase = token.to_ascii_lowercase().replace('-', "");
+        return Tag::new(lowercase.as_bytes());
+    }
+    let bytes: Vec<u8> = digits
+        .chunks(2)
+        .map(|pair| pair[0] << 4 | pair[1])
+        .collect();
+    Tag::new(&bytes)
 }
 
 /// End of a hyphenated UUID starting at `start`.
@@ -165,15 +186,24 @@ fn utf8_len(first: u8) -> usize {
 mod tests {
     use super::*;
 
+    fn tag(bytes: &[u8]) -> String {
+        Tag::new(bytes).to_string()
+    }
+
+    const UUID: [u8; 16] = [
+        0x0f, 0x1e, 0x2d, 0x3c, 0x4b, 0x5a, 0x69, 0x78, 0x87, 0x96, 0xa5, 0xb4, 0xc3, 0xd2, 0xe1,
+        0xf0,
+    ];
+
     #[test]
-    fn scrubs_uuids_keeping_last_digits() {
+    fn scrubs_uuids_to_tags_of_their_bytes() {
         assert_eq!(
             scrub("Thread(contact=0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0)"),
-            "Thread(contact=…e1f0)"
+            format!("Thread(contact={})", tag(&UUID))
         );
         assert_eq!(
             scrub("PNI:0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0"),
-            "PNI:…E1F0"
+            format!("PNI:{}", tag(&UUID))
         );
     }
 
@@ -181,22 +211,28 @@ mod tests {
     fn scrubs_protocol_addresses() {
         assert_eq!(
             scrub("session corruption for 0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0.2, deleting"),
-            "session corruption for …e1f0.2, deleting"
+            format!("session corruption for {}.2, deleting", tag(&UUID))
         );
     }
 
     #[test]
     fn scrubs_long_hex_runs_only() {
         let key = "ab".repeat(32);
-        assert_eq!(scrub(&format!("key={key}")), "key=…abab");
+        assert_eq!(
+            scrub(&format!("key={key}")),
+            format!("key={}", tag(&[0xab; 32]))
+        );
+        let odd = "a".repeat(33);
+        assert_eq!(scrub(&odd), tag(odd.as_bytes()));
         let short = "a".repeat(31);
         assert_eq!(scrub(&format!("id={short}")), format!("id={short}"));
     }
 
     #[test]
     fn scrubs_phone_numbers() {
-        assert_eq!(scrub("from +14155550123: hi"), "from +…23: hi");
-        assert_eq!(scrub("+447700900123"), "+…23");
+        let phone = tag(b"+14155550123");
+        assert_eq!(scrub("from +14155550123: hi"), format!("from {phone}: hi"));
+        assert_eq!(scrub("+447700900123"), tag(b"+447700900123"));
     }
 
     #[test]
@@ -239,7 +275,7 @@ mod tests {
     #[test]
     fn scrubs_hex_runs_after_letters_too() {
         let key = "ab".repeat(32);
-        assert_eq!(scrub(&format!("x{key}")), "x…abab");
+        assert_eq!(scrub(&format!("x{key}")), format!("x{}", tag(&[0xab; 32])));
         assert_eq!(scrub("cafebabe"), "cafebabe");
     }
 
@@ -250,7 +286,7 @@ mod tests {
 
     #[test]
     fn keeps_already_redacted_forms() {
-        let text = "ServiceId(…e1f0) PhoneNumber(…23) GroupId(…abcd)";
+        let text = "ServiceId(#e1f0) PhoneNumber(#0023) GroupId(#abcd)";
         assert_eq!(scrub(text), text);
     }
 }

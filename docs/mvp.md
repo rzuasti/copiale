@@ -368,13 +368,18 @@ crates/
   - `COPIALE_LOG` sets the filter; default `info` for Copiale, `warn` for
     dependencies (`error` for `zbus`, which warns about missing D-Bus
     services on minimal desktops).
+  - Logs go to stderr only, but the systemd journal may keep them: they
+    must not identify contacts.
   - Dependencies are capped at `warn` regardless: presage and libsignal log
-    message contents at `debug`. `COPIALE_UNSAFE_LOG=1` lifts the cap, for
-    test accounts only.
+    message contents at `debug`.
+  - Panics log their location only; string-literal messages are kept.
+  - `COPIALE_UNSAFE_LOG=1` lifts the cap and logs panic messages, for test
+    accounts only.
   - Identifiers go through redacting types (`ServiceId`, `PhoneNumber`,
-    `GroupId`); bodies, keys and passphrases never print.
+    `GroupId`) showing a per-run tag (keyed hash, random key per run);
+    bodies, keys and passphrases never print.
   - Backstop for dependency logs: all output is scrubbed of UUIDs, runs of
-    32+ hex digits and E.164 numbers (kept: last 4 or 2 digits), and of
+    32+ hex digits and E.164 numbers (replaced by the same tags), and of
     `Debug` byte lists of 16+ bytes, such as server responses.
   - SQLCipher's own logging is off (`cipher_log_level = NONE`).
 

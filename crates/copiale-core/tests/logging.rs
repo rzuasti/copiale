@@ -43,11 +43,11 @@ impl<'a> MakeWriter<'a> for Capture {
 }
 
 /// Runs `emit` under a capturing subscriber and returns the output.
-fn logged(filter: &str, unsafe_dependencies: bool, emit: impl FnOnce()) -> String {
+fn logged(filter: &str, unsafe_log: bool, emit: impl FnOnce()) -> String {
     let capture = Capture::default();
     let options = Options {
         filter: filter.into(),
-        unsafe_dependencies,
+        unsafe_log,
     };
     tracing::subscriber::with_default(subscriber(&options, capture.clone()), emit);
     capture.text()
@@ -254,10 +254,25 @@ fn dependency_output_is_scrubbed() {
         tracing::warn!(target: "libsignal_service::models", "bad number +14155550123");
     });
 
+    let service_id =
+        ServiceId::new(Uuid::parse_str("0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0").unwrap());
+    let phone = PhoneNumber::new("+14155550123");
     assert!(out.contains("could not fetch group"));
-    assert!(out.contains("…e1f0"));
     assert!(out.contains("1700000000123"), "timestamps survive: {out}");
-    assert!(out.contains("+…23"));
+    // Tags match the redacting types', to correlate with Copiale's lines.
+    assert!(
+        out.contains(&format!("contact={})", tag_of(&service_id))),
+        "{out}"
+    );
+    assert!(out.contains(&format!("number {}", tag_of(&phone))), "{out}");
+    assert!(!out.contains("e1f0"), "{out}");
     assert!(!out.contains("0f1e2d3c"), "{out}");
     assert!(!out.contains("4155550"), "{out}");
+}
+
+/// The tag in a redacting type's `Debug`, such as `ServiceId(#1a2b)`.
+fn tag_of(value: &impl std::fmt::Debug) -> String {
+    let debug = format!("{value:?}");
+    let start = debug.find('#').unwrap();
+    debug[start..debug.len() - 1].to_string()
 }

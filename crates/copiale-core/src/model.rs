@@ -7,7 +7,9 @@ use presage::libsignal_service::zkgroup::groups;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// Signal account identifier. `Debug` shows only the last 4 hex digits.
+use crate::logging::Tag;
+
+/// Signal account identifier. `Debug` shows only its [`Tag`].
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ServiceId(Uuid);
@@ -24,12 +26,11 @@ impl ServiceId {
 
 impl fmt::Debug for ServiceId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let hex = self.0.simple().to_string();
-        write!(f, "ServiceId(…{})", &hex[hex.len() - 4..])
+        write!(f, "ServiceId({})", Tag::new(self.0.as_bytes()))
     }
 }
 
-/// E.164 phone number. `Debug` shows only the last 2 digits; no `Display`,
+/// E.164 phone number. `Debug` shows only its [`Tag`]; no `Display`,
 /// so it can't reach a log by accident.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct PhoneNumber(String);
@@ -47,13 +48,12 @@ impl PhoneNumber {
 
 impl fmt::Debug for PhoneNumber {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let tail = self.0.len().saturating_sub(2);
-        write!(f, "PhoneNumber(…{})", self.0.get(tail..).unwrap_or(""))
+        write!(f, "PhoneNumber({})", Tag::new(self.0.as_bytes()))
     }
 }
 
 /// Public Signal group identifier, derived from the master key. `Debug`
-/// shows only the last 2 bytes.
+/// shows only its [`Tag`].
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GroupId([u8; 32]);
 
@@ -69,7 +69,7 @@ impl GroupId {
 
 impl fmt::Debug for GroupId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "GroupId(…{:02x}{:02x})", self.0[30], self.0[31])
+        write!(f, "GroupId({})", Tag::new(&self.0))
     }
 }
 
@@ -773,26 +773,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn service_id_debug_shows_only_last_digits() {
+    fn service_id_debug_shows_only_its_tag() {
         let uuid = Uuid::parse_str("0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0").unwrap();
-        assert_eq!(format!("{:?}", ServiceId::new(uuid)), "ServiceId(…e1f0)");
+        let tag = Tag::new(uuid.as_bytes());
+        assert_eq!(
+            format!("{:?}", ServiceId::new(uuid)),
+            format!("ServiceId({tag})")
+        );
     }
 
     #[test]
-    fn phone_number_debug_shows_only_last_digits() {
+    fn phone_number_debug_shows_only_its_tag() {
+        let tag = Tag::new(b"+14155550123");
         assert_eq!(
             format!("{:?}", PhoneNumber::new("+14155550123")),
-            "PhoneNumber(…23)"
+            format!("PhoneNumber({tag})")
         );
-        assert_eq!(format!("{:?}", PhoneNumber::new("")), "PhoneNumber(…)");
     }
 
     #[test]
-    fn group_id_debug_shows_only_last_bytes() {
-        let mut bytes = [0x11; 32];
-        bytes[30] = 0xab;
-        bytes[31] = 0xcd;
-        assert_eq!(format!("{:?}", GroupId::new(bytes)), "GroupId(…abcd)");
+    fn group_id_debug_shows_only_its_tag() {
+        let bytes = [0x11; 32];
+        let tag = Tag::new(&bytes);
+        assert_eq!(
+            format!("{:?}", GroupId::new(bytes)),
+            format!("GroupId({tag})")
+        );
     }
 
     #[test]
