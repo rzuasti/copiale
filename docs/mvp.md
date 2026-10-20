@@ -249,7 +249,9 @@ Unlinking and wiping:
   screen. If removing fails (e.g.
   offline, 10 s timeout), local data goes anyway and the link screen says to
   remove the device on the phone. Skipped once the server rejected the
-  credentials: the phone already removed it.
+  credentials: the phone already removed it. If the keychain can't be
+  reached, the key stays there and the next screen says which entry to
+  delete; so does "Start over" after a storage failure.
 - When the server rejects this device's credentials (the phone unlinked
   it), the core stops reconnecting and the app shows "This device was
   unlinked": wipe and link again, or try again in case it was a glitch.

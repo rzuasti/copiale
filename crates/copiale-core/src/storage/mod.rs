@@ -87,6 +87,16 @@ pub enum StorageError {
     Database(String),
 }
 
+/// Outcome of [`Storage::wipe`].
+#[must_use]
+#[derive(Debug, PartialEq, Eq)]
+pub enum Wiped {
+    All,
+    /// The keychain was unreachable: the database key may still be in it,
+    /// and the deleted database recoverable from disk with it.
+    KeyLeft(String),
+}
+
 /// Finds or creates the database key and opens the database.
 #[derive(Clone, Debug)]
 pub struct Storage {
@@ -177,7 +187,9 @@ impl Storage {
 
     /// Deletes the database, its WAL files, the key file and the keychain
     /// entry. Blocking. The database must not be open.
-    pub fn wipe<S: SecretStore + ?Sized>(&self, secrets: &S) -> Result<(), StorageError> {
+    pub fn wipe<S: SecretStore + ?Sized>(&self, secrets: &S) -> Result<Wiped, StorageError> {
+        // Passphrase databases have no key in the keychain.
+        let keychain_key = !self.paths.key_file.exists();
         let database = self.paths.database.as_os_str();
         let mut files = vec![self.paths.database.clone(), self.paths.key_file.clone()];
         for suffix in ["-wal", "-shm"] {
@@ -192,16 +204,18 @@ impl Storage {
                 Err(error) => return Err(error.into()),
             }
         }
-        match secrets.delete() {
-            Ok(()) => {}
+        let wiped = match secrets.delete() {
+            Ok(()) => Wiped::All,
             // A leftover key is replaced on the next first run.
-            Err(SecretError::Unavailable(error)) => {
+            Err(SecretError::Unavailable(error)) if keychain_key => {
                 tracing::warn!(%error, "keychain unavailable; old key left in place");
+                Wiped::KeyLeft(error)
             }
+            Err(SecretError::Unavailable(_)) => Wiped::All,
             Err(SecretError::Failed(error)) => return Err(StorageError::Keychain(error)),
-        }
+        };
         tracing::info!("local data wiped");
-        Ok(())
+        Ok(wiped)
     }
 
     /// Opens the database, creating it if needed, and runs migrations.

@@ -37,6 +37,18 @@ impl OsKeychain {
         }
     }
 
+    /// The key's entry as the platform's keychain app lists it.
+    pub fn entry_label(&self) -> String {
+        let Self { service, user } = self;
+        if cfg!(target_os = "macos") {
+            service.clone()
+        } else if cfg!(windows) {
+            format!("{user}.{service}")
+        } else {
+            format!("keyring:{user}@{service}")
+        }
+    }
+
     #[cfg(not(windows))]
     fn entry(&self) -> Result<keyring_core::Entry, SecretError> {
         keyring::Entry::new(&self.service, &self.user)
@@ -92,10 +104,21 @@ fn map_error(error: keyring::Error) -> SecretError {
     }
 }
 
-#[cfg(all(test, windows))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Secret Service's default label for new items.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn entry_label_is_the_secret_service_label() {
+        assert_eq!(
+            OsKeychain::new().entry_label(),
+            "keyring:database-key@page.codeberg.korba.Copiale"
+        );
+    }
+
+    #[cfg(windows)]
     #[test]
     fn windows_credentials_stay_on_this_machine() {
         // Building an entry doesn't touch the store.

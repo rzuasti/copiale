@@ -10,7 +10,7 @@ use tokio::sync::oneshot;
 use super::session::{Served, serve};
 use super::{Command, CoreOptions, Event, StorageFailure};
 use crate::backend::{BackendError, Linker};
-use crate::storage::{Database, KeyLookup, SecretStore, Storage, StorageError};
+use crate::storage::{Database, KeyLookup, SecretStore, Storage, StorageError, Wiped};
 
 pub(super) struct Core {
     pub(super) storage: Storage,
@@ -46,7 +46,10 @@ impl Core {
             }
             let (storage, secrets) = (self.storage.clone(), self.secrets.clone());
             match blocking(move || storage.wipe(&*secrets)).await {
-                Ok(()) => tracing::info!("unlinked"),
+                Ok(wiped) => {
+                    tracing::info!("unlinked");
+                    self.key_left(wiped);
+                }
                 // Opens what's left; the user can try again.
                 Err(error) => self.emit(Event::DatabaseError(error.to_string())),
             }
@@ -58,6 +61,12 @@ impl Core {
     pub(super) fn emit(&self, event: Event) {
         // A closed receiver means the UI is gone; keep going until told to stop.
         self.events.send(event).ok();
+    }
+
+    fn key_left(&self, wiped: Wiped) {
+        if let Wiped::KeyLeft(error) = wiped {
+            self.emit(Event::KeyNotRemoved(error));
+        }
     }
 
     /// Next command; `None` means stop.
@@ -143,7 +152,10 @@ impl Core {
                 Some(Command::StartOver) => {
                     let (storage, secrets) = (self.storage.clone(), self.secrets.clone());
                     match blocking(move || storage.wipe(&*secrets)).await {
-                        Ok(()) => return Step::Restart,
+                        Ok(wiped) => {
+                            self.key_left(wiped);
+                            return Step::Restart;
+                        }
                         Err(error) => self.emit(Event::StorageFailed(failure(error))),
                     }
                 }

@@ -1,7 +1,7 @@
 //! Key lookup and database open flows, with an in-memory keychain.
 
 use copiale_core::storage::{
-    DatabaseKey, KdfParams, KeyLookup, Passphrase, Storage, StorageError, StoragePaths,
+    DatabaseKey, KdfParams, KeyLookup, Passphrase, Storage, StorageError, StoragePaths, Wiped,
 };
 use copiale_testkit::MemorySecretStore;
 use tempfile::TempDir;
@@ -177,6 +177,44 @@ async fn corrupt_key_file_is_an_error() {
     let result = storage.key_from_passphrase(&Passphrase::new("x"));
 
     assert!(matches!(result, Err(StorageError::KeyFile(_))));
+}
+
+#[tokio::test]
+async fn wipe_deletes_the_database_and_its_key() {
+    let (_dir, storage) = storage();
+    let secrets = MemorySecretStore::default();
+    create_with_keychain(&storage, &secrets).await;
+
+    assert_eq!(storage.wipe(&secrets).unwrap(), Wiped::All);
+    assert!(!storage.paths().database.exists());
+    assert_eq!(secrets.secret(), None);
+}
+
+#[tokio::test]
+async fn wipe_reports_a_key_left_in_an_unreachable_keychain() {
+    let (_dir, storage) = storage();
+    let secrets = MemorySecretStore::default();
+    create_with_keychain(&storage, &secrets).await;
+    secrets.set_available(false);
+
+    assert_eq!(
+        storage.wipe(&secrets).unwrap(),
+        Wiped::KeyLeft("no keychain".into())
+    );
+    assert!(!storage.paths().database.exists());
+    assert!(secrets.secret().is_some());
+}
+
+#[tokio::test]
+async fn wiping_a_passphrase_database_needs_no_keychain() {
+    let (_dir, storage) = storage();
+    let secrets = MemorySecretStore::unavailable();
+    let key = storage.new_passphrase_key(&Passphrase::new("x")).unwrap();
+    storage.open(&key).await.unwrap().close().await;
+
+    assert_eq!(storage.wipe(&secrets).unwrap(), Wiped::All);
+    assert!(!storage.paths().database.exists());
+    assert!(!storage.paths().key_file.exists());
 }
 
 #[cfg(unix)]

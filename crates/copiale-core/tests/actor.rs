@@ -1326,6 +1326,33 @@ async fn unlink_wipes_local_data_and_starts_over() {
 }
 
 #[tokio::test]
+async fn unlink_reports_a_key_left_in_the_keychain() {
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = MemorySecretStore::default();
+    let mut running = start(dir.path(), &secrets, true);
+    expect_ready(&mut running.events).await;
+    expect(&mut running.events, Event::Connected).await;
+    secrets.set_available(false);
+
+    send(&running, Command::Unlink);
+    expect(&mut running.events, Event::Unlinking).await;
+
+    expect(
+        &mut running.events,
+        Event::KeyNotRemoved("no keychain".into()),
+    )
+    .await;
+    expect(
+        &mut running.events,
+        Event::Locked {
+            new_passphrase: true,
+        },
+    )
+    .await;
+    stop(running).await;
+}
+
+#[tokio::test]
 async fn unlink_wipes_even_if_removing_the_device_fails() {
     let (_dir, mut running) = ready().await;
     let error = BackendError::new("server error");
@@ -1441,6 +1468,41 @@ async fn unavailable_keychain_can_be_retried() {
     send(&running, Command::Retry);
 
     expect_ready(&mut running.events).await;
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn start_over_reports_a_key_left_in_the_keychain() {
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = MemorySecretStore::default();
+    let running = start(dir.path(), &secrets, true);
+    stop(running).await;
+    secrets.set_available(false);
+    let mut running = start(dir.path(), &secrets, true);
+    let event = next_event(&mut running.events).await;
+    assert!(
+        matches!(
+            event,
+            Event::StorageFailed(StorageFailure::KeychainUnavailable(_))
+        ),
+        "{event:?}"
+    );
+
+    send(&running, Command::StartOver);
+
+    expect(
+        &mut running.events,
+        Event::KeyNotRemoved("no keychain".into()),
+    )
+    .await;
+    expect(
+        &mut running.events,
+        Event::Locked {
+            new_passphrase: true,
+        },
+    )
+    .await;
+    assert!(secrets.secret().is_some());
     stop(running).await;
 }
 

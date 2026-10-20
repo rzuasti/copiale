@@ -218,6 +218,10 @@ pub enum Event {
     /// local data goes anyway. The phone lists the device until it's
     /// removed there.
     DeviceNotRemoved(BackendError),
+    /// Local data was wiped, but the keychain couldn't be reached to
+    /// delete the database key; the user should delete it there
+    /// ([`OsKeychain::entry_label`](crate::storage::OsKeychain::entry_label)).
+    KeyNotRemoved(String),
     /// The connection failed to open (`Some`) or closed (`None`); the next
     /// attempt is in `retry_in`.
     Disconnected {

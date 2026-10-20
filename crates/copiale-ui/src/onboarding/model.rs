@@ -1,7 +1,7 @@
 //! Onboarding state: which screen to show, driven by core events, and the
 //! commands user actions produce. No GPUI; the view renders it.
 
-use copiale_core::storage::Passphrase;
+use copiale_core::storage::{OsKeychain, Passphrase};
 use copiale_core::{Command, Event, StorageFailure};
 
 /// Shortest passphrase accepted for a new database.
@@ -48,6 +48,9 @@ pub struct Onboarding {
     /// Shown on the next [`Screen::Unlinked`]: unlinking couldn't remove
     /// the device from the account.
     still_listed: Option<String>,
+    /// Shown on the next [`Screen::Unlinked`] or [`Screen::Passphrase`]:
+    /// wiping left the database key in the keychain.
+    key_left: Option<String>,
     /// Last name used or suggested, kept across link attempts.
     device_name: Option<String>,
 }
@@ -58,6 +61,7 @@ impl Default for Onboarding {
             screen: Screen::Starting,
             pending_error: None,
             still_listed: None,
+            key_left: None,
             device_name: None,
         }
     }
@@ -73,7 +77,7 @@ impl Onboarding {
             Event::Locked { new_passphrase } => {
                 self.screen = Screen::Passphrase {
                     new: *new_passphrase,
-                    error: self.pending_error.take(),
+                    error: join([self.pending_error.take(), self.key_left.take()]),
                     busy: false,
                 };
             }
@@ -92,10 +96,11 @@ impl Onboarding {
             }
             Event::Unlinked { device_name } => {
                 let device_name = self.device_name.get_or_insert_with(|| device_name.clone());
-                let error = [self.pending_error.take(), self.still_listed.take()]
-                    .into_iter()
-                    .flatten()
-                    .reduce(|first, second| format!("{first}\n{second}"));
+                let error = join([
+                    self.pending_error.take(),
+                    self.still_listed.take(),
+                    self.key_left.take(),
+                ]);
                 self.screen = Screen::Unlinked {
                     device_name: device_name.clone(),
                     error,
@@ -108,6 +113,7 @@ impl Onboarding {
                      Settings > Linked devices."
                 ));
             }
+            Event::KeyNotRemoved(error) => self.key_left = Some(key_left(error)),
             Event::LinkUrl(url) => self.screen = Screen::Linking { url: url.clone() },
             Event::LinkFailed(error) => self.pending_error = Some(error.to_string()),
             // Once ready, the chats show it.
@@ -253,6 +259,30 @@ impl Onboarding {
         *busy = true;
         Some(Command::StartOver)
     }
+}
+
+/// One message per line.
+fn join<const N: usize>(messages: [Option<String>; N]) -> Option<String> {
+    messages
+        .into_iter()
+        .flatten()
+        .reduce(|first, second| format!("{first}\n{second}"))
+}
+
+/// Where to delete a database key left in the keychain.
+fn key_left(error: &str) -> String {
+    let app = if cfg!(target_os = "macos") {
+        "Keychain Access"
+    } else if cfg!(windows) {
+        "Credential Manager, under Windows Credentials"
+    } else {
+        "your keyring app, such as Seahorse or KeePassXC"
+    };
+    format!(
+        "Your keychain couldn't be reached to delete the key to Copiale's old local data \
+         ({error}). Once it's unlocked, delete \"{}\" in {app}.",
+        OsKeychain::new().entry_label()
+    )
 }
 
 /// Title and explanation for a storage failure.
@@ -548,6 +578,55 @@ mod tests {
                 busy: false,
             }
         );
+    }
+
+    #[test]
+    fn key_left_in_the_keychain_shows_on_the_next_screen() {
+        let mut model = at(Event::StorageFailed(StorageFailure::KeychainUnavailable(
+            "locked".into(),
+        )));
+        model.apply(&Event::KeyNotRemoved("locked".into()));
+        model.apply(&Event::Locked {
+            new_passphrase: true,
+        });
+        let Screen::Passphrase {
+            error: Some(error), ..
+        } = model.screen()
+        else {
+            panic!("expected the notice, got {:?}", model.screen());
+        };
+        assert!(error.contains("(locked)"), "{error}");
+        assert!(error.contains(&OsKeychain::new().entry_label()), "{error}");
+
+        // Only once.
+        model.apply(&Event::Unlinked {
+            device_name: "Copiale on host".into(),
+        });
+        assert!(matches!(
+            model.screen(),
+            Screen::Unlinked { error: None, .. }
+        ));
+    }
+
+    #[test]
+    fn key_left_shows_with_the_device_still_listed() {
+        let mut model = at(Event::Ready);
+        model.apply(&Event::DeviceNotRemoved(BackendError::network("offline")));
+        model.apply(&Event::KeyNotRemoved("locked".into()));
+        model.apply(&Event::Unlinked {
+            device_name: "Copiale on host".into(),
+        });
+
+        let Screen::Unlinked {
+            error: Some(error), ..
+        } = model.screen()
+        else {
+            panic!("expected the notices, got {:?}", model.screen());
+        };
+        let lines: Vec<_> = error.lines().collect();
+        assert_eq!(lines.len(), 2, "{error}");
+        assert!(lines[0].starts_with("Your phone still lists"), "{error}");
+        assert_eq!(lines[1], key_left("locked"));
     }
 
     #[test]
