@@ -3035,6 +3035,52 @@ async fn each_undecryptable_message_is_asked_for_once() {
 }
 
 #[tokio::test]
+async fn few_retry_requests_go_to_one_device() {
+    let (_dir, mut running) = ready().await;
+
+    for sent_at in 100..110 {
+        running
+            .network
+            .deliver(undecryptable(1, sent_at, None, false));
+    }
+    running.network.deliver(undecryptable(2, 200, None, false));
+    flush(&mut running).await;
+
+    let asked: Vec<_> = running.network.retry_requests();
+    let to_first = asked.iter().filter(|(to, _)| *to == service_id(1));
+    assert_eq!(to_first.count(), 5);
+    assert!(asked.contains(&(service_id(2), retry(200))), "other device");
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn retry_requests_pause_while_rate_limited() {
+    let clock = ManualClock::new(Timestamp::from_millis(NOW));
+    let (_dir, mut running) = ready_at(&clock).await;
+    running
+        .network
+        .fail_next_retry_request(BackendError::rate_limited(
+            "slow down",
+            Some(Duration::from_secs(600)),
+        ));
+
+    running.network.deliver(undecryptable(1, 100, None, false));
+    flush(&mut running).await;
+    running.network.deliver(undecryptable(2, 101, None, false));
+    flush(&mut running).await;
+    assert_eq!(running.network.retry_requests().len(), 1);
+
+    clock.advance(Duration::from_secs(600));
+    running.network.deliver(undecryptable(2, 102, None, false));
+    flush(&mut running).await;
+    assert_eq!(
+        running.network.retry_requests(),
+        [(service_id(1), retry(100)), (service_id(2), retry(102))]
+    );
+    stop(running).await;
+}
+
+#[tokio::test]
 async fn hidden_and_own_undecryptable_content_gets_no_placeholder() {
     let (_dir, mut running) = ready().await;
 

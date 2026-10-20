@@ -11,8 +11,8 @@ pub(super) fn store_error(error: impl std::error::Error) -> BackendError {
     BackendError::new(error.to_string())
 }
 
-/// Marks rejected credentials, connection failures and sends refused to a
-/// changed verified identity.
+/// Marks rejected credentials, connection failures, rate limits and sends
+/// refused to a changed verified identity.
 pub(super) fn presage_error<S: std::error::Error>(error: presage::Error<S>) -> BackendError {
     let service = match &error {
         presage::Error::ServiceError(error) => Some(error),
@@ -35,7 +35,10 @@ pub(super) fn presage_error<S: std::error::Error>(error: presage::Error<S>) -> B
         error,
         presage::Error::IoError(_) | presage::Error::Timeout(_)
     );
-    if service.is_some_and(is_unauthorized) {
+    if let Some(ServiceError::RateLimitExceeded { retry_after }) = service {
+        let retry_after = retry_after.and_then(|wait| wait.to_std().ok());
+        BackendError::rate_limited(error.to_string(), retry_after)
+    } else if service.is_some_and(is_unauthorized) {
         BackendError::unauthorized(error.to_string())
     } else if local || service.is_some_and(is_network) {
         BackendError::network(error.to_string())
@@ -108,6 +111,27 @@ mod tests {
             !presage_error(Error::from(MessageSenderError::MaximumRetriesLimitExceeded))
                 .is_network()
         );
+    }
+
+    #[test]
+    fn rate_limits_say_how_long_to_wait() {
+        type Error = presage::Error<std::io::Error>;
+        let limited = |retry_after| {
+            presage_error(Error::from(MessageSenderError::ServiceError(
+                ServiceError::RateLimitExceeded { retry_after },
+            )))
+        };
+
+        let said = limited(Some(chrono::Duration::seconds(600)));
+        assert!(said.is_rate_limited());
+        assert_eq!(
+            said.retry_after(),
+            Some(std::time::Duration::from_secs(600))
+        );
+        let unsaid = limited(None);
+        assert!(unsaid.is_rate_limited());
+        assert_eq!(unsaid.retry_after(), None);
+        assert!(!presage_error(Error::ServiceError(ServiceError::Unauthorized)).is_rate_limited());
     }
 
     #[test]

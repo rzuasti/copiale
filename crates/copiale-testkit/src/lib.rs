@@ -132,7 +132,9 @@ struct State {
     read_syncs: Vec<Vec<(ServiceId, Timestamp)>>,
     typing: Vec<(Destination, bool)>,
     deleted_for_me: Vec<DeletedForMe>,
+    /// Every retry request asked for, failed or not.
     retry_requests: Vec<(ServiceId, RetryRequest)>,
+    retry_request_failures: VecDeque<BackendError>,
     /// Texts sent again, by recipient.
     resent: Vec<(ServiceId, SentText)>,
     null_messages: Vec<ServiceId>,
@@ -302,8 +304,11 @@ impl SignalBackend for FakeBackend {
         sender: ServiceId,
         retry: RetryRequest,
     ) -> LocalBoxFuture<'static, Result<(), BackendError>> {
-        self.record(|state| state.retry_requests.push((sender, retry)));
-        async { Ok(()) }.boxed_local()
+        let result = self.record(|state| {
+            state.retry_requests.push((sender, retry));
+            state.retry_request_failures.pop_front().map_or(Ok(()), Err)
+        });
+        async move { result }.boxed_local()
     }
 
     /// Sends the text whose content [`Self::send`] returned again.
@@ -644,6 +649,15 @@ impl FakeNetwork {
     /// Makes the next send fail; queues up for repeated calls.
     pub fn fail_next_send(&self, error: BackendError) {
         self.state.lock().unwrap().send_failures.push_back(error);
+    }
+
+    /// Makes the next retry request fail; queues up for repeated calls.
+    pub fn fail_next_retry_request(&self, error: BackendError) {
+        self.state
+            .lock()
+            .unwrap()
+            .retry_request_failures
+            .push_back(error);
     }
 
     /// Holds sends in flight until [`Self::resume_sends`], like a slow

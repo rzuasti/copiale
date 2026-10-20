@@ -129,12 +129,28 @@ fn log_crate_records_are_capped_too() {
     tracing_log::LogTracer::init().ok();
 
     let out = logged("trace", false, || {
-        log::debug!(target: "libsignal_protocol::session", "log-debug");
-        log::warn!(target: "libsignal_protocol::session", "log-warn");
+        log::debug!(target: "libsignal_service::sender", "log-debug");
+        log::warn!(target: "libsignal_service::sender", "log-warn");
+        log::error!(target: "libsignal_protocol::session", "log-protocol");
     });
 
     assert!(!out.contains("log-debug"));
     assert!(out.contains("log-warn"));
+    assert!(!out.contains("log-protocol"));
+}
+
+#[test]
+fn libsignal_protocol_logs_only_when_unsafe() {
+    let emit = || {
+        tracing::warn!(target: "libsignal_protocol::protocol", "bad-mac");
+        tracing::error!(target: "libsignal_protocol::session_management", "no-session");
+    };
+
+    let safe = logged("trace", false, emit);
+    let unsafe_out = logged("trace", true, emit);
+
+    assert!(!safe.contains("bad-mac") && !safe.contains("no-session"));
+    assert!(unsafe_out.contains("bad-mac") && unsafe_out.contains("no-session"));
 }
 
 #[test]

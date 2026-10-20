@@ -3,8 +3,10 @@
 //! - `COPIALE_LOG` sets the filter (`EnvFilter` syntax), default
 //!   [`DEFAULT_FILTER`].
 //! - Dependencies are capped at `warn` whatever the filter says: presage and
-//!   libsignal log message contents at `debug`. `COPIALE_UNSAFE_LOG=1` lifts
-//!   the cap; use it with test accounts only.
+//!   libsignal log message contents at `debug`. libsignal-protocol is off:
+//!   it logs several multi-line errors per message that fails to decrypt,
+//!   which presage and Copiale report too. `COPIALE_UNSAFE_LOG=1` lifts the
+//!   cap; use it with test accounts only.
 //!
 //! Copiale's own logs carry identifiers only through redacting types
 //! ([`ServiceId`](crate::ServiceId), [`PhoneNumber`](crate::PhoneNumber),
@@ -81,7 +83,10 @@ where
         EnvFilter::try_new(&options.filter).unwrap_or_else(|_| EnvFilter::new(DEFAULT_FILTER));
     let unsafe_dependencies = options.unsafe_dependencies;
     let cap = filter_fn(move |metadata| {
-        unsafe_dependencies || is_copiale(metadata.target()) || *metadata.level() <= Level::WARN
+        let target = metadata.target();
+        unsafe_dependencies
+            || is_copiale(target)
+            || (*metadata.level() <= Level::WARN && !target.starts_with("libsignal_protocol"))
     });
     let layer = tracing_subscriber::fmt::layer()
         .with_writer(scrub::Scrubbing(writer))

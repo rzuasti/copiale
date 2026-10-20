@@ -1,7 +1,9 @@
 //! Serving a linked account: keeps a connection open, stores messages and
 //! answers queries.
 
+use std::cell::Cell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::time::Duration;
 
 use futures::future::LocalBoxFuture;
@@ -16,7 +18,9 @@ use super::probe::{Check, Probe};
 use super::retries::Limiter;
 use super::run::{Core, ignored};
 use super::{Command, DELETE_WINDOW, EDIT_WINDOW, Event};
-use crate::backend::{BackendError, Incoming, SignalBackend, StoredChats, Undecryptable};
+use crate::backend::{
+    BackendError, Incoming, RetryRequest, SignalBackend, StoredChats, Undecryptable,
+};
 use crate::clock::Clock;
 use crate::model::{
     Account, AccountSettings, BlockedList, Change, ChatRef, ChatState, Content, ConversationId,
@@ -60,6 +64,9 @@ struct Session<'a, B> {
     /// Retry requests we sent, and answered.
     retries_sent: Limiter,
     retries_answered: Limiter,
+    /// No retry requests go out before this, after the server rate limited
+    /// one; set by the requests running in the background.
+    retries_paused_until: Rc<Cell<Option<Timestamp>>>,
     /// When we last told each conversation we're typing.
     typing_sent: HashMap<ConversationId, Instant>,
     next_expiry: Option<Timestamp>,
@@ -110,8 +117,9 @@ impl<'a, B: SignalBackend> Session<'a, B> {
             outbox: Outbox::new(options.send_timeout),
             probe: Probe::new(options.probe_interval, options.probe_timeout),
             groups: Groups::new(),
-            retries_sent: Limiter::new(RETRY_WINDOW, MAX_RETRIES_PER_DEVICE),
-            retries_answered: Limiter::new(RETRY_WINDOW, MAX_RETRIES_PER_DEVICE),
+            retries_sent: Limiter::new(RETRY_WINDOW, MAX_RETRY_REQUESTS_PER_DEVICE),
+            retries_answered: Limiter::new(RETRY_WINDOW, MAX_RETRIES_ANSWERED_PER_DEVICE),
+            retries_paused_until: Rc::default(),
             typing_sent: HashMap::new(),
             next_expiry: None,
             contacts_wanted: false,
@@ -1040,21 +1048,12 @@ impl<'a, B: SignalBackend> Session<'a, B> {
             device = failure.device,
             "a message couldn't be decrypted"
         );
-        let ask = self.retries_sent.allow(
+        self.ask_resend(
             failure.sender,
             failure.device,
             failure.sent_at,
-            Instant::now(),
+            failure.retry,
         );
-        if ask {
-            spawn_logged(
-                "sending a retry request",
-                self.backend
-                    .send_retry_request(failure.sender, failure.retry),
-            );
-        } else {
-            tracing::info!("retry request already sent, or too many");
-        }
         // Our other devices send syncs, which have no chat of their own.
         if !failure.shown || failure.sender == self.backend.own_id() {
             return;
@@ -1072,6 +1071,52 @@ impl<'a, B: SignalBackend> Session<'a, B> {
             Ok(None) => {}
             Err(error) => self.database_error(error),
         }
+    }
+
+    /// Asks for a message to be sent again, unless asked already, too often,
+    /// or the server rate limited us lately.
+    fn ask_resend(
+        &mut self,
+        sender: ServiceId,
+        device: u32,
+        sent_at: Timestamp,
+        retry: RetryRequest,
+    ) {
+        if self
+            .retries_paused_until
+            .get()
+            .is_some_and(|until| self.now() < until)
+        {
+            return tracing::debug!("retry requests paused while rate limited");
+        }
+        if !self
+            .retries_sent
+            .allow(sender, device, sent_at, Instant::now())
+        {
+            return tracing::debug!("retry request already sent, or too many");
+        }
+        let send = self.backend.send_retry_request(sender, retry);
+        let paused_until = self.retries_paused_until.clone();
+        let clock = self.core.options.clock.clone();
+        tokio::task::spawn_local(async move {
+            match send.await {
+                Ok(()) => {}
+                Err(error) if error.is_rate_limited() => {
+                    let wait = error.retry_after().unwrap_or(RATE_LIMIT_PAUSE);
+                    let wait_ms = u64::try_from(wait.as_millis()).unwrap_or(u64::MAX);
+                    let until = clock.now().as_millis().saturating_add(wait_ms);
+                    let until = Timestamp::from_millis(until);
+                    if paused_until.get().is_none_or(|paused| paused < until) {
+                        tracing::info!(
+                            seconds = wait.as_secs(),
+                            "retry requests rate limited; paused"
+                        );
+                        paused_until.set(Some(until));
+                    }
+                }
+                Err(error) => tracing::info!(%error, "sending a retry request failed"),
+            }
+        });
     }
 
     /// Resends our message that `sender`'s `device` couldn't decrypt, if
@@ -1954,10 +1999,15 @@ const PENDING_CHANGE_LIFETIME_MS: u64 = 24 * 3600 * 1000;
 /// How long our sends are kept to resend on request, as in Signal.
 const SEND_LOG_LIFETIME_MS: u64 = 24 * 3600 * 1000;
 
-/// Most retry requests sent to, or answered for, one device per
-/// [`RETRY_WINDOW`]; each message's only once.
-const MAX_RETRIES_PER_DEVICE: usize = 100;
+/// Most retry requests sent to one device per [`RETRY_WINDOW`]: the first
+/// already makes it reset its session.
+const MAX_RETRY_REQUESTS_PER_DEVICE: usize = 5;
+/// Most retry requests answered for one device per [`RETRY_WINDOW`].
+const MAX_RETRIES_ANSWERED_PER_DEVICE: usize = 100;
+/// Each message is asked for, or resent, only once per window.
 const RETRY_WINDOW: Duration = Duration::from_secs(3600);
+/// How long retry requests pause after a rate limit that didn't say.
+const RATE_LIMIT_PAUSE: Duration = Duration::from_secs(600);
 
 /// How often a typing indicator is renewed while typing; recipients drop
 /// it after [`super::TYPING_TIMEOUT`].

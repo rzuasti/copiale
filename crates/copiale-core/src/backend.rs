@@ -1,6 +1,7 @@
 //! Boundary between the core and the Signal network.
 
 use std::fmt;
+use std::time::Duration;
 
 use futures::future::LocalBoxFuture;
 use futures::stream::LocalBoxStream;
@@ -179,6 +180,8 @@ enum ErrorKind {
     Network,
     Unauthorized,
     UntrustedIdentity,
+    /// With how long the server said to wait, if it did.
+    RateLimited(Option<Duration>),
 }
 
 impl BackendError {
@@ -215,6 +218,15 @@ impl BackendError {
         }
     }
 
+    /// The server refused for now; `retry_after` is how long it said to
+    /// wait, if it did.
+    pub fn rate_limited(message: impl Into<String>, retry_after: Option<Duration>) -> Self {
+        Self {
+            message: message.into(),
+            kind: ErrorKind::RateLimited(retry_after),
+        }
+    }
+
     pub fn is_network(&self) -> bool {
         self.kind == ErrorKind::Network
     }
@@ -225,6 +237,18 @@ impl BackendError {
 
     pub fn is_untrusted_identity(&self) -> bool {
         self.kind == ErrorKind::UntrustedIdentity
+    }
+
+    pub fn is_rate_limited(&self) -> bool {
+        matches!(self.kind, ErrorKind::RateLimited(_))
+    }
+
+    /// How long the server said to wait, if rate limited and it did.
+    pub fn retry_after(&self) -> Option<Duration> {
+        match self.kind {
+            ErrorKind::RateLimited(retry_after) => retry_after,
+            _ => None,
+        }
     }
 }
 
