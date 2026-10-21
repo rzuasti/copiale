@@ -19,6 +19,7 @@ toml.workspace = true
 tracing.workspace = true
 tray-icon.workspace = true
 zeroize.workspace = true
+zxcvbn.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ashpd.workspace = true

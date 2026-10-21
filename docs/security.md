@@ -43,3 +43,5 @@ Not zeroed; freed memory keeps them until reused.
   edit's old chunks. Clearing the input after sending drops the text and
   its undo history; Copiale reads it straight from the rope into a zeroed
   string, skipping `InputState::value`'s copy.
+- **New passphrase, in zxcvbn**: the strength check copies it and pieces
+  of it (lowercased, matched tokens).

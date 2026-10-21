@@ -79,10 +79,11 @@ pub struct KdfParams {
 }
 
 impl Default for KdfParams {
-    /// RFC 9106's second recommended option: 64 MiB, 3 passes, 4 lanes.
+    /// 256 MiB, 3 passes, 4 lanes: RFC 9106's second recommended option
+    /// with 4× the memory, still well under a second.
     fn default() -> Self {
         Self {
-            memory_kib: 64 * 1024,
+            memory_kib: 256 * 1024,
             iterations: 3,
             parallelism: 4,
         }

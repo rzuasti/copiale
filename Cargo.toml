@@ -11,8 +11,8 @@ repository = "https://codeberg.org/korba/copiale"
 publish = false
 
 [workspace.dependencies]
-# Zeroes its working memory.
-argon2 = { version = "0.6", features = ["zeroize"] }
+# Zeroes its working memory; lanes run in parallel.
+argon2 = { version = "0.6", features = ["parallel", "zeroize"] }
 # Same version and runtime as GPUI's.
 ashpd = { version = "0.13", default-features = false, features = ["async-io", "settings"] }
 # Implements libsignal's store traits, which use it.
@@ -63,6 +63,8 @@ uuid = "1"
 # Same version as keyring's Windows store.
 windows-sys = "0.61"
 zeroize = "1"
+# Passphrase strength; the default feature only adds a builder.
+zxcvbn = { version = "3.1", default-features = false }
 
 # Patched until upstream merges the changes; see vendor/README.md.
 [patch."https://github.com/whisperfish/libsignal-service-rs"]

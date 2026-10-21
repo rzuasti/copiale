@@ -373,9 +373,9 @@ fn new_passphrase_is_typed_and_submitted(cx: &mut TestAppContext) {
     );
 
     // The passphrase field has focus; Tab moves to the confirmation.
-    ui.type_text("correct horse", cx);
+    ui.type_text("violet tram oyster lantern", cx);
     ui.press("tab", cx);
-    ui.type_text("correct horse", cx);
+    ui.type_text("violet tram oyster lantern", cx);
     ui.press("enter", cx);
 
     let commands = ui.core.take();
@@ -399,7 +399,7 @@ fn mismatched_passphrases_are_not_sent(cx: &mut TestAppContext) {
         cx,
     );
 
-    ui.type_text("correct horse", cx);
+    ui.type_text("violet tram oyster lantern", cx);
     ui.click("submit-passphrase", cx);
 
     assert!(ui.core.take().is_empty());

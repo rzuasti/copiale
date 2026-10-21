@@ -334,8 +334,10 @@ crates/
 - Key: random 256-bit key stored in the OS keychain (`keyring`), passed to
   SQLCipher as a raw key.
 - No keychain available: prompt for a passphrase at startup and derive the
-  raw key with Argon2id (64 MiB, 3 passes, 4 lanes); salt and parameters live
+  raw key with Argon2id (256 MiB, 3 passes, 4 lanes); salt and parameters live
   in `copiale.key` next to the database, which also marks passphrase mode.
+  New passphrases need 8 characters and a zxcvbn score of 4 (over 10^10
+  guesses).
 - Files: `copiale.db` and `copiale.key` in the platform data dir
   (`~/.local/share/copiale` on Linux), restricted to the user.
 - Messages live in Copiale's tables only, with edits, deletes and expiry

@@ -3,9 +3,18 @@
 
 use copiale_core::storage::{OsKeychain, Passphrase};
 use copiale_core::{Command, Event, StorageFailure};
+use zxcvbn::Score;
+use zxcvbn::feedback::{Feedback, Suggestion};
 
 /// Shortest passphrase accepted for a new database.
 pub const MIN_PASSPHRASE_CHARS: usize = 8;
+
+/// Weakest zxcvbn score accepted for a new database: more than 10^10
+/// guesses.
+const MIN_PASSPHRASE_SCORE: Score = Score::Four;
+
+/// Words zxcvbn should treat as easy guesses here.
+const GUESSABLE_WORDS: [&str; 2] = ["copiale", "signal"];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Screen {
@@ -144,6 +153,8 @@ impl Onboarding {
             Some("Enter a passphrase".to_string())
         } else if *new && passphrase.chars().count() < MIN_PASSPHRASE_CHARS {
             Some(format!("Use at least {MIN_PASSPHRASE_CHARS} characters"))
+        } else if *new && let Some(weakness) = weakness(passphrase) {
+            Some(weakness)
         } else if *new && passphrase != confirmation {
             Some("Passphrases don't match".into())
         } else {
@@ -269,6 +280,32 @@ fn join<const N: usize>(messages: [Option<String>; N]) -> Option<String> {
         .reduce(|first, second| format!("{first}\n{second}"))
 }
 
+/// Why a new passphrase is too easy to guess, with zxcvbn's advice.
+///
+/// zxcvbn keeps unzeroed copies of it; see `docs/security.md`.
+fn weakness(passphrase: &str) -> Option<String> {
+    let entropy = zxcvbn::zxcvbn(passphrase, &GUESSABLE_WORDS);
+    if entropy.score() >= MIN_PASSPHRASE_SCORE {
+        return None;
+    }
+    let mut message = "Too easy to guess.".to_string();
+    let feedback = entropy.feedback();
+    if let Some(warning) = feedback.and_then(Feedback::warning) {
+        message.push_str(&format!(" {warning}"));
+    }
+    // zxcvbn only advises below score 3.
+    let suggestions = feedback.map(Feedback::suggestions).unwrap_or_default();
+    let suggestions = if suggestions.is_empty() {
+        &[Suggestion::AddAnotherWordOrTwo]
+    } else {
+        suggestions
+    };
+    for suggestion in suggestions {
+        message.push_str(&format!("\n{suggestion}"));
+    }
+    Some(message)
+}
+
 /// Where to delete a database key left in the keychain.
 fn key_left(error: &str) -> String {
     let app = if cfg!(target_os = "macos") {
@@ -318,6 +355,8 @@ mod tests {
     use copiale_core::BackendError;
 
     use super::*;
+
+    const STRONG: &str = "violet tram oyster lantern";
 
     fn at(event: Event) -> Onboarding {
         let mut model = Onboarding::default();
@@ -453,14 +492,14 @@ mod tests {
         );
         assert!(
             model
-                .submit_passphrase("long enough", "long enougj")
+                .submit_passphrase(STRONG, "violet tram oyster lanterm")
                 .is_none()
         );
         assert!(
             matches!(model.screen(), Screen::Passphrase { error: Some(e), .. } if e.contains("match"))
         );
 
-        let command = model.submit_passphrase("long enough", "long enough");
+        let command = model.submit_passphrase(STRONG, STRONG);
         assert!(matches!(command, Some(Command::SetPassphrase(_))));
         assert!(matches!(
             model.screen(),
@@ -470,6 +509,46 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn guessable_new_passphrase_is_rejected_with_advice() {
+        let mut model = at(Event::Locked {
+            new_passphrase: true,
+        });
+
+        // The last two score 3, below which zxcvbn gives no advice.
+        for weak in [
+            "password1234",
+            "signalcopiale",
+            "hello world",
+            "copiale signal",
+        ] {
+            assert!(model.submit_passphrase(weak, weak).is_none(), "{weak}");
+            let Screen::Passphrase {
+                error: Some(error),
+                busy: false,
+                ..
+            } = model.screen()
+            else {
+                panic!("expected an error for {weak:?}, got {:?}", model.screen());
+            };
+            assert!(error.starts_with("Too easy to guess."), "{error}");
+            assert!(error.lines().count() > 1, "no advice for {weak:?}: {error}");
+        }
+
+        assert!(weakness(STRONG).is_none());
+    }
+
+    #[test]
+    fn unlock_ignores_strength() {
+        let mut model = at(Event::Locked {
+            new_passphrase: false,
+        });
+
+        let command = model.submit_passphrase("password", "");
+
+        assert!(matches!(command, Some(Command::Unlock(_))));
     }
 
     #[test]
