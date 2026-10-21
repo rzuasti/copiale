@@ -72,6 +72,7 @@ actions!(
         SearchNext,
         HideWindow,
         ConfirmSafetyNumber,
+        OpenLink,
         AcceptRequest,
         DeleteRequest,
         BlockChat,
@@ -94,6 +95,8 @@ const SETTINGS: &str = "Settings";
 const CONFIRM_UNLINK: &str = "ConfirmUnlink";
 /// Key context of the safety number card.
 const SAFETY_NUMBER: &str = "SafetyNumber";
+/// Key context of the question before opening a link.
+const LINK: &str = "Link";
 /// Key context of the banner standing in for the composer in a message
 /// request or blocked chat.
 const REQUEST: &str = "Request";
@@ -134,6 +137,8 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("escape", Cancel, Some(CONFIRM_UNLINK)),
         KeyBinding::new("escape", Cancel, Some(SAFETY_NUMBER)),
         KeyBinding::new("enter", ConfirmSafetyNumber, Some(SAFETY_NUMBER)),
+        KeyBinding::new("escape", Cancel, Some(LINK)),
+        KeyBinding::new("enter", OpenLink, Some(LINK)),
         KeyBinding::new("a", AcceptRequest, Some(REQUEST)),
         KeyBinding::new("d", DeleteRequest, Some(REQUEST)),
         KeyBinding::new("b", BlockChat, Some(REQUEST)),
@@ -172,6 +177,8 @@ pub struct ChatView {
     confirm_focus: FocusHandle,
     /// Held while a safety number shows.
     identity_focus: FocusHandle,
+    /// Held while asking whether to open a link.
+    link_focus: FocusHandle,
     /// Held in a message request or blocked chat, which has no composer.
     request_focus: FocusHandle,
     /// Device name and privacy settings, once the core reports them.
@@ -306,6 +313,7 @@ impl ChatView {
             settings_scroll: ScrollHandle::new(),
             confirm_focus: cx.focus_handle(),
             identity_focus: cx.focus_handle(),
+            link_focus: cx.focus_handle(),
             request_focus: cx.focus_handle(),
             account: None,
             layout: Layout::default(),

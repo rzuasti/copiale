@@ -1939,6 +1939,47 @@ fn cursor_blinks_reuse_the_drawn_log(cx: &mut TestAppContext) {
     assert!(renders(cx) > before);
 }
 
+/// Clicks the link opening Alice's message `id`, shown as a bubble.
+fn click_link(ui: &Ui, id: u64, cx: &mut TestAppContext) {
+    cx.update_window(ui.window(), |_, window, cx| {
+        window.click_at(("bubble", id), point(px(16.), px(12.)), cx)
+    })
+    .unwrap();
+    ui.frame(cx);
+}
+
+#[gpui_kit::test]
+fn links_open_once_confirmed(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.open_alice(cx);
+    set_style(&ui, MessageStyle::Bubbles, cx);
+    ui.event(
+        Event::MessageAdded(Message {
+            content: Content::text("WWW.\u{430}pple.com/a"),
+            ..message(11, Direction::Incoming, None)
+        }),
+        cx,
+    );
+
+    click_link(&ui, 11, cx);
+    assert_eq!(overlay(&ui, cx), Some(Overlay::Link));
+    assert_eq!(cx.opened_url(), None);
+    assert!(ui.shows("link", cx));
+    ui.press("escape", cx);
+    assert_eq!(overlay(&ui, cx), None);
+    assert!(composer_focused(&ui, cx));
+    assert_eq!(cx.opened_url(), None);
+
+    click_link(&ui, 11, cx);
+    ui.press("enter", cx);
+    assert_eq!(overlay(&ui, cx), None);
+    assert_eq!(
+        cx.opened_url().as_deref(),
+        Some("https://www.xn--pple-43d.com/a")
+    );
+    assert!(composer_focused(&ui, cx));
+}
+
 fn set_style(ui: &Ui, style: MessageStyle, cx: &mut TestAppContext) {
     cx.update(|cx| settings::change(Setting::MessageStyle(style), cx));
     ui.frame(cx);

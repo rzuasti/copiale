@@ -527,8 +527,9 @@ fn sender_color(row: &Row<'_>, cx: &App) -> Hsla {
         .map_or(palette.text_secondary, |peer| palette.nick(peer))
 }
 
-/// The quote and placeholder lines, then the text.
-fn message_text(row: &Row<'_>, window: &Window, cx: &App) -> Vec<AnyElement> {
+/// The quote and placeholder lines, then the text; links ask before
+/// opening.
+fn message_text(row: &Row<'_>, window: &Window, cx: &Context<ChatView>) -> Vec<AnyElement> {
     let mono = cx.theme().mono_font_family.clone();
     let muted = cx.palette().text_muted;
     let line_height = window.line_height();
@@ -547,8 +548,13 @@ fn message_text(row: &Row<'_>, window: &Window, cx: &App) -> Vec<AnyElement> {
                 .into_any_element()
         })
         .chain(row.message.content.body().map(|body| {
+            let view = cx.weak_entity();
             TextView::markdown(("body", id.get() as u64), message_markdown(body.as_str()))
                 .selectable(true)
+                .on_link_click(move |href, _, window, cx| {
+                    view.update(cx, |view, cx| view.ask_open_link(href, window, cx))
+                        .ok();
+                })
                 .into_any_element()
         }))
         .collect()

@@ -10,10 +10,12 @@ use copiale_core::{
     DELETE_WINDOW, Direction, EDIT_WINDOW, Event, Identity, MAX_SENT_EDITS, Message, MessageBody,
     MessageId, MessageStatus, Peer, ServiceId, TYPING_TIMEOUT, Timestamp, Verification,
 };
+use url::Url;
 
 use super::content::{placeholders, quote_line, system_lines};
 use super::new_chat::{Candidate, candidates};
 use super::palette::{self, Entry, PaletteAction};
+use super::text::link_target;
 use super::time::{LocalClock, countdown, countdown_changes_in};
 
 /// Messages loaded per page.
@@ -126,6 +128,8 @@ pub enum Overlay {
     Settings,
     /// An account's safety number.
     SafetyNumber(ServiceId),
+    /// Asks before opening a clicked link.
+    Link,
 }
 
 /// A picker's query and highlighted entry.
@@ -173,6 +177,8 @@ pub struct Chat {
     identities: HashMap<ServiceId, Identity>,
     /// Verified accounts whose changed safety number awaits confirmation.
     unconfirmed: Vec<ServiceId>,
+    /// The clicked link [`Overlay::Link`] asks about.
+    link: Option<Url>,
 }
 
 #[derive(Debug)]
@@ -277,6 +283,7 @@ impl Chat {
             storage_error: None,
             identities: HashMap::new(),
             unconfirmed: Vec::new(),
+            link: None,
         }
     }
 
@@ -620,6 +627,7 @@ impl Chat {
 
     pub fn close_overlay(&mut self) {
         self.overlay = None;
+        self.link = None;
     }
 
     /// Opens the new chat picker; refreshes contacts.
@@ -843,6 +851,28 @@ impl Chat {
         }
         self.overlay = None;
         Some(Command::ConfirmIdentity(peer))
+    }
+
+    /// Asks before opening `href`, if it's a link [`link_target`] accepts.
+    pub fn ask_open_link(&mut self, href: &str) {
+        if let Some(url) = link_target(href) {
+            self.open_overlay(Overlay::Link);
+            self.link = Some(url);
+        }
+    }
+
+    /// The link asked about.
+    pub fn shown_link(&self) -> Option<&Url> {
+        self.link
+            .as_ref()
+            .filter(|_| self.overlay == Some(Overlay::Link))
+    }
+
+    /// The link to open, closing the question.
+    pub fn confirm_link(&mut self) -> Option<Url> {
+        let url = self.shown_link()?.clone();
+        self.close_overlay();
+        Some(url)
     }
 
     /// Why sending in the open chat fails, if a safety number there awaits
@@ -2696,6 +2726,32 @@ mod tests {
 
         chat.apply(&Event::UnconfirmedIdentities(Vec::new()), true);
         assert_eq!(chat.identity_banner(), None);
+    }
+
+    #[test]
+    fn links_open_once_confirmed() {
+        let mut chat = opened(Vec::new());
+        chat.ask_open_link("https://x.org/\u{202e}a");
+        chat.ask_open_link("ftp://x.org/");
+        assert_eq!(chat.overlay(), None);
+        assert!(chat.confirm_link().is_none());
+
+        chat.ask_open_link("https://x.org/a");
+        assert_eq!(chat.overlay(), Some(Overlay::Link));
+        assert_eq!(chat.shown_link().unwrap().as_str(), "https://x.org/a");
+        chat.close_overlay();
+        assert!(chat.shown_link().is_none());
+        assert!(chat.confirm_link().is_none());
+
+        chat.ask_open_link("https://x.org/b");
+        chat.toggle_palette();
+        assert!(chat.shown_link().is_none(), "replaced by the palette");
+        chat.close_overlay();
+
+        chat.ask_open_link("https://x.org/c");
+        let url = chat.confirm_link().unwrap();
+        assert_eq!(url.as_str(), "https://x.org/c");
+        assert_eq!(chat.overlay(), None);
     }
 
     #[test]

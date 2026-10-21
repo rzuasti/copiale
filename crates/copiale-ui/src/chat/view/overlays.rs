@@ -1,5 +1,5 @@
-//! The new chat picker, the palette, safety numbers and the unlink
-//! confirmation.
+//! The new chat picker, the palette, safety numbers, and the link and
+//! unlink confirmations.
 
 use std::ops::Range;
 
@@ -19,12 +19,13 @@ use gpui_kit::{
 use crate::Quit;
 use crate::chat::model::Overlay;
 use crate::chat::palette::PaletteAction;
+use crate::chat::text::link_host;
 use crate::settings::{self, Settings};
 use crate::theme::ActivePalette as _;
 
 use super::{
-    CONFIRM_UNLINK, Cancel, ChatView, ConfirmSafetyNumber, NewChat, OpenSettings, PICKING,
-    PickNext, PickPrevious, SAFETY_NUMBER, key_hint,
+    CONFIRM_UNLINK, Cancel, ChatView, ConfirmSafetyNumber, LINK, NewChat, OpenLink, OpenSettings,
+    PICKING, PickNext, PickPrevious, SAFETY_NUMBER, key_hint,
 };
 
 impl ChatView {
@@ -112,6 +113,7 @@ impl ChatView {
             Overlay::Palette => ("palette", self.render_palette(window, cx)),
             Overlay::Settings => ("settings", self.render_settings(window, cx)),
             Overlay::SafetyNumber(_) => ("safety-number", self.render_safety_number(cx)),
+            Overlay::Link => ("link", self.render_link(cx)),
         };
         let width = match self.chat.overlay() {
             Some(Overlay::Settings) => px(560.),
@@ -375,6 +377,78 @@ impl ChatView {
                             .text_xs()
                             .text_color(muted)
                             .child(hint),
+                    ),
+            )
+    }
+
+    /// Asks before opening the clicked `href`.
+    pub(super) fn ask_open_link(
+        &mut self,
+        href: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.chat.ask_open_link(href);
+        // After the click, which focuses the text.
+        cx.defer_in(window, |view, window, cx| {
+            if view.chat.shown_link().is_some() {
+                window.focus(&view.link_focus, cx);
+            }
+        });
+        cx.notify();
+    }
+
+    fn open_link(&mut self, _: &OpenLink, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(url) = self.chat.confirm_link() {
+            cx.open_url(url.as_str());
+        }
+        self.restore_focus(window, cx);
+        cx.notify();
+    }
+
+    /// The link's host in ASCII, so look-alike letters show, then the
+    /// whole URL.
+    fn render_link(&self, cx: &mut Context<Self>) -> gpui_kit::Div {
+        let muted = cx.palette().text_muted;
+        let mono = cx.theme().mono_font_family.clone();
+        let (host, url) = self
+            .chat
+            .shown_link()
+            .map(|url| (link_host(url), url.to_string()))
+            .unwrap_or_default();
+        v_flex()
+            .key_context(LINK)
+            .track_focus(&self.link_focus)
+            .on_action(cx.listener(|view, _: &Cancel, window, cx| view.close_overlay(window, cx)))
+            .on_action(cx.listener(Self::open_link))
+            .p_4()
+            .gap_3()
+            .child(div().text_lg().child("Open link?"))
+            .child(div().font_family(mono.clone()).text_lg().child(host))
+            .child(
+                div()
+                    .font_family(mono.clone())
+                    .text_xs()
+                    .text_color(muted)
+                    .line_clamp(4)
+                    .child(url),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(Button::new("cancel-link").ghost().label("Cancel").on_click(
+                        cx.listener(|view, _, window, cx| view.close_overlay(window, cx)),
+                    ))
+                    .child(Button::new("open-link").primary().label("Open").on_click(
+                        cx.listener(|view, _, window, cx| view.open_link(&OpenLink, window, cx)),
+                    ))
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .font_family(mono)
+                            .text_xs()
+                            .text_color(muted)
+                            .child("enter open · esc cancel"),
                     ),
             )
     }
