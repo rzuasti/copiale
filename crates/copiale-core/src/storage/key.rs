@@ -6,31 +6,45 @@ use std::path::Path;
 
 use argon2::{Algorithm, Argon2, Params, Version};
 use rand::RngCore as _;
-use zeroize::Zeroizing;
+use rand::TryRngCore as _;
+use rand::rngs::OsRng;
 
 use super::StorageError;
+use crate::hardening::LockedBytes;
 
 const KEY_LEN: usize = 32;
 const SALT_LEN: usize = 16;
 
-/// 256-bit SQLCipher key. Zeroed on drop; `Debug` hides it.
-pub struct DatabaseKey(Zeroizing<[u8; KEY_LEN]>);
+/// 256-bit SQLCipher key. Locked in memory and zeroed on drop
+/// ([`LockedBytes`]); `Debug` hides it.
+pub struct DatabaseKey(LockedBytes);
 
 impl DatabaseKey {
+    fn zeroed() -> Self {
+        Self(LockedBytes::new(KEY_LEN))
+    }
+
+    /// Straight from the OS, leaving no copies in a userspace RNG.
     pub fn generate() -> Self {
-        let mut key = Zeroizing::new([0; KEY_LEN]);
-        rand::rng().fill_bytes(key.as_mut());
-        Self(key)
+        let mut key = Self::zeroed();
+        OsRng
+            .try_fill_bytes(&mut key.0)
+            .expect("OS random number generator");
+        key
     }
 
     /// `None` unless `bytes` is exactly 32 bytes long.
     pub fn from_slice(bytes: &[u8]) -> Option<Self> {
-        let key: [u8; KEY_LEN] = bytes.try_into().ok()?;
-        Some(Self(Zeroizing::new(key)))
+        if bytes.len() != KEY_LEN {
+            return None;
+        }
+        let mut key = Self::zeroed();
+        key.0.copy_from_slice(bytes);
+        Some(key)
     }
 
     pub fn as_bytes(&self) -> &[u8; KEY_LEN] {
-        &self.0
+        (*self.0).try_into().expect("key length")
     }
 
     /// Value for `PRAGMA key`: a raw key, so SQLCipher skips its own key
@@ -55,12 +69,32 @@ impl fmt::Debug for DatabaseKey {
     }
 }
 
-/// User passphrase. Zeroed on drop; `Debug` hides it.
-pub struct Passphrase(Zeroizing<String>);
+/// User passphrase. Locked in memory and zeroed on drop ([`LockedBytes`]);
+/// `Debug` hides it.
+pub struct Passphrase(LockedBytes);
 
 impl Passphrase {
-    pub fn new(passphrase: impl Into<String>) -> Self {
-        Self(Zeroizing::new(passphrase.into()))
+    pub fn new(passphrase: &str) -> Self {
+        Self::from_chunks(passphrase.len(), [passphrase])
+    }
+
+    /// Joins `chunks`, `len` bytes in all, with no other copies.
+    ///
+    /// Panics if the lengths differ.
+    pub fn from_chunks<'a>(len: usize, chunks: impl IntoIterator<Item = &'a str>) -> Self {
+        let mut bytes = LockedBytes::new(len);
+        let mut rest = &mut bytes[..];
+        for chunk in chunks {
+            let (head, tail) = std::mem::take(&mut rest).split_at_mut(chunk.len());
+            head.copy_from_slice(chunk.as_bytes());
+            rest = tail;
+        }
+        assert!(rest.is_empty(), "chunks shorter than len");
+        Self(bytes)
+    }
+
+    pub fn as_str(&self) -> &str {
+        std::str::from_utf8(&self.0).expect("joined from strs")
     }
 }
 
@@ -114,11 +148,11 @@ impl KeyFile {
         } = self.params;
         let params = Params::new(memory_kib, iterations, parallelism, Some(KEY_LEN))
             .map_err(|error| StorageError::KeyFile(error.to_string()))?;
-        let mut key = Zeroizing::new([0; KEY_LEN]);
+        let mut key = DatabaseKey::zeroed();
         Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
-            .hash_password_into(passphrase.0.as_bytes(), &self.salt, key.as_mut())
+            .hash_password_into(&passphrase.0, &self.salt, &mut key.0)
             .map_err(|error| StorageError::KeyFile(error.to_string()))?;
-        Ok(DatabaseKey(key))
+        Ok(key)
     }
 
     pub(crate) fn read(path: &Path) -> Result<Self, StorageError> {
@@ -222,6 +256,31 @@ mod tests {
         assert!(DatabaseKey::from_slice(&[7; 32]).is_some());
         assert!(DatabaseKey::from_slice(&[7; 31]).is_none());
         assert!(DatabaseKey::from_slice(&[7; 33]).is_none());
+    }
+
+    #[test]
+    fn key_keeps_its_bytes() {
+        let bytes: Vec<u8> = (0..32).collect();
+        assert_eq!(
+            DatabaseKey::from_slice(&bytes).unwrap().as_bytes(),
+            bytes.as_slice()
+        );
+    }
+
+    #[test]
+    fn passphrase_joins_chunks() {
+        assert_eq!(Passphrase::new("pässword").as_str(), "pässword");
+        assert_eq!(Passphrase::new("").as_str(), "");
+        assert_eq!(
+            Passphrase::from_chunks(9, ["päss", "word"]).as_str(),
+            "pässword"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "chunks shorter than len")]
+    fn passphrase_rejects_short_chunks() {
+        Passphrase::from_chunks(5, ["four"]);
     }
 
     #[test]

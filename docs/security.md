@@ -23,12 +23,23 @@ process memory, and the copies it can't control.
   closing.
 - **Key kept on this machine**: on Windows, a Local credential;
   Credential Manager's default, Enterprise, roams with domain profiles.
+- **Kept out of swap** (`hardening::LockedBytes`): `DatabaseKey` and
+  `Passphrase`, including the UI's copy read from the input, sit on pages
+  of their own, locked in RAM (`mlock`, `VirtualLock`) and, on Linux, left
+  out of core dumps (`MADV_DONTDUMP`). New keys come straight from the
+  OS's random number generator; keychain keys and derived keys are written
+  straight into locked memory.
+  - Best effort: when locking fails (e.g. `RLIMIT_MEMLOCK` reached), a
+    warning is logged and the secret stays unlocked.
+  - Hibernation images hold all memory, locked or not: only disk
+    encryption protects them.
 - **Zeroed on drop**: `DatabaseKey`, `Passphrase`, the keychain secret, and
   Argon2's working memory.
 
 ## Remaining copies
 
-Not zeroed; freed memory keeps them until reused.
+Not zeroed; freed memory keeps them until reused. Not locked either, so
+they can also reach swap.
 
 - **Key, in sqlx.** `SqliteConnectOptions::pragma` only takes an owned
   string, with no hook before the pragmas run, so the hex key stays in:
@@ -38,7 +49,10 @@ Not zeroed; freed memory keeps them until reused.
     SQLite's parsed copy of it.
 - **Key, in SQLCipher**: per connection, as encryption needs it.
 - **Key, in the keychain client** (`keyring`, the OS service and D-Bus on
-  Linux).
+  Linux), and the secret it returns, zeroed but not locked, until it's
+  copied into a `DatabaseKey`.
+- **Key and passphrase, in Argon2**: its working memory (256 MiB, zeroed,
+  too large to lock) and hashing state.
 - **Passphrase, in GPUI Kit's input**: the rope holding the text, and each
   edit's old chunks. Clearing the input after sending drops the text and
   its undo history; Copiale reads it straight from the rope into a zeroed

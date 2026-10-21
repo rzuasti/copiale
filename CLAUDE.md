@@ -66,7 +66,8 @@ went unsolved until 2011.
     syncs both ways with the phone (`chat_states`); Storage Service is
     read only.
   - No telemetry.
-  - No core dumps (`copiale_core::hardening`); key and passphrase copies
+  - No core dumps; keys and passphrases locked out of swap
+    (`copiale_core::hardening`). Key and passphrase copies
     left in memory are listed in `docs/security.md`.
   - Never log message content, phone numbers or keys; log redacted
     identifiers only (`ServiceId`, `PhoneNumber`, `GroupId`), shown as

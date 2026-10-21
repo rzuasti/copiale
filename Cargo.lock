@@ -1392,7 +1392,6 @@ dependencies = [
  "tracing",
  "tray-icon",
  "uuid",
- "zeroize",
  "zxcvbn",
 ]
 

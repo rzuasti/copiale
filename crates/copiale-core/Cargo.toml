@@ -36,7 +36,7 @@ zeroize.workspace = true
 libc.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true, features = ["Win32_System_ErrorReporting"] }
+windows-sys = { workspace = true, features = ["Win32_System_ErrorReporting", "Win32_System_Memory"] }
 
 [dev-dependencies]
 copiale-testkit.workspace = true
@@ -48,4 +48,4 @@ tracing-log.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "macros", "time", "test-util"] }
 
 [target.'cfg(windows)'.dev-dependencies]
-windows-sys = { workspace = true, features = ["Win32_System_ErrorReporting", "Win32_System_Registry"] }
+windows-sys = { workspace = true, features = ["Win32_System_ErrorReporting", "Win32_System_Memory", "Win32_System_Registry"] }

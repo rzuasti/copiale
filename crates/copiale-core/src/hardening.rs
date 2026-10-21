@@ -1,10 +1,15 @@
 //! Keeps secrets in memory (keys, passphrase, messages) from reaching disk
-//! through core dumps.
+//! through core dumps, and keys and passphrases through swap.
 //!
-//! `COPIALE_UNSAFE_CORE_DUMPS=1` skips this, for debugging crashes; core
-//! dumps can then hold the database key.
+//! `COPIALE_UNSAFE_CORE_DUMPS=1` skips disabling core dumps, for debugging
+//! crashes; core dumps can then hold the database key.
 
 use std::io;
+use std::ops::{Deref, DerefMut};
+use std::ptr::NonNull;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use zeroize::Zeroize as _;
 
 pub const UNSAFE_ENV: &str = "COPIALE_UNSAFE_CORE_DUMPS";
 
@@ -67,4 +72,235 @@ fn check(result: windows_sys::core::HRESULT) -> io::Result<()> {
 #[cfg(not(any(unix, windows)))]
 pub fn disable_core_dumps() -> io::Result<()> {
     Ok(())
+}
+
+/// Fixed-size buffer on pages of its own, locked in RAM so it's never
+/// swapped out, and left out of core dumps on Linux. Starts zeroed; zeroed
+/// on drop.
+///
+/// Locking is best effort: the first failure (e.g. `RLIMIT_MEMLOCK`
+/// reached) is logged.
+pub struct LockedBytes {
+    ptr: NonNull<u8>,
+    len: usize,
+}
+
+// SAFETY: owns its memory exclusively, like `Box<[u8]>`.
+unsafe impl Send for LockedBytes {}
+// SAFETY: no interior mutability.
+unsafe impl Sync for LockedBytes {}
+
+impl LockedBytes {
+    /// Panics if the memory can't be allocated.
+    pub fn new(len: usize) -> Self {
+        let ptr = pages::alloc(Self::size(len));
+        // SAFETY: just allocated with this size.
+        if let Err(error) = unsafe { pages::lock(ptr, Self::size(len)) } {
+            static WARNED: AtomicBool = AtomicBool::new(false);
+            if !WARNED.swap(true, Ordering::Relaxed) {
+                tracing::warn!(%error, "can't lock secrets in memory; they may be swapped out");
+            }
+        }
+        Self { ptr, len }
+    }
+
+    /// Mapped size; mappings can't be empty.
+    fn size(len: usize) -> usize {
+        len.max(1)
+    }
+}
+
+impl Deref for LockedBytes {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        // SAFETY: `len` initialized bytes, owned by `self`.
+        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
+    }
+}
+
+impl DerefMut for LockedBytes {
+    fn deref_mut(&mut self) -> &mut [u8] {
+        // SAFETY: `len` initialized bytes, owned by `self`.
+        unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
+    }
+}
+
+impl Drop for LockedBytes {
+    fn drop(&mut self) {
+        self.zeroize();
+        // SAFETY: allocated with this size; not used again.
+        unsafe { pages::free(self.ptr, Self::size(self.len)) };
+    }
+}
+
+/// Page-granular allocation, so locks never cover other data.
+#[cfg(unix)]
+mod pages {
+    use std::io;
+    use std::ptr::NonNull;
+
+    /// Zeroed pages covering `size` bytes.
+    pub(super) fn alloc(size: usize) -> NonNull<u8> {
+        // SAFETY: a new private anonymous mapping.
+        let ptr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                size,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANON,
+                -1,
+                0,
+            )
+        };
+        if ptr == libc::MAP_FAILED {
+            panic!("can't map memory: {}", io::Error::last_os_error());
+        }
+        NonNull::new(ptr.cast()).expect("mmap succeeded")
+    }
+
+    /// # Safety
+    /// `ptr` and `size` must come from [`alloc`].
+    pub(super) unsafe fn lock(ptr: NonNull<u8>, size: usize) -> io::Result<()> {
+        #[cfg(target_os = "linux")]
+        // SAFETY: our own mapping.
+        if unsafe { libc::madvise(ptr.as_ptr().cast(), size, libc::MADV_DONTDUMP) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: our own mapping.
+        if unsafe { libc::mlock(ptr.as_ptr().cast(), size) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// Unmapping also unlocks.
+    ///
+    /// # Safety
+    /// `ptr` and `size` must come from [`alloc`]; the memory isn't used
+    /// again.
+    pub(super) unsafe fn free(ptr: NonNull<u8>, size: usize) {
+        // SAFETY: our own mapping, per the caller.
+        unsafe { libc::munmap(ptr.as_ptr().cast(), size) };
+    }
+}
+
+#[cfg(windows)]
+mod pages {
+    use std::io;
+    use std::ptr::NonNull;
+
+    use windows_sys::Win32::System::Memory::{
+        MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE, VirtualAlloc, VirtualFree,
+        VirtualLock, VirtualUnlock,
+    };
+
+    /// Zeroed pages covering `size` bytes.
+    pub(super) fn alloc(size: usize) -> NonNull<u8> {
+        // SAFETY: a new private allocation.
+        let ptr = unsafe {
+            VirtualAlloc(
+                std::ptr::null(),
+                size,
+                MEM_COMMIT | MEM_RESERVE,
+                PAGE_READWRITE,
+            )
+        };
+        NonNull::new(ptr.cast())
+            .unwrap_or_else(|| panic!("can't allocate memory: {}", io::Error::last_os_error()))
+    }
+
+    /// # Safety
+    /// `ptr` and `size` must come from [`alloc`].
+    pub(super) unsafe fn lock(ptr: NonNull<u8>, size: usize) -> io::Result<()> {
+        // SAFETY: our own allocation.
+        if unsafe { VirtualLock(ptr.as_ptr().cast(), size) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// # Safety
+    /// `ptr` and `size` must come from [`alloc`]; the memory isn't used
+    /// again.
+    pub(super) unsafe fn free(ptr: NonNull<u8>, size: usize) {
+        // SAFETY: our own allocation, per the caller.
+        unsafe {
+            VirtualUnlock(ptr.as_ptr().cast(), size);
+            VirtualFree(ptr.as_ptr().cast(), 0, MEM_RELEASE);
+        }
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+mod pages {
+    use std::io;
+    use std::ptr::NonNull;
+
+    pub(super) fn alloc(size: usize) -> NonNull<u8> {
+        let bytes = Box::into_raw(vec![0u8; size].into_boxed_slice());
+        NonNull::new(bytes.cast()).expect("Box is non-null")
+    }
+
+    pub(super) unsafe fn lock(_: NonNull<u8>, _: usize) -> io::Result<()> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+
+    pub(super) unsafe fn free(ptr: NonNull<u8>, size: usize) {
+        // SAFETY: from `alloc`, per the caller.
+        drop(unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr.as_ptr(), size)) });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn locked_bytes_start_zeroed_and_are_writable() {
+        for len in [0, 1, 32, 5000] {
+            let mut bytes = LockedBytes::new(len);
+            assert_eq!(bytes.len(), len);
+            assert!(bytes.iter().all(|&byte| byte == 0));
+            bytes.fill(7);
+            assert!(bytes.iter().all(|&byte| byte == 7));
+        }
+    }
+
+    /// The mapping's flags: `lo` locked, `dd` left out of core dumps.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn locked_bytes_are_locked_and_not_dumped() {
+        let bytes = LockedBytes::new(32);
+        let address = bytes.as_ptr() as usize;
+        let contains = |line: &str| -> Option<bool> {
+            let (start, end) = line.split_once(' ')?.0.split_once('-')?;
+            let range =
+                usize::from_str_radix(start, 16).ok()?..usize::from_str_radix(end, 16).ok()?;
+            Some(range.contains(&address))
+        };
+        let smaps = std::fs::read_to_string("/proc/self/smaps").unwrap();
+        let mapping: Vec<_> = smaps
+            .lines()
+            .skip_while(|line| contains(line) != Some(true))
+            .find_map(|line| line.strip_prefix("VmFlags:"))
+            .expect("mapping listed")
+            .split_whitespace()
+            .collect();
+        assert!(mapping.contains(&"dd"), "{mapping:?}");
+
+        let mut limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: `limit` is a valid `rlimit`.
+        assert_eq!(
+            unsafe { libc::getrlimit(libc::RLIMIT_MEMLOCK, &mut limit) },
+            0
+        );
+        // Parallel tests could use up a small limit.
+        if limit.rlim_cur >= 1 << 20 {
+            assert!(mapping.contains(&"lo"), "{mapping:?}");
+        }
+    }
 }

@@ -1,5 +1,6 @@
 use std::rc::Rc;
 
+use copiale_core::storage::Passphrase;
 use copiale_core::{Event, Events};
 use futures::StreamExt as _;
 use futures::channel::mpsc::UnboundedReceiver;
@@ -11,7 +12,6 @@ use gpui_kit::{
     SharedString, Styled as _, Subscription, Task, Window, WindowBackgroundAppearance, WindowId,
     div, px,
 };
-use zeroize::Zeroizing;
 
 use crate::chat::{ChatView, NoticeKey};
 use crate::notifier::Notifier;
@@ -240,8 +240,8 @@ impl Shell {
         let inputs = self.inputs();
         let (passphrase, confirmation) = (inputs.passphrase.clone(), inputs.confirmation.clone());
         if let Some(command) = self.onboarding.submit_passphrase(
-            &secret_value(passphrase.read(cx)),
-            &secret_value(confirmation.read(cx)),
+            secret_value(passphrase.read(cx)).as_str(),
+            secret_value(confirmation.read(cx)).as_str(),
         ) {
             for input in [&passphrase, &confirmation] {
                 input.update(cx, |input, cx| input.set_value("", window, cx));
@@ -564,13 +564,9 @@ fn error_text(error: Option<String>, cx: &App) -> impl IntoElement {
         .children(error.map(SharedString::from))
 }
 
-/// The input's text, copied once into memory zeroed on drop. GPUI's own
-/// copies stay: see `docs/security.md`.
-fn secret_value(input: &InputState) -> Zeroizing<String> {
+/// The input's text, copied once into locked memory zeroed on drop. GPUI's
+/// own copies stay: see `docs/security.md`.
+fn secret_value(input: &InputState) -> Passphrase {
     let text = input.text();
-    let mut value = Zeroizing::new(String::with_capacity(text.len()));
-    for chunk in text.chunks() {
-        value.push_str(chunk);
-    }
-    value
+    Passphrase::from_chunks(text.len(), text.chunks())
 }
