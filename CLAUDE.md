@@ -68,6 +68,9 @@ went unsolved until 2011.
   - Links: `http(s)://` and `www.` URLs (any case; `www.` over `https`)
     without bidi or invisible characters; a click asks first, showing the
     host in punycode.
+  - Names and titles: bidi controls and invisible characters stripped
+    (joiners and variation selectors kept; `copiale_core::text`), isolated
+    (FSI…PDI) inside other text; file names show them as `<U+XXXX>`.
   - No telemetry.
   - No core dumps; keys and passphrases locked out of swap
     (`copiale_core::hardening`). Key and passphrase copies

@@ -12,6 +12,7 @@ pub mod logging;
 mod model;
 pub mod signal;
 pub mod storage;
+pub mod text;
 
 /// Reverse-DNS application ID: Wayland app ID, macOS bundle ID, keychain
 /// service, Flatpak ID.

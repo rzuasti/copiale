@@ -13,6 +13,7 @@ use crate::model::{
     GroupId, GroupInfo, GroupMasterKey, GroupRef, Member, Message, MessageBody, MessageId,
     MessagePreview, MessageStatus, Peer, Quoted, ServiceId, Timestamp,
 };
+use crate::text::clean_name;
 
 /// [`SummaryRow`] columns; the peer's names come from presage's tables. A
 /// conversation is a request once the other side wrote, a changed safety
@@ -541,7 +542,7 @@ impl Database {
             .map(|(member, name)| {
                 Ok(Member {
                     id: service_id(&member)?,
-                    name,
+                    name: name.as_deref().and_then(clean_name),
                 })
             })
             .collect()
@@ -560,7 +561,7 @@ impl Database {
         for (conversation, member, name) in rows {
             members.entry(conversation).or_default().push(Member {
                 id: service_id(&member)?,
-                name,
+                name: name.as_deref().and_then(clean_name),
             });
         }
         Ok(members)
@@ -585,7 +586,7 @@ fn summary(row: SummaryRow, members: Vec<Member>) -> Result<ConversationSummary,
         (None, Some(group_id)) => {
             let bytes = <[u8; 32]>::try_from(group_id.as_slice())
                 .map_err(|_| StorageError::Database("invalid group ID".into()))?;
-            let title = row.group_title.filter(|title| !title.trim().is_empty());
+            let title = row.group_title.as_deref().and_then(clean_name);
             (Peer::Group(GroupId::new(bytes)), title, members)
         }
         (None, None) => return Err(StorageError::Database("conversation without peer".into())),
@@ -1286,6 +1287,40 @@ mod tests {
                 revision: 0,
             }))
         );
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn group_titles_and_member_names_are_cleaned() {
+        let (_dir, db) = db().await;
+        let key = group(1).key;
+        let info = GroupInfo {
+            title: "De\u{202e}v ".into(),
+            revision: 1,
+            members: vec![
+                Member {
+                    id: peer(2),
+                    name: Some("B\u{200b}ob".into()),
+                },
+                Member {
+                    id: peer(3),
+                    name: Some("\u{2066}".into()),
+                },
+            ],
+        };
+        let message = add_to_group(&db, group(1), Some(2), 100).await.unwrap();
+        db.set_group(key, &info).await.unwrap();
+
+        let summary = db
+            .conversation(message.conversation)
+            .await
+            .unwrap()
+            .unwrap();
+        let listed = db.conversations().await.unwrap();
+        assert_eq!(summary.title.as_deref(), Some("Dev"));
+        let names: Vec<_> = summary.members.iter().map(|m| m.name.as_deref()).collect();
+        assert_eq!(names, [Some("Bob"), None]);
+        assert_eq!(listed, [summary]);
         db.close().await;
     }
 

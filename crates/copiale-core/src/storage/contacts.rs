@@ -8,6 +8,7 @@ use super::StorageError;
 use super::database::{Database, database_error};
 use super::messages::{millis, timestamp};
 use crate::model::{Contact, PhoneNumber, ServiceId, Timestamp};
+use crate::text::clean_name;
 
 const CONTACTS_REQUESTED_AT: &str = "contacts_requested_at";
 
@@ -35,7 +36,7 @@ impl Database {
         let mut contacts = Vec::with_capacity(stored.len());
         for contact in stored {
             let id = ServiceId::new(contact.uuid);
-            let name = match blank_to_none(contact.name) {
+            let name = match clean_name(&contact.name) {
                 Some(name) => Some(name),
                 None => self.profile_name(id).await,
             };
@@ -66,7 +67,7 @@ impl Database {
             .await
             .ok()
             .flatten()?;
-        blank_to_none(profile.name?.to_string())
+        clean_name(&profile.name?.to_string())
     }
 
     /// When contacts were last asked of the phone.
@@ -96,25 +97,20 @@ impl Database {
     }
 }
 
-/// The contact's name, else their profile name from its parts; `None` if
-/// unknown or blank.
+/// The contact's name, else their profile name from its parts, cleaned;
+/// `None` if unknown or blank.
 pub(super) fn display_name(
     contact: Option<String>,
     given_name: Option<String>,
     family_name: Option<String>,
 ) -> Option<String> {
-    contact.and_then(blank_to_none).or_else(|| {
+    contact.as_deref().and_then(clean_name).or_else(|| {
         let name = ProfileName {
             given_name: given_name?,
             family_name,
         };
-        blank_to_none(name.to_string())
+        clean_name(&name.to_string())
     })
-}
-
-fn blank_to_none(name: String) -> Option<String> {
-    let trimmed = name.trim();
-    (!trimmed.is_empty()).then(|| trimmed.to_owned())
 }
 
 fn presage_error(error: impl std::error::Error) -> StorageError {
@@ -245,6 +241,32 @@ mod tests {
         for (id, title) in conversations.into_iter().zip(&titles) {
             assert!(listed.contains(&(id, title.clone())));
         }
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn names_lose_bidi_controls_and_invisible_characters() {
+        let (_dir, db) = db().await;
+        let conversations =
+            [incoming(&db, 1).await, incoming(&db, 2).await].map(|message| message.conversation);
+        save(&db, 1, "Ali\u{202e}ce", None).await;
+        save(&db, 2, "\u{200b}", None).await;
+        save_profile(&db, 2, "Gr\u{2066}ace", Some("\u{feff}")).await;
+
+        let mut titles = Vec::new();
+        for id in conversations {
+            titles.push(db.conversation(id).await.unwrap().unwrap().title);
+        }
+        let names: Vec<_> = db
+            .contacts()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|contact| contact.name)
+            .collect();
+
+        assert_eq!(titles, [Some("Alice".into()), Some("Grace".into())]);
+        assert_eq!(names, [Some("Alice".into()), Some("Grace".into())]);
         db.close().await;
     }
 

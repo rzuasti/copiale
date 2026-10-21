@@ -26,6 +26,7 @@ use crate::model::{
     GroupUpdate, IdentityKey, IncomingMessage, MessageBody, MessageChange, MessageRef, PhoneNumber,
     Quote, ReceiptKind, RequestResponse, SentMessage, ServiceId, Timestamp, Unsupported,
 };
+use crate::text::clean_name;
 
 /// What the core cares about so far; everything else is dropped, as are
 /// sync messages from anyone but `me`. Group changes must be signed by
@@ -630,7 +631,7 @@ fn group_update(change: GroupChange, editor: Aci) -> Option<GroupUpdate> {
         }
         GroupChange::NewRequestingMember(_) => GroupUpdate::Requested,
         GroupChange::PromoteRequestingMember { aci, .. } => GroupUpdate::Added(id(aci)),
-        GroupChange::Title(title) => GroupUpdate::Title(title),
+        GroupChange::Title(title) => GroupUpdate::Title(clean_name(&title).unwrap_or_default()),
         GroupChange::Description(_) => GroupUpdate::Description,
         GroupChange::Avatar(_) => GroupUpdate::Avatar,
         GroupChange::Timer(timer) => GroupUpdate::Timer(
@@ -1057,6 +1058,19 @@ pub(super) mod tests {
     #[test]
     fn group_changes_become_updates() {
         let change = signed(&change_actions(SENDER, "Dev team"));
+
+        assert_eq!(
+            data(with_change(4, change)),
+            Some(model::Content::GroupChanged(vec![
+                GroupUpdate::Removed(ServiceId::new(OTHER)),
+                GroupUpdate::Title("Dev team".into()),
+            ]))
+        );
+    }
+
+    #[test]
+    fn group_titles_lose_bidi_controls() {
+        let change = signed(&change_actions(SENDER, "\u{2067}Dev\u{202e} team"));
 
         assert_eq!(
             data(with_change(4, change)),

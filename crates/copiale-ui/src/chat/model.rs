@@ -15,7 +15,7 @@ use url::Url;
 use super::content::{placeholders, quote_line, system_lines};
 use super::new_chat::{Candidate, candidates};
 use super::palette::{self, Entry, PaletteAction};
-use super::text::link_target;
+use super::text::{isolate, link_target};
 use super::time::{LocalClock, countdown, countdown_changes_in};
 
 /// Messages loaded per page.
@@ -757,7 +757,7 @@ impl Chat {
     pub fn request_banner(&self) -> Option<RequestBanner> {
         let summary = self.open_conversation()?;
         let group = matches!(summary.peer, Peer::Group(_));
-        let name = title(summary);
+        let name = isolate(&title(summary));
         let text = match (summary.state, group) {
             (ChatState::Accepted, _) => return None,
             (ChatState::Request, false) => format!(
@@ -817,7 +817,7 @@ impl Chat {
                 .unconfirmed_here()
                 .into_iter()
                 .map(|peer| {
-                    let label = format!("Safety number: {}", self.peer_name(peer));
+                    let label = format!("Safety number: {}", isolate(&self.peer_name(peer)));
                     (PaletteAction::SafetyNumber(peer), label)
                 })
                 .collect(),
@@ -883,7 +883,7 @@ impl Chat {
             [] => return None,
             [one] => format!(
                 "{}'s safety number changed since you verified it; confirm it to send",
-                self.peer_name(*one)
+                isolate(&self.peer_name(*one))
             ),
             more => format!(
                 "{} members' safety numbers changed since you verified them; confirm them to \
@@ -1021,7 +1021,7 @@ impl Chat {
             .typing
             .iter()
             .filter(|t| t.conversation == open && t.until > now)
-            .map(|t| self.author_name(t.member))
+            .map(|t| isolate(&self.author_name(t.member)))
             .collect();
         match names.as_slice() {
             [] => None,
@@ -1150,7 +1150,7 @@ impl Chat {
                         .join(" "),
                     _ => String::new(),
                 };
-                Some(format!("↳ replying to {name}: {text}"))
+                Some(format!("↳ replying to {}: {text}", isolate(&name)))
             }
         }
     }
@@ -1447,7 +1447,10 @@ pub fn member_list(summary: &ConversationSummary) -> Option<String> {
         .members
         .iter()
         .take(LISTED_MEMBERS)
-        .map(|member| member.name.clone().unwrap_or_else(|| unknown(member.id)))
+        .map(|member| {
+            let name = member.name.clone().unwrap_or_else(|| unknown(member.id));
+            isolate(&name)
+        })
         .collect();
     let rest = summary.members.len().saturating_sub(LISTED_MEMBERS);
     let mut list = names.join(", ");
@@ -1967,9 +1970,11 @@ mod tests {
     fn member_list_names_the_first_few() {
         assert_eq!(member_list(&summary(1, NOW, 0, Some("Alice"))), None);
         let few = group_summary(vec![member(1, Some("Alice")), member(0xab12, None)], None);
-        assert_eq!(member_list(&few).as_deref(), Some("Alice, Unknown (ab12)"));
+        let listed = format!("{}, {}", isolate("Alice"), isolate("Unknown (ab12)"));
+        assert_eq!(member_list(&few), Some(listed));
         let many = group_summary((1..=8).map(|n| member(n, Some("M"))).collect(), None);
-        assert_eq!(member_list(&many).as_deref(), Some("M, M, M, M, M +3"));
+        let listed = format!("{} +3", vec![isolate("M"); 5].join(", "));
+        assert_eq!(member_list(&many), Some(listed));
     }
 
     #[test]
@@ -2048,12 +2053,21 @@ mod tests {
         );
         let row = |ix| chat.row(ix).unwrap();
 
-        assert_eq!(row(1).system, ["Alice added Bob"]);
+        assert_eq!(
+            row(1).system,
+            [format!("{} added {}", isolate("Alice"), isolate("Bob"))]
+        );
         assert!(row(1).leads);
         assert!(row(2).leads, "a system line breaks the group");
         assert_eq!(row(2).placeholders, ["[image] open on your phone"]);
         assert!(row(2).system.is_empty());
-        assert_eq!(row(3).system, ["you turned off disappearing messages"]);
+        assert_eq!(
+            row(3).system,
+            [format!(
+                "{} turned off disappearing messages",
+                isolate("you")
+            )]
+        );
     }
 
     fn typing(chat: &mut Chat, member: u128, typing: bool) {
@@ -2085,20 +2099,25 @@ mod tests {
         assert_eq!(chat.typing_label(), None);
 
         typing(&mut chat, 1, true);
-        assert_eq!(chat.typing_label().as_deref(), Some("Alice is typing…"));
+        let alice = format!("{} is typing…", isolate("Alice"));
+        assert_eq!(chat.typing_label().as_deref(), Some(alice.as_str()));
         assert!(chat.is_typing(ConversationId::new(1)));
         assert!(!chat.is_typing(ConversationId::new(2)));
         typing(&mut chat, 2, true);
         assert_eq!(
-            chat.typing_label().as_deref(),
-            Some("Alice and Bob are typing…")
+            chat.typing_label(),
+            Some(format!(
+                "{} and {} are typing…",
+                isolate("Alice"),
+                isolate("Bob")
+            ))
         );
         typing(&mut chat, 3, true);
         assert_eq!(chat.typing_label().as_deref(), Some("3 people are typing…"));
         typing(&mut chat, 3, false);
         // A message from Bob ends his typing.
         chat.apply(&Event::MessageAdded(from(9, 2, NOW)), true);
-        assert_eq!(chat.typing_label().as_deref(), Some("Alice is typing…"));
+        assert_eq!(chat.typing_label(), Some(alice.clone()));
         assert_eq!(chat.typing_changes_in(), Some(TYPING_TIMEOUT));
 
         chat.clock = LocalClock::fixed(
@@ -2232,8 +2251,8 @@ mod tests {
         assert!(chat.start_reply(open, MessageId::new(1)));
         assert_eq!(chat.compose(), Compose::Reply(MessageId::new(1)));
         assert_eq!(
-            chat.compose_banner().as_deref(),
-            Some("↳ replying to Alice: message 1")
+            chat.compose_banner(),
+            Some(format!("↳ replying to {}: message 1", isolate("Alice")))
         );
         let Some(Command::SendText {
             reply_to: Some(id), ..
@@ -2709,8 +2728,11 @@ mod tests {
         chat.close_overlay();
 
         chat.apply(&Event::UnconfirmedIdentities(vec![peer(1)]), true);
-        let banner = "Alice's safety number changed since you verified it; confirm it to send";
-        assert_eq!(chat.identity_banner(), Some((banner.into(), peer(1))));
+        let banner = format!(
+            "{}'s safety number changed since you verified it; confirm it to send",
+            isolate("Alice")
+        );
+        assert_eq!(chat.identity_banner(), Some((banner, peer(1))));
 
         let command = chat.show_safety_number(peer(1));
         assert!(matches!(command, Command::LoadIdentity(id) if id == peer(1)));
@@ -2783,8 +2805,11 @@ mod tests {
         assert!(safety_entries(&chat).is_empty());
 
         chat.apply(&Event::UnconfirmedIdentities(vec![peer(2), peer(9)]), true);
-        let banner = "Bob's safety number changed since you verified it; confirm it to send";
-        assert_eq!(chat.identity_banner(), Some((banner.into(), peer(2))));
+        let banner = format!(
+            "{}'s safety number changed since you verified it; confirm it to send",
+            isolate("Bob")
+        );
+        assert_eq!(chat.identity_banner(), Some((banner, peer(2))));
 
         chat.apply(&Event::UnconfirmedIdentities(vec![peer(2), peer(3)]), true);
         let banner =
@@ -2792,7 +2817,10 @@ mod tests {
         assert_eq!(chat.identity_banner(), Some((banner.into(), peer(2))));
         assert_eq!(
             safety_entries(&chat),
-            ["Safety number: Bob", "Safety number: Unknown (0003)"]
+            [
+                format!("Safety number: {}", isolate("Bob")),
+                format!("Safety number: {}", isolate("Unknown (0003)")),
+            ]
         );
     }
 
@@ -2820,7 +2848,10 @@ mod tests {
         let banner = chat.request_banner().unwrap();
         assert_eq!(
             banner.text,
-            "Alice isn't in your contacts. Accept to reply and share your profile with them."
+            format!(
+                "{} isn't in your contacts. Accept to reply and share your profile with them.",
+                isolate("Alice")
+            )
         );
         assert!(!banner.blocked);
         assert!(chat.submit("hi").is_none());
@@ -2853,7 +2884,10 @@ mod tests {
         let banner = chat.request_banner().unwrap();
         assert_eq!(
             banner.text,
-            "You blocked Alice. Messages from them are dropped."
+            format!(
+                "You blocked {}. Messages from them are dropped.",
+                isolate("Alice")
+            )
         );
         assert!(banner.blocked);
         assert!(matches!(chat.unblock(), Some(Command::Accept(_))));

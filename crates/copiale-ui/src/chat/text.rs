@@ -1,6 +1,7 @@
 //! Plain message text to Markdown for `TextView`, which only renders
 //! Markdown or HTML.
 
+use copiale_core::text::hidden;
 use url::Url;
 
 /// Escapes `body` so it renders verbatim, keeps line breaks, and turns
@@ -107,28 +108,22 @@ fn domain(host: &str) -> bool {
             || tld.len() >= 2 && tld.chars().all(|c| c.is_ascii_alphabetic()))
 }
 
-/// Controls, bidi controls and invisible characters.
-fn hidden(c: char) -> bool {
-    c.is_control()
-        || matches!(
-            c,
-            '\u{ad}'
-                | '\u{34f}'
-                | '\u{61c}'
-                | '\u{115f}'..='\u{1160}'
-                | '\u{17b4}'..='\u{17b5}'
-                | '\u{180b}'..='\u{180f}'
-                | '\u{200b}'..='\u{200f}'
-                | '\u{202a}'..='\u{202e}'
-                | '\u{2060}'..='\u{206f}'
-                | '\u{3164}'
-                | '\u{fe00}'..='\u{fe0f}'
-                | '\u{feff}'
-                | '\u{ffa0}'
-                | '\u{fff9}'..='\u{fffb}'
-                | '\u{1d173}'..='\u{1d17a}'
-                | '\u{e0000}'..='\u{e0fff}'
-        )
+/// `name` as a bidi isolate, so it can't reorder the text around it.
+pub fn isolate(name: &str) -> String {
+    format!("\u{2068}{name}\u{2069}")
+}
+
+/// `name` with its hidden characters spelled out as code points, isolated.
+pub fn visible(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for c in name.chars() {
+        if hidden(c) {
+            out.push_str(&format!("<U+{:04X}>", u32::from(c)));
+        } else {
+            out.push(c);
+        }
+    }
+    isolate(&out)
 }
 
 /// The host to show for `url`: ASCII, with IDN labels in punycode, and any
@@ -232,6 +227,20 @@ mod tests {
             assert!(!message_markdown(text).contains("](<"), "{text:?} linked");
             assert!(link_target(text).is_none(), "{text:?} accepted");
         }
+    }
+
+    #[test]
+    fn isolates_wrap_names() {
+        assert_eq!(isolate("\u{5d0}"), "\u{2068}\u{5d0}\u{2069}");
+    }
+
+    #[test]
+    fn hidden_characters_are_spelled_out() {
+        assert_eq!(
+            visible("a\u{202e}fdp.exe\u{200b}\u{e0001}"),
+            "\u{2068}a<U+202E>fdp.exe<U+200B><U+E0001>\u{2069}"
+        );
+        assert_eq!(visible("report.pdf"), "\u{2068}report.pdf\u{2069}");
     }
 
     #[test]

@@ -2,6 +2,8 @@
 
 use copiale_core::{Attachment, Content, GroupUpdate, ServiceId, Unsupported};
 
+use super::text::{isolate, visible};
+
 const ON_PHONE: &str = "open on your phone";
 
 /// Muted lines standing in for what the log can't show, above any text.
@@ -39,7 +41,7 @@ pub fn placeholders(content: &Content) -> Vec<String> {
 }
 
 /// One line quoting the message a reply answers; `author` names its
-/// author.
+/// author, isolated.
 pub fn quote_line(
     content: &Content,
     author: impl Fn(Option<ServiceId>) -> String,
@@ -70,11 +72,11 @@ pub fn quote_line(
             None => "…".into(),
         }
     };
-    Some(format!("↳ {}: {quoted}", author(quote.author)))
+    Some(format!("↳ {}: {quoted}", isolate(&author(quote.author))))
 }
 
 /// Attachments by kind, counted, in order of appearance; files one per
-/// line with their names.
+/// line with their names, hidden characters spelled out.
 fn attachment_lines(attachments: &[Attachment]) -> Vec<String> {
     let mut counts: Vec<((&str, &str), usize)> = Vec::new();
     for label in attachments.iter().filter_map(label) {
@@ -93,7 +95,7 @@ fn attachment_lines(attachments: &[Attachment]) -> Vec<String> {
     for attachment in attachments {
         if let Attachment::File { name } = attachment {
             match name.as_deref().filter(|name| !name.trim().is_empty()) {
-                Some(name) => lines.push(format!("[file] {name} · {ON_PHONE}")),
+                Some(name) => lines.push(format!("[file] {} · {ON_PHONE}", visible(name))),
                 None => lines.push(format!("[file] {ON_PHONE}")),
             }
         }
@@ -114,16 +116,19 @@ fn label(attachment: &Attachment) -> Option<(&'static str, &'static str)> {
 }
 
 /// System lines for a group, timer or safety number change by `actor`;
-/// empty for other content. `name` names other accounts.
+/// empty for other content. `name` names other accounts. Names are
+/// isolated.
 pub fn system_lines(
     content: &Content,
     actor: &str,
     name: impl Fn(ServiceId) -> String,
 ) -> Vec<String> {
+    let actor = &isolate(actor);
+    let name = |id: ServiceId| isolate(&name(id));
     match content {
         Content::GroupChanged(updates) => updates
             .iter()
-            .map(|update| group_line(update, actor, &name))
+            .map(|update| group_line(update, actor, name))
             .collect(),
         Content::TimerChanged(seconds) => vec![timer_line(*seconds, actor)],
         Content::SafetyNumberChanged => vec![format!("your safety number with {actor} changed")],
@@ -133,7 +138,7 @@ pub fn system_lines(
 
 fn group_line(update: &GroupUpdate, actor: &str, name: impl Fn(ServiceId) -> String) -> String {
     match update {
-        GroupUpdate::Title(title) => format!("{actor} renamed the group to “{title}”"),
+        GroupUpdate::Title(title) => format!("{actor} renamed the group to “{}”", isolate(title)),
         GroupUpdate::Description => format!("{actor} changed the group description"),
         GroupUpdate::Avatar => format!("{actor} changed the group picture"),
         GroupUpdate::Timer(seconds) => timer_line(*seconds, actor),
@@ -224,9 +229,20 @@ mod tests {
             [
                 "[2 images] open on your phone",
                 "[voice message] open on your phone",
-                "[file] report.pdf · open on your phone",
+                "[file] \u{2068}report.pdf\u{2069} · open on your phone",
                 "[file] open on your phone",
             ]
+        );
+    }
+
+    #[test]
+    fn file_names_spell_out_hidden_characters() {
+        let content = text(vec![Attachment::File {
+            name: Some("\u{5d0}\u{202e}fdp.exe".into()),
+        }]);
+        assert_eq!(
+            placeholders(&content),
+            ["[file] \u{2068}\u{5d0}<U+202E>fdp.exe\u{2069} · open on your phone"]
         );
     }
 
@@ -307,15 +323,15 @@ mod tests {
         assert_eq!(quote_line(&Content::text("hi"), author), None);
         assert_eq!(
             quote_line(&reply(Some(id(2)), "ship\n it?", None), author).as_deref(),
-            Some("↳ member2: ship it?")
+            Some("↳ \u{2068}member2\u{2069}: ship it?")
         );
         assert_eq!(
             quote_line(&reply(None, "", Some(Attachment::Image)), author).as_deref(),
-            Some("↳ you: [image]")
+            Some("↳ \u{2068}you\u{2069}: [image]")
         );
         assert_eq!(
             quote_line(&reply(None, "", None), author).as_deref(),
-            Some("↳ you: …")
+            Some("↳ \u{2068}you\u{2069}: …")
         );
         let Content::Text {
             quote: Some(mut quote),
@@ -361,7 +377,7 @@ mod tests {
             GroupUpdate::Timer(None),
         ]);
         assert_eq!(
-            system_lines(&content, "alice", named),
+            plain(system_lines(&content, "alice", named)),
             [
                 "alice renamed the group to “Dev team”",
                 "alice added member2",
@@ -383,6 +399,29 @@ mod tests {
         assert!(system_lines(&Content::text("hi"), "alice", named).is_empty());
     }
 
+    /// `lines` without bidi isolates.
+    fn plain(lines: Vec<String>) -> Vec<String> {
+        lines
+            .into_iter()
+            .map(|line| line.replace(['\u{2068}', '\u{2069}'], ""))
+            .collect()
+    }
+
+    #[test]
+    fn system_lines_isolate_names() {
+        let content = Content::GroupChanged(vec![
+            GroupUpdate::Title("\u{5e6}\u{5d5}\u{5d5}\u{5ea}".into()),
+            GroupUpdate::Added(id(2)),
+        ]);
+        assert_eq!(
+            system_lines(&content, "\u{5d0}", named),
+            [
+                "\u{2068}\u{5d0}\u{2069} renamed the group to “\u{2068}\u{5e6}\u{5d5}\u{5d5}\u{5ea}\u{2069}”",
+                "\u{2068}\u{5d0}\u{2069} added \u{2068}member2\u{2069}",
+            ]
+        );
+    }
+
     #[test]
     fn timer_durations_use_the_largest_whole_unit() {
         for (seconds, expected) in [
@@ -398,7 +437,7 @@ mod tests {
         }
         assert_eq!(
             system_lines(&Content::TimerChanged(Some(86_400)), "you", named),
-            ["you set disappearing messages to 1 day"]
+            ["\u{2068}you\u{2069} set disappearing messages to 1 day"]
         );
     }
 
@@ -406,7 +445,7 @@ mod tests {
     fn safety_number_changes_name_the_account() {
         assert_eq!(
             system_lines(&Content::SafetyNumberChanged, "Alice", named),
-            ["your safety number with Alice changed"]
+            ["your safety number with \u{2068}Alice\u{2069} changed"]
         );
         assert!(placeholders(&Content::SafetyNumberChanged).is_empty());
     }

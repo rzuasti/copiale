@@ -10,6 +10,7 @@ use copiale_core::{
 
 use super::content::placeholders;
 use super::model::{sender_name, title};
+use super::text::isolate;
 
 /// Longest message text a notification shows, in characters.
 const MAX_PREVIEW: usize = 200;
@@ -196,7 +197,9 @@ fn chat_notice(
             quiet: true,
         };
     }
-    let sender = latest.sender.map(|author| sender_name(summary, author));
+    let sender = latest
+        .sender
+        .map(|author| isolate(&sender_name(summary, author)));
     let body = match (content, count, sender) {
         (NotificationContent::Message, _, Some(sender)) if group => {
             format!("{sender}: {}", preview(&latest.content))
@@ -340,10 +343,8 @@ mod tests {
         let actions = receive(&mut name, message(1, 1, "secret"), summary(1, 1), None);
         assert_eq!(shown(&actions), [("Contact 1", "New message")]);
         let actions = receive(&mut name, message(2, 9, "secret"), group(1), None);
-        assert_eq!(
-            shown(&actions),
-            [("Dev", "New message from Unknown (0009)")]
-        );
+        let body = format!("New message from {}", isolate("Unknown (0009)"));
+        assert_eq!(shown(&actions), [("Dev", body.as_str())]);
 
         let mut text = Notices::new(NotificationContent::Message);
         let actions = receive(&mut text, message(1, 1, "hi  there"), summary(1, 1), None);
@@ -351,7 +352,8 @@ mod tests {
         let mut from_alice = message(2, 9, "ship it");
         from_alice.sender = Some(peer(1));
         let actions = receive(&mut text, from_alice, group(1), None);
-        assert_eq!(shown(&actions), [("Dev", "Alice: ship it")]);
+        let body = format!("{}: ship it", isolate("Alice"));
+        assert_eq!(shown(&actions), [("Dev", body.as_str())]);
     }
 
     #[test]

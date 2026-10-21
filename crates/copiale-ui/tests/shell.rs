@@ -890,7 +890,7 @@ fn renders_every_kind_of_content(cx: &mut TestAppContext) {
             .collect::<Vec<_>>()
     });
     let (shapes, timers): (Vec<_>, Vec<_>) = rows.into_iter().unzip();
-    let quote = Some("↳ you: ship it?".to_string());
+    let quote = Some("↳ \u{2068}you\u{2069}: ship it?".to_string());
     assert_eq!(
         shapes,
         [
@@ -2364,7 +2364,10 @@ fn the_log_keeps_its_place_across_layouts(cx: &mut TestAppContext) {
         window.scroll("log", ScrollDelta::Lines(point(0., 150.)), cx);
     })
     .unwrap();
-    ui.settle(cx);
+    // Lets the wheel's momentum die out.
+    for _ in 0..3 {
+        ui.settle(cx);
+    }
     let following = cx.update(|cx| {
         let chat = ui.shell.read(cx).chat().unwrap().read(cx);
         chat.log().is_following_tail()

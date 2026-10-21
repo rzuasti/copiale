@@ -19,7 +19,7 @@ use gpui_kit::{
 use crate::Quit;
 use crate::chat::model::Overlay;
 use crate::chat::palette::PaletteAction;
-use crate::chat::text::link_host;
+use crate::chat::text::{isolate, link_host};
 use crate::settings::{self, Settings};
 use crate::theme::ActivePalette as _;
 
@@ -305,6 +305,7 @@ impl ChatView {
         let muted = cx.palette().text_muted;
         let mono = cx.theme().mono_font_family.clone();
         let (name, identity) = self.chat.shown_identity().unwrap_or_default();
+        let name = isolate(&name);
         let verification = identity.map(|identity| identity.verification);
         let digits = match identity.map(|identity| identity.safety_number.as_ref()) {
             Some(Some(number)) => v_flex()

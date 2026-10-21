@@ -17,7 +17,7 @@ use gpui_kit::{
 
 use crate::chat::layout::Spacing;
 use crate::chat::model::{Row, member_list, title};
-use crate::chat::text::message_markdown;
+use crate::chat::text::{isolate, message_markdown};
 use crate::kinetic::kinetic;
 use crate::settings::Settings;
 use crate::theme::{ActivePalette as _, Fonts};
@@ -330,7 +330,7 @@ fn log_row(
     let palette = cx.palette();
     let (muted, text) = (palette.text_muted, palette.text);
     let mono = cx.theme().mono_font_family.clone();
-    let sender = truncate(&row.prefix.sender, MAX_SENDER_CHARS);
+    let sender = isolate(&truncate(&row.prefix.sender, MAX_SENDER_CHARS));
     let prefix: SharedString = match style.timestamps {
         TimestampVisibility::Always => format!("{sender} @ {} >", row.prefix.time),
         TimestampVisibility::Hover | TimestampVisibility::Never => format!("{sender} >"),

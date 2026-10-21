@@ -28,6 +28,7 @@ use super::layout::Layout;
 use super::model::{Chat, Compose, Effects, LogChange, Overlay, title};
 use super::notices::Notices;
 use super::settings_panel::SettingsPanel;
+use super::text::isolate;
 use super::time::LocalClock;
 use crate::kinetic::{self, Kinetic};
 use crate::notifier::Notifier;
@@ -355,7 +356,7 @@ impl ChatView {
             .chat
             .open_conversation()
             .map_or("Message".into(), |summary| {
-                format!("Message {}", title(summary))
+                format!("Message {}", isolate(&title(summary)))
             });
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
         let composer = cx.new(|cx| {
@@ -613,7 +614,7 @@ impl ChatView {
         let placeholder = self
             .chat
             .open_conversation()
-            .map(|summary| format!("Message {}", title(summary)));
+            .map(|summary| format!("Message {}", isolate(&title(summary))));
         self.inputs().composer.update(cx, |composer, cx| {
             composer.set_value("", window, cx);
             if let Some(placeholder) = placeholder {

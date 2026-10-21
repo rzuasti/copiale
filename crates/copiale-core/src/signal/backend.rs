@@ -43,6 +43,7 @@ use crate::model::{
     Timestamp,
 };
 use crate::storage::Database;
+use crate::text::clean_name;
 
 /// Loads or links the account in the app's database.
 #[derive(Default)]
@@ -924,23 +925,21 @@ const FINGERPRINT_ITERATIONS: u32 = 5200;
 /// Most profiles one [`SignalBackend::fetch_member_profiles`] call fetches.
 const MAX_PROFILE_FETCHES: usize = 100;
 
-/// A member's contact name, else cached profile name; blank ones count as
-/// unknown.
+/// A member's contact name, else cached profile name, cleaned; blank ones
+/// count as unknown.
 async fn member_name(store: &AppStore, member: &presage::model::groups::Member) -> Option<String> {
     let id: SignalServiceId = member.aci.into();
     if let Ok(Some(contact)) = store.contact_by_id(&id).await
-        && !contact.name.trim().is_empty()
+        && let Some(name) = clean_name(&contact.name)
     {
-        return Some(contact.name);
+        return Some(name);
     }
     let profile = store
         .profile(member.aci.into(), member.profile_key)
         .await
         .ok()
         .flatten()?;
-    let name = profile.name?.to_string();
-    let name = name.trim();
-    (!name.is_empty()).then(|| name.to_string())
+    clean_name(&profile.name?.to_string())
 }
 
 /// How a reply quotes a message; `None` authors are this account.
