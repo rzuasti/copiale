@@ -1323,6 +1323,8 @@ dependencies = [
  "signal-hook",
  "tempfile",
  "tracing",
+ "widestring",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

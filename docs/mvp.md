@@ -359,9 +359,11 @@ crates/
 
 - Config file watching: `notify`.
 - Single-instance IPC (`copiale` crate): the first process holds
-  `copiale.lock` and listens on `copiale.sock` (a per-user named pipe on
-  Windows), in the runtime dir (`$XDG_RUNTIME_DIR/copiale` on Linux, else
-  the data dir), private to the user. One request line per connection
+  `copiale.lock` and listens on `copiale.sock`, in the runtime dir
+  (`$XDG_RUNTIME_DIR/copiale` on Linux, else the data dir), private to the
+  user. On Windows, a named pipe named after the user's SID, owned by and
+  open only to them; clients check the server runs as them. One request
+  line per connection
   (`show`, `toggle`, `quit`, with an optional activation token), answered
   `ok` or `error`.
 - Tray: `tray-icon`, with `ksni` (D-Bus, no GTK) on Linux.

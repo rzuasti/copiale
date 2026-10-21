@@ -15,6 +15,9 @@ use copiale_ui::Request;
 use interprocess::local_socket::prelude::*;
 use interprocess::local_socket::{ListenerOptions, Name, Stream};
 
+#[cfg(windows)]
+mod windows;
+
 /// Longest request line read.
 const MAX_LINE: u64 = 1024;
 /// Longest activation token passed on.
@@ -55,6 +58,8 @@ pub fn claim(dir: &Path) -> io::Result<Claim> {
         use interprocess::os::unix::local_socket::ListenerOptionsExt as _;
         options.mode(0o600)
     };
+    #[cfg(windows)]
+    let options = windows::private(options)?;
     Ok(Claim::First(Instance {
         _lock: lock,
         listener: options.create_sync()?,
@@ -125,6 +130,8 @@ pub fn send(dir: &Path, request: &Request) -> io::Result<()> {
             Err(error) => return Err(error),
         }
     };
+    #[cfg(windows)]
+    windows::check_server(&connection)?;
     let mut reader = BufReader::new(connection);
     reader
         .get_mut()
@@ -185,14 +192,9 @@ fn name(dir: &Path) -> io::Result<Name<'static>> {
         .map(Name::into_owned)
 }
 
-/// Named pipes live in one machine-wide namespace: one per user.
 #[cfg(windows)]
 fn name(_: &Path) -> io::Result<Name<'static>> {
-    use interprocess::local_socket::GenericNamespaced;
-    let user = std::env::var("USERNAME").unwrap_or_default();
-    format!("{}-{user}", copiale_core::APP_ID)
-        .to_ns_name::<GenericNamespaced>()
-        .map(Name::into_owned)
+    windows::name()
 }
 
 #[cfg(test)]
