@@ -26,7 +26,7 @@ use crate::model::{
     GroupUpdate, IdentityKey, IncomingMessage, MessageBody, MessageChange, MessageRef, PhoneNumber,
     Quote, ReceiptKind, RequestResponse, SentMessage, ServiceId, Timestamp, Unsupported,
 };
-use crate::text::clean_name;
+use crate::text::{clean_name, clip_body};
 
 /// What the core cares about so far; everything else is dropped, as are
 /// sync messages from anyone but `me`. Group changes must be signed by
@@ -505,7 +505,7 @@ fn data_content(
     if message.is_view_once == Some(true) {
         return Some(model::Content::Unsupported(Unsupported::ViewOnce));
     }
-    let body = message.body.clone().unwrap_or_default();
+    let body = clip_body(message.body.as_deref().unwrap_or_default()).into_owned();
     let attachments: Vec<_> = message.attachments.iter().map(attachment).collect();
     if !body.is_empty() || !attachments.is_empty() {
         return Some(model::Content::Text {
@@ -832,6 +832,21 @@ pub(super) mod tests {
                 quote: None,
             })
         );
+    }
+
+    #[test]
+    fn long_bodies_are_clipped() {
+        use crate::text::MAX_BODY_BYTES;
+
+        let message = DataMessage {
+            body: Some("a".repeat(MAX_BODY_BYTES + 1)),
+            ..Default::default()
+        };
+        let Some(model::Content::Text { body, .. }) = data(message) else {
+            panic!("not text");
+        };
+        assert!(body.as_str().len() <= MAX_BODY_BYTES);
+        assert!(body.as_str().ends_with("a…"));
     }
 
     #[test]

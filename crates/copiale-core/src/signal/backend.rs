@@ -1,5 +1,9 @@
 //! The [`Linker`] and the [`SignalBackend`] of a linked account.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
+
 use futures::future::LocalBoxFuture;
 use futures::stream::{LocalBoxStream, Stream};
 use futures::{FutureExt as _, StreamExt as _};
@@ -105,6 +109,7 @@ pub struct PresageBackend {
     receiver: Option<Receiver>,
     /// Until [`SignalBackend::identity_changes`] takes it.
     identity_changes: Option<UnboundedReceiver<ServiceId>>,
+    profile_fetches: ProfileFetches,
 }
 
 /// The task receiving on the open connection.
@@ -123,6 +128,7 @@ impl PresageBackend {
             manager,
             receiver: None,
             identity_changes: Some(identity_changes),
+            profile_fetches: ProfileFetches::default(),
         }
     }
 }
@@ -452,12 +458,14 @@ impl SignalBackend for PresageBackend {
         .boxed_local()
     }
 
-    /// One request per member, one at a time, up to [`MAX_PROFILE_FETCHES`].
+    /// One request per member, one at a time, up to [`MAX_PROFILE_FETCHES`];
+    /// each member's at most once per [`PROFILE_FETCH_INTERVAL`].
     fn fetch_member_profiles(
         &mut self,
         key: GroupMasterKey,
     ) -> LocalBoxFuture<'static, Result<(), BackendError>> {
         let mut manager = self.manager.clone();
+        let attempts = self.profile_fetches.clone();
         async move {
             let Some(group) = manager
                 .store()
@@ -477,6 +485,10 @@ impl SignalBackend for PresageBackend {
                     tracing::info!("profile fetches capped for a large group");
                     break;
                 }
+                let id = ServiceId::new(member.aci.into());
+                if !attempts.may_fetch(id, Instant::now()) {
+                    continue;
+                }
                 fetched += 1;
                 if let Err(error) = manager
                     .retrieve_profile_by_uuid(member.aci, member.profile_key)
@@ -484,6 +496,7 @@ impl SignalBackend for PresageBackend {
                 {
                     let error = presage_error(error);
                     if error.is_network() {
+                        attempts.forget(id);
                         return Err(error);
                     }
                     tracing::debug!(%error, "fetching a member profile failed");
@@ -924,6 +937,31 @@ const FINGERPRINT_ITERATIONS: u32 = 5200;
 
 /// Most profiles one [`SignalBackend::fetch_member_profiles`] call fetches.
 const MAX_PROFILE_FETCHES: usize = 100;
+/// How often a member's profile may be fetched while it has no name.
+const PROFILE_FETCH_INTERVAL: Duration = Duration::from_secs(3600);
+
+/// When members' profiles were last fetched.
+#[derive(Clone, Default)]
+struct ProfileFetches(Rc<RefCell<HashMap<ServiceId, Instant>>>);
+
+impl ProfileFetches {
+    /// Whether `member`'s profile may be fetched at `now`: once per
+    /// [`PROFILE_FETCH_INTERVAL`]. Notes the fetch if so.
+    fn may_fetch(&self, member: ServiceId, now: Instant) -> bool {
+        let mut fetched = self.0.borrow_mut();
+        fetched.retain(|_, at| now.saturating_duration_since(*at) < PROFILE_FETCH_INTERVAL);
+        if fetched.contains_key(&member) {
+            return false;
+        }
+        fetched.insert(member, now);
+        true
+    }
+
+    /// Forgets a fetch that didn't reach the server.
+    fn forget(&self, member: ServiceId) {
+        self.0.borrow_mut().remove(&member);
+    }
+}
 
 /// A member's contact name, else cached profile name, cleaned; blank ones
 /// count as unknown.
@@ -961,6 +999,20 @@ mod tests {
 
     use super::*;
     use crate::signal::incoming::tests::{OTHER, SENDER, content, server, text};
+
+    #[test]
+    fn member_profiles_are_fetched_once_an_hour() {
+        let fetches = ProfileFetches::default();
+        let (a, b) = (ServiceId::new(SENDER), ServiceId::new(OTHER));
+        let start = Instant::now();
+
+        assert!(fetches.may_fetch(a, start));
+        assert!(!fetches.may_fetch(a, start + PROFILE_FETCH_INTERVAL / 2));
+        assert!(fetches.may_fetch(b, start + PROFILE_FETCH_INTERVAL / 2));
+        fetches.forget(b);
+        assert!(fetches.may_fetch(b, start + PROFILE_FETCH_INTERVAL / 2));
+        assert!(fetches.may_fetch(a, start + PROFILE_FETCH_INTERVAL));
+    }
 
     #[test]
     fn sent_quotes_name_their_author() {

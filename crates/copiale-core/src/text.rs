@@ -1,4 +1,10 @@
-//! Characters that can disguise text: bidi controls and invisible ones.
+//! Characters that can disguise text: bidi controls and invisible ones,
+//! and the longest message body kept.
+
+use std::borrow::Cow;
+
+/// Longest message body stored and rendered, in bytes.
+pub const MAX_BODY_BYTES: usize = 64 * 1024;
 
 /// Controls, bidi controls, line and paragraph separators, and invisible
 /// characters.
@@ -54,6 +60,16 @@ pub fn clean_name(name: &str) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_owned())
 }
 
+/// `body` cut to at most [`MAX_BODY_BYTES`] on a character boundary,
+/// ending in "…" if cut.
+pub fn clip_body(body: &str) -> Cow<'_, str> {
+    if body.len() <= MAX_BODY_BYTES {
+        return Cow::Borrowed(body);
+    }
+    let end = body.floor_char_boundary(MAX_BODY_BYTES - '…'.len_utf8());
+    Cow::Owned(format!("{}…", &body[..end]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,5 +108,18 @@ mod tests {
         for name in ["", "  ", "\u{200b}", "\u{202e}\u{2069} \u{feff}", "\n\t"] {
             assert_eq!(clean_name(name), None, "{name:?}");
         }
+    }
+
+    #[test]
+    fn long_bodies_are_clipped_on_a_character_boundary() {
+        assert!(matches!(clip_body("hi"), Cow::Borrowed("hi")));
+        let fits = "a".repeat(MAX_BODY_BYTES);
+        assert!(matches!(clip_body(&fits), Cow::Borrowed(_)));
+
+        let long = format!("a{}", "é".repeat(MAX_BODY_BYTES));
+        let clipped = clip_body(&long);
+        assert!(clipped.len() <= MAX_BODY_BYTES);
+        assert!(clipped.ends_with("é…"));
+        assert!(long.starts_with(clipped.trim_end_matches('…')));
     }
 }

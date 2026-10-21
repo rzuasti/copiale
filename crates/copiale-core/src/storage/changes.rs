@@ -23,12 +23,15 @@ const EDIT_WINDOW: Duration = Duration::from_secs(48 * 3600);
 const DELETE_WINDOW: Duration = Duration::from_secs(48 * 3600);
 /// Most edits a message takes, as in Signal.
 const MAX_EDITS: i64 = 100;
+/// Most changes kept per author for messages not stored yet; older ones
+/// are dropped first.
+const MAX_PENDING_PER_AUTHOR: i64 = 100;
 
 impl Database {
     /// Applies an edit or delete by the message's author; returns the
     /// changed message. One for a message not stored yet is kept until it
-    /// is, from `now`; `None` then, and when there's nothing to change.
-    /// Others' changes apply only within [`EDIT_WINDOW`] or
+    /// is, from `now`, up to [`MAX_PENDING_PER_AUTHOR`]; `None` then, and
+    /// when there's nothing to change. Others' changes apply only within [`EDIT_WINDOW`] or
     /// [`DELETE_WINDOW`] of the message, and edits up to [`MAX_EDITS`].
     pub(crate) async fn apply_change(
         &self,
@@ -86,6 +89,17 @@ impl Database {
             .bind(edited_at)
             .bind(millis(change.server_at))
             .bind(millis(now))
+            .execute(&mut *tx)
+            .await
+            .map_err(database_error)?;
+            sqlx::query(
+                "DELETE FROM pending_changes WHERE author = ?1 AND id NOT IN (
+                     SELECT id FROM pending_changes WHERE author = ?1
+                     ORDER BY id DESC LIMIT ?2
+                 )",
+            )
+            .bind(&author)
+            .bind(MAX_PENDING_PER_AUTHOR)
             .execute(&mut *tx)
             .await
             .map_err(database_error)?;
@@ -703,6 +717,29 @@ mod tests {
 
         let message = incoming(&db, 1, 100, "kept").await.unwrap();
         assert_eq!(message.content, Content::text("kept"));
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn kept_changes_are_capped_per_author() {
+        let (_dir, db) = db().await;
+        let cap = MAX_PENDING_PER_AUTHOR as u64;
+        for target in 0..=cap {
+            db.apply_change(&change(1, 100 + target, Change::Delete), at(0))
+                .await
+                .unwrap();
+        }
+        db.apply_change(&change(2, 100, Change::Delete), at(0))
+            .await
+            .unwrap();
+
+        // The oldest of 1's was dropped; 2's is kept.
+        let oldest = incoming(&db, 1, 100, "kept").await.unwrap();
+        assert_eq!(oldest.content, Content::text("kept"));
+        let newest = incoming(&db, 1, 100 + cap, "gone").await.unwrap();
+        assert_eq!(newest.content, Content::Deleted);
+        let other = incoming(&db, 2, 100, "gone").await.unwrap();
+        assert_eq!(other.content, Content::Deleted);
         db.close().await;
     }
 

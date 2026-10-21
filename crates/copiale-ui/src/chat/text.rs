@@ -1,12 +1,13 @@
 //! Plain message text to Markdown for `TextView`, which only renders
 //! Markdown or HTML.
 
-use copiale_core::text::hidden;
+use copiale_core::text::{clip_body, hidden};
 use url::Url;
 
-/// Escapes `body` so it renders verbatim, keeps line breaks, and turns
-/// URLs into links (see [`link_target`]).
+/// Escapes `body`, clipped, so it renders verbatim, keeps line breaks, and
+/// turns URLs into links (see [`link_target`]).
 pub fn message_markdown(body: &str) -> String {
+    let body = clip_body(body);
     let lines: Vec<&str> = body.split('\n').collect();
     let mut out = String::with_capacity(body.len() + body.len() / 4);
     for (ix, line) in lines.iter().enumerate() {
@@ -169,6 +170,14 @@ mod tests {
             message_markdown("(WWW.X.org)"),
             "\\([WWW\\.X\\.org](<https://www.x.org/>)\\)"
         );
+    }
+
+    #[test]
+    fn clips_long_bodies() {
+        let long = "a".repeat(copiale_core::text::MAX_BODY_BYTES * 2);
+        let markdown = message_markdown(&long);
+        assert!(markdown.len() <= copiale_core::text::MAX_BODY_BYTES);
+        assert!(markdown.ends_with("a…"));
     }
 
     /// The links in `text`, by target.

@@ -57,6 +57,9 @@ went unsolved until 2011.
   - Others' edits and deletes apply only within 48h of the message, by
     server time (edits from the original, not the last edit); at most 100
     edits per message (`storage::changes`), 10 of our own sent.
+  - Work others can cause is bounded: bodies clipped to 64 KiB
+    (`copiale_core::text`), 100 kept changes per author, 3 group fetches
+    per sender a minute, each member's profile fetched once an hour.
   - Quotes: only which message a reply quotes is stored; its text is shown
     as stored in the same chat, else "original message not found".
   - Message requests: a chat the other side wrote in is a request until

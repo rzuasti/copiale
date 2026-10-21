@@ -1820,6 +1820,21 @@ async fn messages_of_unknown_groups_are_dropped() {
 }
 
 #[tokio::test]
+async fn one_sender_makes_us_fetch_only_a_few_unknown_groups() {
+    let (_dir, mut running) = ready().await;
+
+    for group in 1..=10 {
+        running
+            .network
+            .deliver(group_incoming(group_ref(group, 0), 1, 100, "hi all"));
+    }
+
+    assert_eq!(flush(&mut running).await, []);
+    assert_eq!(running.network.group_fetches(), 3);
+    stop(running).await;
+}
+
+#[tokio::test]
 async fn messages_from_non_members_are_dropped() {
     let (_dir, mut running) = ready().await;
     running.network.set_group(group_key(1), named_dev_group(3));

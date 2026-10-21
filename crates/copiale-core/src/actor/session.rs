@@ -1783,16 +1783,17 @@ impl<'a, B: SignalBackend> Session<'a, B> {
         }
     }
 
-    /// Whether `author` (`None` for this account) and this account are
-    /// members of `group` as last fetched. If not, fetches it once and
-    /// checks again: the stored state may be older than the message.
-    async fn in_group(&mut self, group: GroupRef, author: Option<ServiceId>) -> bool {
+    /// Whether `sender` (`None` for this account) and this account are
+    /// members of `group` as last fetched. If not, fetches it once, if
+    /// [`Groups::may_fetch`], and checks again: the stored state may be
+    /// older than the message.
+    async fn in_group(&mut self, group: GroupRef, sender: Option<ServiceId>) -> bool {
         let me = self.backend.own_id();
-        let author = author.unwrap_or(me);
+        let author = sender.unwrap_or(me);
         if self.has_members(group.key, &[author, me]).await {
             return true;
         }
-        if self.groups.may_fetch(group.key, Instant::now()) {
+        if self.groups.may_fetch(group.key, sender, Instant::now()) {
             let timeout = self.core.options.connect_timeout;
             match timed(timeout, self.backend.refresh_group(group.key)).await {
                 Ok(()) if self.has_members(group.key, &[author, me]).await => return true,
