@@ -10,7 +10,7 @@ use tokio::sync::oneshot;
 use crate::model::{
     BlockedList, ChatRef, Destination, GroupId, GroupInfo, GroupMasterKey, GroupMembers,
     IdentityKey, IncomingMessage, MessageChange, MessageRef, Outgoing, ReceiptKind,
-    RequestResponse, SafetyNumber, SentMessage, ServiceId, StoredChat, Timestamp,
+    RequestResponse, SafetyNumber, SentMessage, ServiceId, StoredChat, StoredIdentity, Timestamp,
 };
 use crate::storage::Database;
 
@@ -95,11 +95,13 @@ pub struct PeerIdentity {
     pub safety_number: SafetyNumber,
 }
 
-/// Chats as Storage Service holds them, at a manifest version.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Chats and verifications as Storage Service holds them, at a manifest
+/// version.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StoredChats {
     pub version: u64,
     pub chats: Vec<StoredChat>,
+    pub identities: Vec<StoredIdentity>,
 }
 
 /// A message that couldn't be decrypted.
@@ -432,9 +434,9 @@ pub trait SignalBackend {
         peer: ServiceId,
     ) -> LocalBoxFuture<'static, Result<(), BackendError>>;
 
-    /// Accepted and blocked chats from Storage Service, unless its manifest
-    /// is still at `known`; `None` then, and before the account's storage
-    /// key is known. Doesn't borrow the backend.
+    /// Accepted and blocked chats, and verifications, from Storage Service,
+    /// unless its manifest is still at `known`; `None` then, and before the
+    /// account's storage key is known. Doesn't borrow the backend.
     fn stored_chats(
         &mut self,
         known: Option<u64>,

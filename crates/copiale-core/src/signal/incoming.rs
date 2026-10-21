@@ -189,7 +189,7 @@ fn signal(content: &Content) -> Option<Incoming> {
                 verified.destination_aci_binary.as_deref(),
                 verified.destination_aci.as_deref(),
             )?;
-            let key = SignalIdentityKey::decode(verified.identity_key.as_deref()?).ok()?;
+            let key = identity_key(verified.identity_key.as_deref()?)?;
             let verified = match proto::verified::State::try_from(verified.state.unwrap_or(0)) {
                 Ok(proto::verified::State::Verified) => true,
                 Ok(proto::verified::State::Default) => false,
@@ -199,7 +199,7 @@ fn signal(content: &Content) -> Option<Incoming> {
             };
             Some(Incoming::Verified {
                 peer,
-                key: IdentityKey::new(key.serialize().into_vec()),
+                key,
                 verified,
             })
         }
@@ -663,6 +663,12 @@ pub(super) fn service_id(binary: Option<&[u8]>, string: Option<&str>) -> Option<
         .and_then(SignalServiceId::parse_from_service_id_binary)
         .or_else(|| string.and_then(SignalServiceId::parse_from_service_id_string))?;
     Some(ServiceId::new(id.raw_uuid()))
+}
+
+/// An identity key as Signal encodes it; `None` if invalid.
+pub(super) fn identity_key(bytes: &[u8]) -> Option<IdentityKey> {
+    let key = SignalIdentityKey::decode(bytes).ok()?;
+    Some(IdentityKey::new(key.serialize().into_vec()))
 }
 
 /// When the sender's device says it sent the message.

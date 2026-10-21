@@ -34,6 +34,6 @@ pub use model::{
     GroupInfo, GroupMasterKey, GroupMembers, GroupRef, GroupUpdate, Identity, IdentityKey,
     IncomingMessage, Member, Message, MessageBody, MessageChange, MessageId, MessagePreview,
     MessageRef, MessageStatus, Outgoing, Peer, PhoneNumber, Quote, Quoted, ReceiptKind,
-    RequestResponse, SafetyNumber, SentMessage, ServiceId, StoredChat, Timestamp, Unsupported,
-    Verification,
+    RequestResponse, SafetyNumber, SentMessage, ServiceId, StoredChat, StoredIdentity, Timestamp,
+    Unsupported, Verification,
 };

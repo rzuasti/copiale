@@ -49,7 +49,8 @@ went unsolved until 2011.
   - Identity keys: changes are accepted, as in Signal, and noted in every
     shared chat; sends to a key replacing one verified on the phone are
     refused until the user confirms it (`signal::protocol`). Verified state
-    comes only from the phone's verified syncs.
+    comes only from the phone: its verified syncs, and Storage Service
+    contact records when they change (`stored_identities`).
   - Groups: messages, edits and deletes kept only from members of the
     group as last fetched, with this account in it (one fetch first on a
     mismatch); group change lines only from server-signed changes newer

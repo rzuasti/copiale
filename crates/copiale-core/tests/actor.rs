@@ -13,7 +13,7 @@ use copiale_core::{
     Identity, Incoming, IncomingMessage, MAX_SENT_EDITS, Member, Message, MessageBody,
     MessageChange, MessagePreview, MessageRef, MessageStatus, Outgoing, Peer, PhoneNumber, Quote,
     Quoted, ReceiptKind, RequestResponse, RetryRequest, SentMessage, StorageFailure, StoredChat,
-    StoredChats, Timestamp, Undecryptable, Verification,
+    StoredChats, StoredIdentity, Timestamp, Undecryptable, Verification,
 };
 use copiale_testkit::{
     DEVICE_NAME, FAKE_LINK_URL, FakeNetwork, FakePhone, ManualClock, MemorySecretStore, OWN_ID,
@@ -3660,6 +3660,60 @@ async fn phone_verifications_apply_and_only_changes_need_confirming() {
 }
 
 #[tokio::test]
+async fn storage_service_verifications_apply_when_they_change() {
+    let (_dir, mut running) = ready().await;
+    until(&running, |network| network.stored_reads() == 1).await;
+    running.network.set_identity(service_id(1), identity_key(2));
+    let stored = |version, key, verified| StoredChats {
+        version,
+        identities: vec![StoredIdentity {
+            peer: service_id(1),
+            key: identity_key(key),
+            verified,
+        }],
+        ..StoredChats::default()
+    };
+    running.network.set_stored_chats(stored(1, 1, true));
+
+    running.network.deliver(Incoming::StorageChanged);
+    expect(
+        &mut running.events,
+        identity(1, Some(2), Verification::Changed),
+    )
+    .await;
+    expect(
+        &mut running.events,
+        Event::UnconfirmedIdentities(vec![service_id(1)]),
+    )
+    .await;
+    send(&running, Command::ConfirmIdentity(service_id(1)));
+    expect(
+        &mut running.events,
+        identity(1, Some(2), Verification::Unverified),
+    )
+    .await;
+    expect(
+        &mut running.events,
+        Event::UnconfirmedIdentities(Vec::new()),
+    )
+    .await;
+
+    running.network.set_stored_chats(stored(2, 1, true));
+    running.network.deliver(Incoming::StorageChanged);
+    until(&running, |network| network.stored_reads() == 3).await;
+    assert!(flush(&mut running).await.is_empty(), "confirmed stays so");
+
+    running.network.set_stored_chats(stored(3, 2, true));
+    running.network.deliver(Incoming::StorageChanged);
+    expect(
+        &mut running.events,
+        identity(1, Some(2), Verification::Verified),
+    )
+    .await;
+    stop(running).await;
+}
+
+#[tokio::test]
 async fn unconfirmed_identities_are_reported_once_ready() {
     let dir = tempfile::tempdir().unwrap();
     let secrets = MemorySecretStore::default();
@@ -3932,6 +3986,7 @@ async fn storage_service_accepts_and_blocks_chats() {
             stored(contact_chat(2), false, true),
             stored(contact_chat(9), true, false),
         ],
+        identities: Vec::new(),
     });
 
     running.network.deliver(Incoming::StorageChanged);
@@ -3966,6 +4021,7 @@ async fn the_blocked_list_is_asked_for_until_storage_service_is_read() {
             accepted: true,
             blocked: false,
         }],
+        identities: Vec::new(),
     });
     running.network.deliver(Incoming::StorageChanged);
     conversation_updated(&mut running.events).await;

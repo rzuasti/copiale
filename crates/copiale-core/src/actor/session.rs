@@ -1310,18 +1310,25 @@ impl<'a, B: SignalBackend> Session<'a, B> {
         match read {
             Ok(Some(stored)) => match self
                 .db
-                .apply_stored_chats(&stored.chats, stored.version)
+                .apply_stored(&stored.chats, &stored.identities, stored.version)
                 .await
             {
-                Ok(changed) => {
+                Ok((changed, verified)) => {
                     self.storage_version = Some(stored.version);
                     tracing::info!(
                         version = stored.version,
                         chats = stored.chats.len(),
                         changed = changed.len(),
+                        verified = verified.len(),
                         "storage service read"
                     );
                     self.send_chats(&changed).await;
+                    for peer in &verified {
+                        self.load_identity(*peer).await;
+                    }
+                    if !verified.is_empty() {
+                        self.check_unconfirmed().await;
+                    }
                 }
                 Err(error) => self.database_error(error),
             },

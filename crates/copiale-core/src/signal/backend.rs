@@ -16,9 +16,10 @@ use presage::libsignal_service::proto::sync_message::{
     self, Content as SyncContent, message_request_response,
 };
 use presage::libsignal_service::proto::{
-    self, AddressableMessage, ConversationIdentifier, DataMessage, EditMessage, GroupContextV2,
-    ReceiptMessage, StorageRecord, SyncMessage, TypingMessage, addressable_message,
-    conversation_identifier, data_message, receipt_message, storage_record, typing_message,
+    self, AddressableMessage, ContactRecord, ConversationIdentifier, DataMessage, EditMessage,
+    GroupContextV2, ReceiptMessage, StorageRecord, SyncMessage, TypingMessage, addressable_message,
+    contact_record, conversation_identifier, data_message, receipt_message, storage_record,
+    typing_message,
 };
 use presage::libsignal_service::protocol::{
     Aci, DecryptionErrorMessage, Fingerprint, IdentityKeyStore as _, ProtocolAddress,
@@ -35,7 +36,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant};
 
 use super::errors::{presage_error, storage_service_error, store_error};
-use super::incoming::{incoming, service_id};
+use super::incoming::{identity_key, incoming, service_id};
 use super::store::AppStore;
 use crate::backend::{
     BackendError, Incoming, Linker, PeerIdentity, Resendable, RetryRequest, SignalBackend,
@@ -44,7 +45,7 @@ use crate::backend::{
 use crate::model::{
     BlockedList, ChatRef, Destination, GroupInfo, GroupMasterKey, GroupMembers, IdentityKey,
     Member, MessageBody, Outgoing, Quote, RequestResponse, SafetyNumber, ServiceId, StoredChat,
-    Timestamp,
+    StoredIdentity, Timestamp,
 };
 use crate::storage::Database;
 use crate::text::clean_name;
@@ -726,18 +727,21 @@ impl SignalBackend for PresageBackend {
                 .map(|id| id.raw.clone())
                 .collect();
             let ikm = (!manifest.record_ikm.is_empty()).then_some(manifest.record_ikm.as_slice());
-            let mut chats = Vec::new();
+            let mut stored = StoredChats {
+                version: manifest.version,
+                ..StoredChats::default()
+            };
             for batch in keys.chunks(STORAGE_READ_BATCH) {
                 let records = service
                     .read_items(batch.to_vec(), ikm)
                     .await
                     .map_err(storage_service_error)?;
-                chats.extend(records.into_iter().filter_map(stored_chat));
+                for record in &records {
+                    stored.chats.extend(stored_chat(record));
+                    stored.identities.extend(stored_identity(record));
+                }
             }
-            Ok(Some(StoredChats {
-                version: manifest.version,
-                chats,
-            }))
+            Ok(Some(stored))
         }
         .boxed_local()
     }
@@ -908,17 +912,13 @@ fn sync_request(kind: sync_message::request::Type) -> SyncMessage {
 
 /// A contact's or group's state in a Storage Service record; `None` for
 /// other records, and contacts without an ACI.
-fn stored_chat(record: StorageRecord) -> Option<StoredChat> {
-    match record.record? {
-        storage_record::Record::Contact(contact) => {
-            let binary = (!contact.aci_binary.is_empty()).then_some(contact.aci_binary.as_slice());
-            let string = (!contact.aci.is_empty()).then_some(contact.aci.as_str());
-            Some(StoredChat {
-                chat: ChatRef::Contact(service_id(binary, string)?),
-                accepted: contact.whitelisted,
-                blocked: contact.blocked,
-            })
-        }
+fn stored_chat(record: &StorageRecord) -> Option<StoredChat> {
+    match record.record.as_ref()? {
+        storage_record::Record::Contact(contact) => Some(StoredChat {
+            chat: ChatRef::Contact(contact_id(contact)?),
+            accepted: contact.whitelisted,
+            blocked: contact.blocked,
+        }),
         storage_record::Record::GroupV2(group) => {
             let key = <[u8; 32]>::try_from(group.master_key.as_slice()).ok()?;
             Some(StoredChat {
@@ -929,6 +929,30 @@ fn stored_chat(record: StorageRecord) -> Option<StoredChat> {
         }
         _ => None,
     }
+}
+
+/// A contact record's verification, if it has a key and isn't the phone's
+/// mark of a verified key that changed (as with [`Incoming::Verified`]).
+fn stored_identity(record: &StorageRecord) -> Option<StoredIdentity> {
+    let storage_record::Record::Contact(contact) = record.record.as_ref()? else {
+        return None;
+    };
+    let verified = match contact_record::IdentityState::try_from(contact.identity_state) {
+        Ok(contact_record::IdentityState::Verified) => true,
+        Ok(contact_record::IdentityState::Default) => false,
+        Ok(contact_record::IdentityState::Unverified) | Err(_) => return None,
+    };
+    Some(StoredIdentity {
+        peer: contact_id(contact)?,
+        key: identity_key(&contact.identity_key)?,
+        verified,
+    })
+}
+
+fn contact_id(contact: &ContactRecord) -> Option<ServiceId> {
+    let binary = (!contact.aci_binary.is_empty()).then_some(contact.aci_binary.as_slice());
+    let string = (!contact.aci.is_empty()).then_some(contact.aci.as_str());
+    service_id(binary, string)
 }
 
 /// Safety numbers as Signal's clients compute them: from ACIs, version 2.
@@ -1066,14 +1090,14 @@ mod tests {
             blocked: false,
         };
         assert_eq!(
-            stored_chat(contact(OTHER.to_string(), Vec::new())),
+            stored_chat(&contact(OTHER.to_string(), Vec::new())),
             Some(accepted(peer))
         );
         assert_eq!(
-            stored_chat(contact(String::new(), OTHER.as_bytes().to_vec())),
+            stored_chat(&contact(String::new(), OTHER.as_bytes().to_vec())),
             Some(accepted(peer))
         );
-        assert_eq!(stored_chat(contact(String::new(), Vec::new())), None);
+        assert_eq!(stored_chat(&contact(String::new(), Vec::new())), None);
 
         let group = record(storage_record::Record::GroupV2(GroupV2Record {
             master_key: vec![7; 32],
@@ -1081,7 +1105,7 @@ mod tests {
             ..Default::default()
         }));
         assert_eq!(
-            stored_chat(group),
+            stored_chat(&group),
             Some(StoredChat {
                 chat: ChatRef::Group(GroupMasterKey::new([7; 32]).id()),
                 accepted: false,
@@ -1089,8 +1113,72 @@ mod tests {
             })
         );
         let account = record(storage_record::Record::Account(AccountRecord::default()));
-        assert_eq!(stored_chat(account), None);
-        assert_eq!(stored_chat(StorageRecord { record: None }), None);
+        assert_eq!(stored_chat(&account), None);
+        assert_eq!(stored_chat(&StorageRecord { record: None }), None);
+    }
+
+    #[test]
+    fn storage_records_carry_verifications() {
+        use presage::libsignal_service::proto::ContactRecord;
+        use presage::libsignal_service::protocol::IdentityKeyPair;
+
+        let key = IdentityKeyPair::generate(&mut rand::rng())
+            .identity_key()
+            .serialize()
+            .into_vec();
+        let contact = |state: contact_record::IdentityState, key: Vec<u8>| StorageRecord {
+            record: Some(storage_record::Record::Contact(ContactRecord {
+                aci: OTHER.to_string(),
+                identity_key: key,
+                identity_state: state.into(),
+                ..Default::default()
+            })),
+        };
+        let expected = |verified| StoredIdentity {
+            peer: ServiceId::new(OTHER),
+            key: IdentityKey::new(key.clone()),
+            verified,
+        };
+        assert_eq!(
+            stored_identity(&contact(
+                contact_record::IdentityState::Verified,
+                key.clone()
+            )),
+            Some(expected(true))
+        );
+        assert_eq!(
+            stored_identity(&contact(
+                contact_record::IdentityState::Default,
+                key.clone()
+            )),
+            Some(expected(false))
+        );
+        assert_eq!(
+            stored_identity(&contact(
+                contact_record::IdentityState::Unverified,
+                key.clone()
+            )),
+            None
+        );
+        assert_eq!(
+            stored_identity(&contact(
+                contact_record::IdentityState::Verified,
+                Vec::new()
+            )),
+            None
+        );
+        assert_eq!(
+            stored_identity(&contact(
+                contact_record::IdentityState::Verified,
+                vec![5, 1]
+            )),
+            None
+        );
+        let mut unknown = contact(contact_record::IdentityState::Verified, key.clone());
+        if let Some(storage_record::Record::Contact(contact)) = &mut unknown.record {
+            contact.identity_state = 7;
+        }
+        assert_eq!(stored_identity(&unknown), None);
     }
 
     #[tokio::test]

@@ -66,8 +66,8 @@ libsignal-service git hash back to `nix/package.nix`.
     Upstream PR: [whisperfish/presage#468](https://github.com/whisperfish/presage/pull/468).
   - `patches/presage-storage-service.patch`. `Manager::storage_service`
     authenticates against Storage Service with the account's storage key,
-    to read which contacts and groups the user accepted or blocked. Not
-    upstream yet.
+    to read which contacts and groups the user accepted or blocked, and
+    which contacts they verified. Not upstream yet.
   - `patches/presage-linked-sync-requests.patch`. Only the primary device
     answers sync requests; a linked one answered a blocked list request
     with an empty list, which could clear the list on the device asking.

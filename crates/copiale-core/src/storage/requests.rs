@@ -1,11 +1,15 @@
-//! Which accounts and groups the user accepted or blocked.
+//! Which accounts and groups the user accepted or blocked; Storage Service
+//! reads.
 
 use std::collections::HashSet;
 
 use super::StorageError;
 use super::database::{Database, database_error};
+use super::identities::apply_stored_identity;
 use super::messages::service_id;
-use crate::model::{BlockedList, ChatRef, GroupId, PhoneNumber, StoredChat};
+use crate::model::{
+    BlockedList, ChatRef, GroupId, PhoneNumber, ServiceId, StoredChat, StoredIdentity,
+};
 
 const STORAGE_VERSION: &str = "storage_version";
 
@@ -129,14 +133,17 @@ impl Database {
         Ok(changed)
     }
 
-    /// Applies Storage Service's chats, at manifest `version`: accepted ones
-    /// are accepted here too, and blocking follows it. Returns the chats
-    /// whose state changed.
-    pub(crate) async fn apply_stored_chats(
+    /// Applies Storage Service's chats and verifications, at manifest
+    /// `version`: accepted chats are accepted here too, blocking follows
+    /// it, and so do verifications that changed since the last read.
+    /// Returns the chats whose state changed, and the accounts whose
+    /// verified key did.
+    pub(crate) async fn apply_stored(
         &self,
         chats: &[StoredChat],
+        identities: &[StoredIdentity],
         version: u64,
-    ) -> Result<Vec<ChatRef>, StorageError> {
+    ) -> Result<(Vec<ChatRef>, Vec<ServiceId>), StorageError> {
         let mut tx = self.begin_write().await?;
         let mut changed = Vec::new();
         for stored in chats {
@@ -146,6 +153,12 @@ impl Database {
             }
             if chat_changed {
                 changed.push(stored.chat);
+            }
+        }
+        let mut verified = Vec::new();
+        for stored in identities {
+            if apply_stored_identity(&mut tx, stored).await? {
+                verified.push(stored.peer);
             }
         }
         sqlx::query(
@@ -158,7 +171,7 @@ impl Database {
         .await
         .map_err(database_error)?;
         tx.commit().await.map_err(database_error)?;
-        Ok(changed)
+        Ok((changed, verified))
     }
 
     /// The Storage Service manifest version last applied.
@@ -344,19 +357,21 @@ mod tests {
             accepted,
             blocked,
         };
-        let changed = db
-            .apply_stored_chats(
+        let (changed, verified) = db
+            .apply_stored(
                 &[
                     stored(alice, true, false),
                     stored(bob, false, false),
                     stored(dev, false, false),
                 ],
+                &[],
                 5,
             )
             .await
             .unwrap();
 
         assert_eq!(changed, [alice, dev]);
+        assert!(verified.is_empty());
         assert!(db.is_accepted(alice).await.unwrap());
         assert!(db.is_accepted(bob).await.unwrap(), "not taken back");
         assert!(!db.is_blocked(dev).await.unwrap());

@@ -742,6 +742,15 @@ pub struct StoredChat {
     pub blocked: bool,
 }
 
+/// A contact's verification as Storage Service holds it: `key` verified,
+/// or unverified.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredIdentity {
+    pub peer: ServiceId,
+    pub key: IdentityKey,
+    pub verified: bool,
+}
+
 /// A conversation as the chat list shows it. `Debug` hides the title.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ConversationSummary {
