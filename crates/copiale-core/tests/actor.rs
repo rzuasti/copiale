@@ -1367,6 +1367,43 @@ async fn unlink_wipes_even_if_removing_the_device_fails() {
 }
 
 #[tokio::test]
+async fn unlink_retries_once_after_the_connection_closes() {
+    let closed = || BackendError::network("WebSocket closing while waiting for a response");
+
+    // Removed: the server dropped the connection, then rejects the
+    // credentials.
+    let (_dir, mut running) = ready().await;
+    running.network.fail_device_removal(closed());
+    running
+        .network
+        .fail_device_removal(BackendError::unauthorized("403 Forbidden"));
+    send(&running, Command::Unlink);
+    expect(&mut running.events, Event::Unlinking).await;
+    expect_unlinked(&mut running.events).await;
+    stop(running).await;
+
+    // Not removed: trying again does it.
+    let (_dir, mut running) = ready().await;
+    running.network.fail_device_removal(closed());
+    send(&running, Command::Unlink);
+    expect(&mut running.events, Event::Unlinking).await;
+    expect_unlinked(&mut running.events).await;
+    assert_eq!(running.network.device_removals(), 1);
+    stop(running).await;
+
+    // Only once.
+    let (_dir, mut running) = ready().await;
+    running.network.fail_device_removal(closed());
+    running.network.fail_device_removal(closed());
+    send(&running, Command::Unlink);
+    expect(&mut running.events, Event::Unlinking).await;
+    expect(&mut running.events, Event::DeviceNotRemoved(closed())).await;
+    expect_unlinked(&mut running.events).await;
+    assert_eq!(running.network.device_removals(), 0);
+    stop(running).await;
+}
+
+#[tokio::test]
 async fn unlink_offline_gives_up_on_removing_the_device() {
     let dir = tempfile::tempdir().unwrap();
     let options = CoreOptions {

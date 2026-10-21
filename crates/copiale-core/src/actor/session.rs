@@ -1608,8 +1608,17 @@ impl<'a, B: SignalBackend> Session<'a, B> {
 
     /// Removes this device from the account before its data goes.
     async fn remove_device(&mut self) {
-        let timeout = self.core.options.unlink_timeout;
-        match timed(timeout, self.backend.remove_device()).await {
+        let backend = &mut self.backend;
+        let removal = async move {
+            match backend.remove_device().await {
+                // The server can drop the connection on removing the
+                // device, before answering; trying again then finds the
+                // credentials rejected.
+                Err(error) if error.is_network() => backend.remove_device().await,
+                result => result,
+            }
+        };
+        match timed(self.core.options.unlink_timeout, removal).await {
             Ok(()) => tracing::info!("device removed from the account"),
             // Already removed.
             Err(error) if error.is_unauthorized() => {}
@@ -2094,10 +2103,10 @@ fn own_quotes(content: &mut Content, me: ServiceId) {
 }
 
 /// `request`, failing as a network error after `timeout`.
-fn timed(
+fn timed<'a>(
     timeout: Duration,
-    request: LocalBoxFuture<'static, Result<(), BackendError>>,
-) -> LocalBoxFuture<'static, Result<(), BackendError>> {
+    request: impl Future<Output = Result<(), BackendError>> + 'a,
+) -> LocalBoxFuture<'a, Result<(), BackendError>> {
     tokio::time::timeout(timeout, request)
         .map(|result| result.unwrap_or_else(|_| Err(BackendError::network("timed out"))))
         .boxed_local()

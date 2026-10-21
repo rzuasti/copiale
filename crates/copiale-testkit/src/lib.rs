@@ -127,7 +127,8 @@ struct State {
     settings_sync_requests: usize,
     /// Times this device was removed from the account.
     device_removals: usize,
-    device_removal_failure: Option<BackendError>,
+    /// Scripted failures of the next device removals, in order.
+    device_removal_failures: VecDeque<BackendError>,
     read_receipts: Vec<(ServiceId, Vec<Timestamp>)>,
     read_syncs: Vec<Vec<(ServiceId, Timestamp)>>,
     typing: Vec<(Destination, bool)>,
@@ -499,7 +500,13 @@ impl SignalBackend for FakeBackend {
     /// Fails as scripted; otherwise counted once sent, hanging while the
     /// network is down.
     fn remove_device(&mut self) -> LocalBoxFuture<'static, Result<(), BackendError>> {
-        if let Some(error) = self.state.lock().unwrap().device_removal_failure.take() {
+        if let Some(error) = self
+            .state
+            .lock()
+            .unwrap()
+            .device_removal_failures
+            .pop_front()
+        {
             return async { Err(error) }.boxed_local();
         }
         self.sync_request(|state| state.device_removals += 1)
@@ -772,9 +779,13 @@ impl FakeNetwork {
         self.state.lock().unwrap().device_removals
     }
 
-    /// Makes the next device removal fail.
+    /// Makes a device removal fail, after those already scripted to.
     pub fn fail_device_removal(&self, error: BackendError) {
-        self.state.lock().unwrap().device_removal_failure = Some(error);
+        self.state
+            .lock()
+            .unwrap()
+            .device_removal_failures
+            .push_back(error);
     }
 
     /// Read receipts sent so far, per recipient.
