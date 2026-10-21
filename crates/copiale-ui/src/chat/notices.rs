@@ -172,7 +172,8 @@ fn notable(message: &Message) -> bool {
 }
 
 /// The chat's notice after `count` unseen messages, `latest` the newest. A
-/// request's shows neither its name, which its sender chose, nor its text.
+/// request's shows neither its name, which its sender chose, nor its text;
+/// a disappearing message's never shows its text, which the OS may keep.
 fn chat_notice(
     summary: &ConversationSummary,
     latest: &Message,
@@ -197,6 +198,10 @@ fn chat_notice(
             quiet: true,
         };
     }
+    let content = match content {
+        NotificationContent::Message if latest.expiry.is_some() => NotificationContent::Name,
+        content => content,
+    };
     let sender = latest
         .sender
         .map(|author| isolate(&sender_name(summary, author)));
@@ -255,8 +260,8 @@ fn preview(content: &Content) -> String {
 #[cfg(test)]
 mod tests {
     use copiale_core::{
-        Attachment, ChatState, ConversationSummary, GroupId, Member, MessageBody, MessageId,
-        ServiceId, Timestamp,
+        Attachment, ChatState, ConversationSummary, Expiry, GroupId, Member, MessageBody,
+        MessageId, ServiceId, Timestamp,
     };
     use uuid::Uuid;
 
@@ -353,6 +358,38 @@ mod tests {
         from_alice.sender = Some(peer(1));
         let actions = receive(&mut text, from_alice, group(1), None);
         let body = format!("{}: ship it", isolate("Alice"));
+        assert_eq!(shown(&actions), [("Dev", body.as_str())]);
+    }
+
+    #[test]
+    fn disappearing_messages_never_show_their_text() {
+        let mut notices = Notices::new(NotificationContent::Message);
+        let disappearing = |id, chat, body| Message {
+            expiry: Some(Expiry {
+                timer: 60,
+                at: None,
+            }),
+            ..message(id, chat, body)
+        };
+        let actions = receive(
+            &mut notices,
+            disappearing(1, 1, "secret"),
+            summary(1, 1),
+            None,
+        );
+        assert_eq!(shown(&actions), [("Contact 1", "New message")]);
+        let actions = receive(
+            &mut notices,
+            disappearing(2, 1, "secret"),
+            summary(1, 2),
+            None,
+        );
+        assert_eq!(shown(&actions), [("Contact 1", "2 new messages")]);
+
+        let mut from_alice = disappearing(3, 9, "secret");
+        from_alice.sender = Some(peer(1));
+        let actions = receive(&mut notices, from_alice, group(1), None);
+        let body = format!("New message from {}", isolate("Alice"));
         assert_eq!(shown(&actions), [("Dev", body.as_str())]);
     }
 

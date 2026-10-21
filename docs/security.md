@@ -1,7 +1,8 @@
 # Secrets in memory
 
 How Copiale keeps the database key and passphrase from leaking out of
-process memory, and the copies it can't control.
+process memory, and the copies it can't control. Last, what notifications
+leave with the OS.
 
 ## Protections
 
@@ -59,3 +60,20 @@ they can also reach swap.
   string, skipping `InputState::value`'s copy.
 - **New passphrase, in zxcvbn**: the strength check copies it and pieces
   of it (lowercased, matched tokens).
+
+## Notifications
+
+Shown notifications belong to the OS, outside the encrypted database.
+
+- **What they reveal** (`notifications.content`): nothing (`off`), chat
+  and sender names (`name`, the default), or message text too (`message`).
+  Never the text of disappearing messages, nor a request's name or text.
+- **Linux**: the freedesktop server holds them. Copiale closes a chat's
+  notification once it's read or its message is deleted or disappears;
+  some servers keep closed ones in a history of their own.
+- **macOS**: Notification Center keeps them in an unencrypted database in
+  the user's profile.
+- **Windows**: Action Center keeps them in an unencrypted database
+  (`%LOCALAPPDATA%\Microsoft\Windows\Notifications\wpndatabase.db`).
+- **macOS and Windows**: not yet replaced or closed (#28), so read,
+  deleted and expired messages stay listed until dismissed.

@@ -179,7 +179,8 @@ Scope, UI design, architecture and work items for the first usable release.
 
 - `notifications.content`: `off`, `name` (default: the chat's name and
   "New message", or "New message from alice" in groups) or `message` (the
-  text, or its placeholder). Changes apply live.
+  text, or its placeholder; never a disappearing message's). Changes apply
+  live.
 - One per chat, updated as messages arrive ("3 new messages"), closed once
   the chat is read or the message is deleted or disappears.
 - None for the chat open in the focused window, for reactions and system
@@ -187,6 +188,7 @@ Scope, UI design, architecture and work items for the first usable release.
 - Messages queued while offline notify once, after the queue drains:
   "5 new messages in 2 chats".
 - Bodies are escaped: freedesktop servers may read them as markup.
+- What the OS keeps: `docs/security.md`.
 
 ### Window chrome
 
