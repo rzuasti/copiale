@@ -401,8 +401,9 @@ crates/
 
 ## Risks to verify early
 
-- presage has no Storage Service support: a linked device learns about a
-  group only when a message arrives in it.
+- presage has no Storage Service support upstream; a vendored patch reads
+  it, for accept and block state and verifications only. A linked device
+  still learns about a group only when a message arrives in it.
 - GPUI: transparent/blurred window background and client-side decorations per
   platform.
 - Wayland focus stealing: `--toggle` needs an `xdg-activation` token to raise
