@@ -19,7 +19,7 @@ use crate::onboarding::{Onboarding, Screen, describe};
 use crate::qr::{QrMatrix, qr_code};
 use crate::settings::Settings;
 use crate::theme::ActivePalette as _;
-use crate::{CoreSink, main_window, titlebar};
+use crate::{CoreSink, capture, main_window, titlebar};
 
 /// Root view of the main window: onboarding until the core is ready, then
 /// the chats. Outlives the window: hiding closes it, and the next one shows
@@ -36,6 +36,8 @@ pub struct Shell {
     qr: Option<(String, Option<QrMatrix>)>,
     /// The window background last set, and for which window.
     background: Option<(WindowId, WindowBackgroundAppearance)>,
+    /// Capture protection last set, and for which window.
+    capture: Option<(WindowId, bool)>,
     _events: Option<Task<()>>,
     _clicks: Option<Task<()>>,
 }
@@ -60,6 +62,7 @@ impl Shell {
             focus_pending: true,
             qr: None,
             background: None,
+            capture: None,
             _events: None,
             _clicks: None,
         }
@@ -504,12 +507,23 @@ impl Shell {
             self.background = Some((id, wanted));
         }
     }
+
+    /// Hidden from capture if the settings ask.
+    fn sync_capture(&mut self, window: &Window, cx: &App) {
+        let wanted = Settings::get(cx).window.capture_protection;
+        let id = window.window_handle().window_id();
+        if self.capture != Some((id, wanted)) {
+            capture::protect(window, wanted);
+            self.capture = Some((id, wanted));
+        }
+    }
 }
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.attach(window, cx);
         self.sync_background(window, cx);
+        self.sync_capture(window, cx);
         let content = if let (Screen::Ready, Some(chat)) = (self.onboarding.screen(), &self.chat) {
             let chat = chat.clone();
             chat.update(cx, |chat, cx| chat.attach(window, cx));

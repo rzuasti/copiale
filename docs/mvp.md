@@ -230,6 +230,7 @@ avatars = false
 [window]
 opacity = 1.0             # background, 0.5-1.0
 blur = false              # compositor-dependent
+capture_protection = false # Windows, macOS; see docs/security.md
 
 [notifications]
 content = "name"          # off | name | message

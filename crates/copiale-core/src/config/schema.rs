@@ -69,6 +69,8 @@ pub struct WindowConfig {
     pub opacity: f64,
     /// Blur behind a translucent background, where the compositor allows.
     pub blur: bool,
+    /// Hidden from screenshots and screen shares, where the OS allows.
+    pub capture_protection: bool,
 }
 
 impl WindowConfig {
@@ -80,6 +82,7 @@ impl Default for WindowConfig {
         Self {
             opacity: 1.0,
             blur: false,
+            capture_protection: false,
         }
     }
 }
@@ -222,6 +225,7 @@ settings! {
     Avatars(bool): layout.avatars,
     Opacity(f64): window.opacity in WindowConfig::OPACITY_RANGE,
     Blur(bool): window.blur,
+    CaptureProtection(bool): window.capture_protection,
     NotificationContent(NotificationContent): notifications.content,
 }
 

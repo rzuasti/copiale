@@ -75,6 +75,8 @@ went unsolved until 2011.
     (joiners and variation selectors kept; `copiale_core::text`), isolated
     (FSI…PDI) inside other text; file names show them as `<U+XXXX>`.
   - No telemetry.
+  - Optional capture protection (`window.capture_protection`, off):
+    Windows and macOS only; on Hyprland, a documented window rule.
   - No core dumps; keys and passphrases locked out of swap
     (`copiale_core::hardening`). Key and passphrase copies
     left in memory are listed in `docs/security.md`.

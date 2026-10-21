@@ -1,5 +1,6 @@
 //! Views and theming for Copiale.
 
+mod capture;
 pub mod chat;
 mod drawer;
 mod fuzzy;

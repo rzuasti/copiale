@@ -2,7 +2,7 @@
 
 How Copiale keeps the database key and passphrase from leaking out of
 process memory, and the copies it can't control. Last, what notifications
-leave with the OS.
+leave with the OS, and keeping the window out of screen captures.
 
 ## Protections
 
@@ -77,3 +77,23 @@ Shown notifications belong to the OS, outside the encrypted database.
   (`%LOCALAPPDATA%\Microsoft\Windows\Notifications\wpndatabase.db`).
 - **macOS and Windows**: not yet replaced or closed (#28), so read,
   deleted and expired messages stay listed until dismissed.
+
+## Screen capture
+
+`window.capture_protection` (off by default) asks the OS to leave the
+window out of screenshots and screen shares. Notifications stay visible.
+
+- **Windows**: `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)`, from
+  Windows 10 2004; earlier versions log a warning and capture as usual.
+- **macOS**: `NSWindow.sharingType = .none`. Since macOS 15, ScreenCaptureKit
+  doesn't reliably honor it.
+- **Linux**: Wayland and X11 offer apps no way to ask, so the setting shows
+  as unavailable. Hyprland (0.50+) can do it with a window rule, blacking
+  out the window in shares and screenshots:
+
+  ```lua
+  hl.window_rule({ match = { class = "page.codeberg.korba.Copiale" }, no_screen_share = true })
+  ```
+
+  Before 0.55, see the hyprlang syntax in the 0.54 wiki.
+- Nothing stops a camera or a compromised OS.

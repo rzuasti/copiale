@@ -9,6 +9,7 @@ use copiale_core::config::{
     TimestampVisibility, Typography, WindowConfig,
 };
 
+use crate::capture;
 use crate::fuzzy::fuzzy_match;
 
 /// Most fonts the font picker lists.
@@ -55,6 +56,7 @@ pub enum Field {
     Avatars,
     Opacity,
     Blur,
+    CaptureProtection,
     NotificationContent,
     ReadReceipts,
     TypingIndicators,
@@ -63,7 +65,7 @@ pub enum Field {
 }
 
 /// All rows, in order.
-pub const FIELDS: [Field; 18] = [
+pub const FIELDS: [Field; 19] = [
     Field::Theme,
     Field::UiFont,
     Field::MonoFont,
@@ -77,6 +79,7 @@ pub const FIELDS: [Field; 18] = [
     Field::Avatars,
     Field::Opacity,
     Field::Blur,
+    Field::CaptureProtection,
     Field::NotificationContent,
     Field::ReadReceipts,
     Field::TypingIndicators,
@@ -148,7 +151,7 @@ impl Field {
             Self::Density | Self::MessageStyle | Self::Timestamps | Self::Clock | Self::Avatars => {
                 Section::Layout
             }
-            Self::Opacity | Self::Blur => Section::Window,
+            Self::Opacity | Self::Blur | Self::CaptureProtection => Section::Window,
             Self::NotificationContent => Section::Notifications,
             Self::ReadReceipts | Self::TypingIndicators => Section::Privacy,
             Self::DeviceName | Self::Unlink => Section::Account,
@@ -170,6 +173,7 @@ impl Field {
             Self::Avatars => "Avatars",
             Self::Opacity => "Opacity",
             Self::Blur => "Blur",
+            Self::CaptureProtection => "Capture protection",
             Self::NotificationContent => "Show in notifications",
             Self::ReadReceipts => "Read receipts",
             Self::TypingIndicators => "Typing indicators",
@@ -178,12 +182,13 @@ impl Field {
         }
     }
 
-    /// Changed on the phone, not here.
+    /// Can't be changed here: set on the phone, or unsupported.
     pub fn read_only(self) -> bool {
-        matches!(
-            self,
-            Self::ReadReceipts | Self::TypingIndicators | Self::DeviceName
-        )
+        match self {
+            Self::ReadReceipts | Self::TypingIndicators | Self::DeviceName => true,
+            Self::CaptureProtection => !capture::SUPPORTED,
+            _ => false,
+        }
     }
 
     /// A short note under the row, if any.
@@ -193,6 +198,10 @@ impl Field {
                 Some("set on your phone")
             }
             Self::Blur => Some("where the compositor allows"),
+            Self::CaptureProtection if capture::SUPPORTED => {
+                Some("hides from screenshots and shares")
+            }
+            Self::CaptureProtection => Some(capture::unsupported_hint()),
             Self::Avatars => Some("in the chat list"),
             Self::Unlink => Some("deletes messages on this device"),
             _ => None,
@@ -224,6 +233,10 @@ impl Field {
             Self::Avatars => Value::Toggle(layout.avatars),
             Self::Opacity => Value::Number(format!("{:.0}%", config.window.opacity * 100.)),
             Self::Blur => Value::Toggle(config.window.blur),
+            Self::CaptureProtection if capture::SUPPORTED => {
+                Value::Toggle(config.window.capture_protection)
+            }
+            Self::CaptureProtection => Value::Info("n/a".into()),
             Self::NotificationContent => choice(config.notifications.content),
             Self::ReadReceipts => on_phone(account.map(|a| a.settings.read_receipts)),
             Self::TypingIndicators => on_phone(account.map(|a| a.settings.typing_indicators)),
@@ -270,6 +283,9 @@ impl Field {
                 within(value, &WindowConfig::OPACITY_RANGE).then_some(Setting::Opacity(value))?
             }
             Self::Blur => Setting::Blur(!window.blur),
+            Self::CaptureProtection if capture::SUPPORTED => {
+                Setting::CaptureProtection(!window.capture_protection)
+            }
             Self::NotificationContent => {
                 Setting::NotificationContent(nudge(config.notifications.content, step)?)
             }
@@ -279,6 +295,7 @@ impl Field {
             | Self::ReadReceipts
             | Self::TypingIndicators
             | Self::DeviceName
+            | Self::CaptureProtection
             | Self::Unlink => return None,
         };
         Some(setting)
@@ -302,7 +319,7 @@ impl Field {
             Self::NotificationContent => Activation::Change(Setting::NotificationContent(cycle(
                 config.notifications.content,
             ))),
-            Self::Avatars | Self::Blur => self
+            Self::Avatars | Self::Blur | Self::CaptureProtection => self
                 .step(config, 1)
                 .map_or(Activation::Nothing, Activation::Change),
             Self::Unlink => Activation::ConfirmUnlink,
@@ -577,6 +594,9 @@ mod tests {
         }
         let mut keys: Vec<_> = rows.into_keys().collect();
         let mut all = Setting::KEYS.to_vec();
+        if !capture::SUPPORTED {
+            all.retain(|key| *key != Setting::CaptureProtection(true).key());
+        }
         keys.sort();
         all.sort();
         assert_eq!(keys, all);
@@ -693,6 +713,23 @@ mod tests {
         assert!(!config.layout.avatars);
         stepped(&mut config, Field::Blur, 1);
         assert!(config.window.blur);
+    }
+
+    #[test]
+    fn capture_protection_changes_only_where_supported() {
+        let mut config = Config::default();
+        let field = Field::CaptureProtection;
+        assert_eq!(field.read_only(), !capture::SUPPORTED);
+        if capture::SUPPORTED {
+            assert_eq!(field.value(&config, None), Value::Toggle(false));
+            stepped(&mut config, field, 1);
+            assert!(config.window.capture_protection);
+        } else {
+            config.window.capture_protection = true;
+            assert_eq!(field.value(&config, None), Value::Info("n/a".into()));
+            assert_eq!(field.step(&config, 1), None);
+            assert_eq!(field.activate(&config), Activation::Nothing);
+        }
     }
 
     #[test]

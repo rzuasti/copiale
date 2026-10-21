@@ -1836,7 +1836,7 @@ fn settings_mirror_the_account(cx: &mut TestAppContext) {
         Some(account)
     );
     open_settings(&ui, "account", cx);
-    assert!(ui.shows(("setting", 16u64), cx));
+    assert!(ui.shows(("setting", 17u64), cx));
     ui.press("right", cx);
     ui.press("enter", cx);
     assert_eq!(config(cx), Config::default());

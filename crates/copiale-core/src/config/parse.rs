@@ -154,6 +154,7 @@ mod tests {
             [window]
             opacity = 0.85
             blur = true
+            capture_protection = true
 
             [notifications]
             content = "off"
@@ -178,6 +179,7 @@ mod tests {
         assert!(config.layout.avatars);
         assert_eq!(config.window.opacity, 0.85);
         assert!(config.window.blur);
+        assert!(config.window.capture_protection);
         assert_eq!(config.notifications.content, NotificationContent::Off);
     }
 
