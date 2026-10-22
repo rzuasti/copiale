@@ -20,6 +20,8 @@ impl InstalledFonts {
             return fonts.0.clone();
         }
         let mut names = cx.text_system().all_font_names();
+        // Bundled for emoji only.
+        names.retain(|name| name != super::EMOJI_FAMILY);
         names.sort_by_key(|name| name.to_lowercase());
         names.dedup();
         let fonts: Rc<[String]> = names.into();

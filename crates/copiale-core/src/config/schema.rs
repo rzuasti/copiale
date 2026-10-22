@@ -12,6 +12,7 @@ pub struct Config {
     pub appearance: Appearance,
     pub typography: Typography,
     pub layout: Layout,
+    pub composer: Composer,
     pub window: WindowConfig,
     pub notifications: Notifications,
 }
@@ -60,6 +61,21 @@ pub struct Layout {
     pub timestamps: TimestampVisibility,
     pub clock: TimeFormat,
     pub avatars: bool,
+}
+
+/// `[composer]`
+#[derive(Clone, Debug, PartialEq)]
+pub struct Composer {
+    /// Typed emoticons such as `:)` become emoji.
+    pub convert_emoticons: bool,
+}
+
+impl Default for Composer {
+    fn default() -> Self {
+        Self {
+            convert_emoticons: true,
+        }
+    }
 }
 
 /// `[window]`
@@ -223,6 +239,7 @@ settings! {
     Timestamps(TimestampVisibility): layout.timestamps,
     Clock(TimeFormat): layout.clock,
     Avatars(bool): layout.avatars,
+    ConvertEmoticons(bool): composer.convert_emoticons,
     Opacity(f64): window.opacity in WindowConfig::OPACITY_RANGE,
     Blur(bool): window.blur,
     CaptureProtection(bool): window.capture_protection,

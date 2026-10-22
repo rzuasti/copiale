@@ -151,6 +151,7 @@ pub fn run(core: CoreHandle, events: Events, mut requests: UnboundedReceiver<Req
 /// the caller to handle.
 pub fn init(cx: &mut App) {
     gpui_kit::init(cx);
+    theme::init_emoji(cx);
     // Hiding closes the main window, which on Linux would quit.
     cx.set_quit_mode(QuitMode::Explicit);
     cx.bind_keys([KeyBinding::new("secondary-q", Quit, None)]);

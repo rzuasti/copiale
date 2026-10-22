@@ -20,6 +20,7 @@ pub enum Section {
     Appearance,
     Typography,
     Layout,
+    Composer,
     Window,
     Notifications,
     Privacy,
@@ -32,6 +33,7 @@ impl Section {
             Self::Appearance => "Appearance",
             Self::Typography => "Typography",
             Self::Layout => "Layout",
+            Self::Composer => "Composer",
             Self::Window => "Window",
             Self::Notifications => "Notifications",
             Self::Privacy => "Privacy",
@@ -54,6 +56,7 @@ pub enum Field {
     Timestamps,
     Clock,
     Avatars,
+    Emoticons,
     Opacity,
     Blur,
     CaptureProtection,
@@ -65,7 +68,7 @@ pub enum Field {
 }
 
 /// All rows, in order.
-pub const FIELDS: [Field; 19] = [
+pub const FIELDS: [Field; 20] = [
     Field::Theme,
     Field::UiFont,
     Field::MonoFont,
@@ -77,6 +80,7 @@ pub const FIELDS: [Field; 19] = [
     Field::Timestamps,
     Field::Clock,
     Field::Avatars,
+    Field::Emoticons,
     Field::Opacity,
     Field::Blur,
     Field::CaptureProtection,
@@ -151,6 +155,7 @@ impl Field {
             Self::Density | Self::MessageStyle | Self::Timestamps | Self::Clock | Self::Avatars => {
                 Section::Layout
             }
+            Self::Emoticons => Section::Composer,
             Self::Opacity | Self::Blur | Self::CaptureProtection => Section::Window,
             Self::NotificationContent => Section::Notifications,
             Self::ReadReceipts | Self::TypingIndicators => Section::Privacy,
@@ -171,6 +176,7 @@ impl Field {
             Self::Timestamps => "Timestamps",
             Self::Clock => "Clock",
             Self::Avatars => "Avatars",
+            Self::Emoticons => "Convert emoticons",
             Self::Opacity => "Opacity",
             Self::Blur => "Blur",
             Self::CaptureProtection => "Capture protection",
@@ -203,6 +209,7 @@ impl Field {
             }
             Self::CaptureProtection => Some(capture::unsupported_hint()),
             Self::Avatars => Some("in the chat list"),
+            Self::Emoticons => Some(":) becomes 🙂 as you type"),
             Self::Unlink => Some("deletes messages on this device"),
             _ => None,
         }
@@ -231,6 +238,7 @@ impl Field {
             Self::Timestamps => choice(layout.timestamps),
             Self::Clock => choice(layout.clock),
             Self::Avatars => Value::Toggle(layout.avatars),
+            Self::Emoticons => Value::Toggle(config.composer.convert_emoticons),
             Self::Opacity => Value::Number(format!("{:.0}%", config.window.opacity * 100.)),
             Self::Blur => Value::Toggle(config.window.blur),
             Self::CaptureProtection if capture::SUPPORTED => {
@@ -277,6 +285,7 @@ impl Field {
             Self::Timestamps => Setting::Timestamps(nudge(layout.timestamps, step)?),
             Self::Clock => Setting::Clock(nudge(layout.clock, step)?),
             Self::Avatars => Setting::Avatars(!layout.avatars),
+            Self::Emoticons => Setting::ConvertEmoticons(!config.composer.convert_emoticons),
             Self::Opacity => {
                 let twentieths = (window.opacity * 20.).round() + f64::from(step);
                 let value = twentieths / 20.;
@@ -319,7 +328,7 @@ impl Field {
             Self::NotificationContent => Activation::Change(Setting::NotificationContent(cycle(
                 config.notifications.content,
             ))),
-            Self::Avatars | Self::Blur | Self::CaptureProtection => self
+            Self::Avatars | Self::Emoticons | Self::Blur | Self::CaptureProtection => self
                 .step(config, 1)
                 .map_or(Activation::Nothing, Activation::Change),
             Self::Unlink => Activation::ConfirmUnlink,
@@ -713,6 +722,9 @@ mod tests {
         assert!(!config.layout.avatars);
         stepped(&mut config, Field::Blur, 1);
         assert!(config.window.blur);
+        assert_eq!(Field::Emoticons.value(&config, None), Value::Toggle(true));
+        stepped(&mut config, Field::Emoticons, 1);
+        assert!(!config.composer.convert_emoticons);
     }
 
     #[test]

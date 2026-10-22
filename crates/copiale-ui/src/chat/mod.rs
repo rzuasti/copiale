@@ -1,6 +1,9 @@
 //! The main window once linked: chat list, conversation log, composer.
 
 mod content;
+mod emoji;
+mod emoji_grid;
+mod jumbo;
 mod layout;
 mod model;
 mod new_chat;
@@ -11,6 +14,8 @@ mod text;
 mod time;
 mod view;
 
+pub use emoji::{EmojiTyping, MAX_MATCHES, Picker, Shortcode};
+pub use emoji_grid::{CATEGORIES, COLUMNS, EmojiGrid, GridRow, RECENT};
 pub use layout::{COMPACT_BELOW, Layout};
 pub use model::{
     Actions, Chat, Compose, Connection, Effects, LogChange, Overlay, PAGE, RequestBanner, Row,

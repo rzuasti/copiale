@@ -30,6 +30,10 @@ went unsolved until 2011.
   `docs/spike-ui-toolkit-results.md`.
   - Known gap: wrapped RTL text renders incorrectly; accepted until RTL
     locales are targeted.
+  - Emoji: bundled Noto Color Emoji as every window's font fallback on
+    Linux, patched for GPUI (`crates/copiale-ui/fonts/README.md`, limits
+    there); macOS and Windows use the system's (Windows has no colour
+    bitmap glyphs in GPUI).
 - **Workspace:**
   - `copiale-core`: Signal, models, storage, async; no UI dependencies.
   - `copiale-ui`: views and theming.

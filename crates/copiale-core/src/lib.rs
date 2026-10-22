@@ -20,7 +20,7 @@ pub const APP_ID: &str = "page.codeberg.korba.Copiale";
 
 pub use actor::{
     Command, CoreHandle, CoreOptions, CoreStopped, DELETE_WINDOW, EDIT_WINDOW, Event, Events,
-    MAX_SENT_EDITS, StorageFailure, TYPING_TIMEOUT, spawn, spawn_with_options,
+    MAX_RECENT_EMOJI, MAX_SENT_EDITS, StorageFailure, TYPING_TIMEOUT, spawn, spawn_with_options,
 };
 pub use backend::{
     Ack, BackendError, Incoming, Linker, PeerIdentity, Resendable, RetryRequest, SignalBackend,
@@ -34,6 +34,6 @@ pub use model::{
     GroupInfo, GroupMasterKey, GroupMembers, GroupRef, GroupUpdate, Identity, IdentityKey,
     IncomingMessage, Member, Message, MessageBody, MessageChange, MessageId, MessagePreview,
     MessageRef, MessageStatus, Outgoing, Peer, PhoneNumber, Quote, Quoted, ReceiptKind,
-    RequestResponse, SafetyNumber, SentMessage, ServiceId, StoredChat, StoredIdentity, Timestamp,
-    Unsupported, Verification,
+    RecentEmoji, RequestResponse, SafetyNumber, SentMessage, ServiceId, StoredChat, StoredIdentity,
+    Timestamp, Unsupported, Verification,
 };

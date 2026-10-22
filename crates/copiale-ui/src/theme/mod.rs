@@ -12,9 +12,12 @@ use gpui_kit::{App, Global, Hsla, Rgba, SharedString};
 use crate::settings::Settings;
 use serde::{Deserialize, Deserializer};
 
+mod emoji;
 mod fonts;
 mod system;
 
+pub(crate) use emoji::init as init_emoji;
+pub use emoji::{EMOJI_FAMILY, fallbacks as emoji_fallbacks};
 pub use fonts::{Fonts, InstalledFonts};
 pub(crate) use system::watch_settings;
 pub use system::{Scheme, follow, follow_system, follow_window};

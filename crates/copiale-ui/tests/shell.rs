@@ -11,7 +11,7 @@ use copiale_core::{
     Account, AccountSettings, Attachment, BackendError, ChatState, Command, Contact, Content,
     ConversationId, ConversationSummary, Direction, Event, Expiry, GroupMasterKey, GroupUpdate,
     Identity, Member, Message, MessageBody, MessageId, MessageStatus, Peer, Quote, Quoted,
-    SafetyNumber, ServiceId, StorageFailure, Timestamp, Unsupported, Verification,
+    RecentEmoji, SafetyNumber, ServiceId, StorageFailure, Timestamp, Unsupported, Verification,
 };
 use copiale_ui::chat::{
     COMPACT_BELOW, ChatView, Compose, Field, Layout, Notice, NoticeAction, NoticeKey, Overlay,
@@ -223,7 +223,7 @@ impl Ui {
         ui.event(Event::Ready, cx);
         assert!(matches!(
             ui.core.take().as_slice(),
-            [Command::LoadConversations]
+            [Command::LoadConversations, Command::LoadRecentEmoji]
         ));
         ui.event(
             Event::Conversations(vec![summary(1, "Alice", 1), summary(2, "Bob", 0)]),
@@ -523,6 +523,175 @@ fn composer_sends_to_the_open_chat(cx: &mut TestAppContext) {
             .clone()
     });
     assert!(cx.update(|cx| composer.read(cx).value().is_empty()));
+}
+
+/// Types `text` one key at a time.
+fn type_keys(ui: &Ui, text: &str, cx: &mut TestAppContext) {
+    for ch in text.chars() {
+        ui.type_text(&ch.to_string(), cx);
+    }
+    ui.frame(cx);
+}
+
+fn composer_text(ui: &Ui, cx: &mut TestAppContext) -> String {
+    cx.update(|cx| {
+        let view = ui.shell.read(cx).chat().unwrap().read(cx);
+        view.composer().read(cx).value().to_string()
+    })
+}
+
+/// Bodies sent since last asked.
+fn sent(ui: &Ui) -> Vec<String> {
+    ui.core
+        .take()
+        .into_iter()
+        .filter_map(|command| match command {
+            Command::SendText { body, .. } => Some(body.as_str().to_owned()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[gpui_kit::test]
+fn composer_converts_emoticons_and_shortcodes(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.open_alice(cx);
+
+    type_keys(&ui, "hello :) it's :fire: ok :D", cx);
+    assert_eq!(composer_text(&ui, cx), "hello 🙂 it's 🔥 ok :D");
+    // Enter ends the last word too.
+    ui.press("enter", cx);
+    assert_eq!(sent(&ui), ["hello 🙂 it's 🔥 ok 😄"]);
+
+    // Backspace right after converting puts the emoticon back.
+    type_keys(&ui, "hm :/ ", cx);
+    assert_eq!(composer_text(&ui, cx), "hm 😕 ");
+    ui.press("backspace", cx);
+    assert_eq!(composer_text(&ui, cx), "hm :/");
+    type_keys(&ui, " sure", cx);
+    assert_eq!(composer_text(&ui, cx), "hm :/ sure");
+}
+
+#[gpui_kit::test]
+fn emoticons_stay_when_turned_off(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.open_alice(cx);
+    cx.update(|cx| settings::preview(&Setting::ConvertEmoticons(false), cx));
+
+    type_keys(&ui, "hi :) :heart:", cx);
+    ui.press("enter", cx);
+    assert_eq!(sent(&ui), ["hi :) ❤️"]);
+}
+
+#[gpui_kit::test]
+fn colon_and_two_letters_suggest_emoji(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.open_alice(cx);
+
+    type_keys(&ui, "so :", cx);
+    assert!(!ui.shows("emoji-picker", cx));
+    type_keys(&ui, "thumb", cx);
+    assert!(ui.shows("emoji-picker", cx));
+    // ↓ and Enter pick instead of sending.
+    ui.press("down", cx);
+    ui.press("enter", cx);
+    assert!(!ui.shows("emoji-picker", cx));
+    assert_eq!(composer_text(&ui, cx), "so 👎");
+    assert_eq!(sent(&ui), Vec::<String>::new());
+
+    // Esc closes the list and leaves the text.
+    type_keys(&ui, " :fir", cx);
+    assert!(ui.shows("emoji-picker", cx));
+    ui.press("escape", cx);
+    assert!(!ui.shows("emoji-picker", cx));
+    ui.press("enter", cx);
+    assert_eq!(sent(&ui), ["so 👎 :fir"]);
+
+    // Tab picks too; a click picks that entry.
+    type_keys(&ui, ":joy", cx);
+    ui.press("tab", cx);
+    assert_eq!(composer_text(&ui, cx), "😂");
+    type_keys(&ui, " :thumb", cx);
+    ui.click(("emoji", 1u64), cx);
+    assert_eq!(composer_text(&ui, cx), "😂 👎");
+}
+
+/// Recent emoji saved since last asked.
+fn recent_saved(ui: &Ui) -> Vec<Vec<String>> {
+    ui.core
+        .take()
+        .into_iter()
+        .filter_map(|command| match command {
+            Command::SetRecentEmoji(recent) => Some(recent.0),
+            _ => None,
+        })
+        .collect()
+}
+
+#[gpui_kit::test]
+fn emoji_picker_inserts_at_the_cursor(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.event(Event::RecentEmoji(RecentEmoji(vec!["❤️".into()])), cx);
+    ui.open_alice(cx);
+    type_keys(&ui, "ab", cx);
+    ui.press("left", cx);
+
+    // Search, then Enter.
+    ui.press("ctrl-e", cx);
+    assert!(ui.shows("emoji-grid", cx));
+    type_keys(&ui, "thumb", cx);
+    ui.press("enter", cx);
+    assert!(!ui.shows("emoji-grid", cx));
+    assert_eq!(composer_text(&ui, cx), "a👍b");
+    assert_eq!(recent_saved(&ui), [["👍", "❤️"]]);
+
+    // The button; recent emoji come first, arrows move.
+    ui.click("emoji-button", cx);
+    assert!(ui.shows("emoji-grid", cx));
+    ui.press("right", cx);
+    ui.press("enter", cx);
+    assert_eq!(composer_text(&ui, cx), "a👍❤️b");
+
+    // A click; Esc closes, back to the composer.
+    ui.press("ctrl-e", cx);
+    ui.click(("emoji-cell", 0u64), cx);
+    assert_eq!(composer_text(&ui, cx), "a👍❤️❤️b");
+    ui.press("ctrl-e", cx);
+    ui.press("escape", cx);
+    assert!(!ui.shows("emoji-grid", cx));
+    type_keys(&ui, "c", cx);
+    assert_eq!(composer_text(&ui, cx), "a👍❤️❤️cb");
+    assert_eq!(sent(&ui), Vec::<String>::new());
+}
+
+#[gpui_kit::test]
+fn a_few_emoji_alone_draw_large(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.click(("conversation", 1u64), cx);
+    let bodies = ["hi", "😀😀", "😀😀😀😀😀😀", "hi 😀"];
+    ui.event(
+        Event::Messages {
+            conversation: ConversationId::new(1),
+            before: None,
+            messages: (1..=4)
+                .zip(bodies)
+                .map(|(id, body)| Message {
+                    content: Content::text(body),
+                    ..message(id, Direction::Incoming, None)
+                })
+                .collect(),
+        },
+        cx,
+    );
+    ui.settle(cx);
+    let heights = cx.update(|cx| {
+        let log = ui.shell.read(cx).chat().unwrap().read(cx).log().clone();
+        (1..4)
+            .map(|ix| log.bounds_for_item(ix).unwrap().size.height)
+            .collect::<Vec<_>>()
+    });
+    assert!(heights[0] > heights[1] + px(10.), "{heights:?}");
+    assert_eq!(heights[1], heights[2], "{heights:?}");
 }
 
 #[gpui_kit::test]
@@ -1836,7 +2005,7 @@ fn settings_mirror_the_account(cx: &mut TestAppContext) {
         Some(account)
     );
     open_settings(&ui, "account", cx);
-    assert!(ui.shows(("setting", 17u64), cx));
+    assert!(ui.shows(("setting", 18u64), cx));
     ui.press("right", cx);
     ui.press("enter", cx);
     assert_eq!(config(cx), Config::default());

@@ -137,6 +137,16 @@ impl fmt::Debug for MessageBody {
     }
 }
 
+/// Emoji picked lately, newest first. `Debug` shows only how many.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct RecentEmoji(pub Vec<String>);
+
+impl fmt::Debug for RecentEmoji {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "RecentEmoji({})", self.0.len())
+    }
+}
+
 /// What a message carries. `Debug` shows only the kind.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

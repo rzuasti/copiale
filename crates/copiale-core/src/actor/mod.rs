@@ -19,7 +19,7 @@ use crate::backend::{BackendError, Linker};
 use crate::clock::{Clock, SystemClock};
 use crate::model::{
     Account, Contact, ConversationId, ConversationSummary, Identity, Message, MessageBody,
-    MessageId, ServiceId,
+    MessageId, RecentEmoji, ServiceId,
 };
 use crate::storage::{Passphrase, SecretStore, Storage};
 
@@ -74,6 +74,10 @@ pub enum Command {
     LoadConversations,
     /// Answered with [`Event::Contacts`].
     LoadContacts,
+    /// Answered with [`Event::RecentEmoji`].
+    LoadRecentEmoji,
+    /// Replaces the recent emoji; at most [`MAX_RECENT_EMOJI`] are kept.
+    SetRecentEmoji(RecentEmoji),
     /// Up to `limit` messages before `before` (or the newest); answered
     /// with [`Event::Messages`].
     LoadMessages {
@@ -163,6 +167,8 @@ pub enum Event {
     /// Contacts synced from the phone, by name. Answers
     /// [`Command::LoadContacts`]; also sent when the phone syncs them.
     Contacts(Vec<Contact>),
+    /// Answers [`Command::LoadRecentEmoji`].
+    RecentEmoji(RecentEmoji),
     /// A page of messages, oldest first. Answers [`Command::LoadMessages`].
     Messages {
         conversation: ConversationId,
@@ -236,6 +242,8 @@ pub enum Event {
 pub const EDIT_WINDOW: Duration = Duration::from_secs(24 * 3600);
 /// How many times our message may be edited, as in Signal.
 pub const MAX_SENT_EDITS: u32 = 10;
+/// Recent emoji kept ([`Command::SetRecentEmoji`]).
+pub const MAX_RECENT_EMOJI: usize = 32;
 /// How long after sending our message it may be deleted for everyone.
 pub const DELETE_WINDOW: Duration = Duration::from_secs(24 * 3600);
 

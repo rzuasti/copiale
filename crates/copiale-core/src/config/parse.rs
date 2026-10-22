@@ -151,6 +151,9 @@ mod tests {
             clock = "12h"
             avatars = true
 
+            [composer]
+            convert_emoticons = false
+
             [window]
             opacity = 0.85
             blur = true
@@ -177,6 +180,7 @@ mod tests {
         assert_eq!(config.layout.timestamps, TimestampVisibility::Hover);
         assert_eq!(config.layout.clock, TimeFormat::H12);
         assert!(config.layout.avatars);
+        assert!(!config.composer.convert_emoticons);
         assert_eq!(config.window.opacity, 0.85);
         assert!(config.window.blur);
         assert!(config.window.capture_protection);

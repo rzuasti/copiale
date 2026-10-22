@@ -19,6 +19,8 @@ serde.workspace = true
 toml.workspace = true
 tracing.workspace = true
 tray-icon.workspace = true
+unicode-properties.workspace = true
+unicode-segmentation.workspace = true
 url.workspace = true
 zxcvbn.workspace = true
 
@@ -35,4 +37,5 @@ fontconfig.workspace = true
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
+ttf-parser.workspace = true
 uuid.workspace = true

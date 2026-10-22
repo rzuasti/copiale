@@ -1,6 +1,7 @@
 //! Main window once linked: chat list on the left, the open conversation on
 //! the right.
 
+mod emoji;
 mod log;
 mod overlays;
 mod requests;
@@ -24,6 +25,7 @@ use gpui_kit::{
     point, px,
 };
 
+use super::emoji::EmojiTyping;
 use super::layout::Layout;
 use super::model::{Chat, Compose, Effects, LogChange, Overlay, title};
 use super::notices::Notices;
@@ -35,6 +37,7 @@ use crate::notifier::Notifier;
 use crate::settings::Settings;
 use crate::theme::ActivePalette as _;
 use crate::{CoreSink, main_window, tray};
+use emoji::GridState;
 
 /// How long a pause in typing counts as having stopped.
 const TYPING_IDLE: Duration = Duration::from_secs(5);
@@ -78,6 +81,16 @@ actions!(
         DeleteRequest,
         BlockChat,
         UnblockChat,
+        PickEmoji,
+        EmojiPrevious,
+        EmojiNext,
+        CloseEmojiPicker,
+        ToggleEmojiGrid,
+        CloseEmojiGrid,
+        GridLeft,
+        GridRight,
+        GridUp,
+        GridDown,
     ]
 );
 
@@ -86,6 +99,10 @@ actions!(
 const COMPOSING: &str = "Composing";
 const SELECTING: &str = "Selecting";
 const CONFIRMING: &str = "Confirming";
+/// Key context around the composer while emoji are suggested.
+const EMOJI_PICKING: &str = "EmojiPicking";
+/// Key context of the emoji picker.
+const EMOJI_GRID: &str = "EmojiGrid";
 /// Key context of the new chat picker and the palette.
 const PICKING: &str = "Picking";
 /// Key context of the search box.
@@ -113,6 +130,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("secondary-n", NewChat, Some(CONTEXT)),
         KeyBinding::new("secondary-k", TogglePalette, Some(CONTEXT)),
         KeyBinding::new("secondary-,", OpenSettings, Some(CONTEXT)),
+        KeyBinding::new("secondary-e", ToggleEmojiGrid, Some(CONTEXT)),
         KeyBinding::new("alt-up", PreviousChat, Some(CONTEXT)),
         KeyBinding::new("alt-down", NextChat, Some(CONTEXT)),
         // After everything else Esc does.
@@ -147,6 +165,16 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("e", DeleteForEveryone, confirming),
         KeyBinding::new("m", DeleteForMe, confirming),
         KeyBinding::new("escape", Cancel, confirming),
+        KeyBinding::new("enter", PickEmoji, Some("EmojiPicking > Input")),
+        KeyBinding::new("tab", PickEmoji, Some("EmojiPicking > Input")),
+        KeyBinding::new("up", EmojiPrevious, Some("EmojiPicking > Input")),
+        KeyBinding::new("down", EmojiNext, Some("EmojiPicking > Input")),
+        KeyBinding::new("escape", CloseEmojiPicker, Some("EmojiPicking > Input")),
+        KeyBinding::new("left", GridLeft, Some("EmojiGrid > Input")),
+        KeyBinding::new("right", GridRight, Some("EmojiGrid > Input")),
+        KeyBinding::new("up", GridUp, Some("EmojiGrid > Input")),
+        KeyBinding::new("down", GridDown, Some("EmojiGrid > Input")),
+        KeyBinding::new("escape", CloseEmojiGrid, Some("EmojiGrid > Input")),
     ]);
 }
 
@@ -165,6 +193,12 @@ pub struct ChatView {
     active: bool,
     /// The composer's text while no window shows it.
     draft: String,
+    /// Emoji conversions and suggestions in the composer.
+    emoji: EmojiTyping,
+    /// The emoji picker, while open.
+    emoji_grid: Option<GridState>,
+    /// Emoji picked lately, newest first.
+    recent_emoji: Vec<String>,
     /// Clear and focus the composer on the next frame.
     ready_pending: bool,
     /// Focus the composer on the next frame.
@@ -254,6 +288,8 @@ struct Inputs {
     settings: Entity<InputState>,
     /// The font picker's query.
     font: Entity<InputState>,
+    /// The emoji picker's query.
+    emoji_search: Entity<InputState>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -272,6 +308,7 @@ impl ChatView {
             cx.notify();
         })];
         core.send(Command::LoadConversations);
+        core.send(Command::LoadRecentEmoji);
         let focus = cx.focus_handle();
         let mut chat = Chat::new(LocalClock::system());
         chat.set_twelve_hour(Settings::get(cx).layout.clock == config::TimeFormat::H12);
@@ -306,6 +343,9 @@ impl ChatView {
             inputs: None,
             active: false,
             draft: String::new(),
+            emoji: EmojiTyping::default(),
+            emoji_grid: None,
+            recent_emoji: Vec::new(),
             ready_pending: false,
             focus_pending: true,
             search_hovered: false,
@@ -372,7 +412,9 @@ impl ChatView {
         let palette = cx.new(|cx| InputState::new(window, cx).placeholder("Chat or command…"));
         let settings = cx.new(|cx| InputState::new(window, cx).placeholder("Filter settings…"));
         let font = cx.new(|cx| InputState::new(window, cx).placeholder("Font…"));
+        let emoji_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search emoji…"));
         let subscriptions = vec![
+            cx.subscribe_in(&emoji_search, window, Self::on_emoji_search_event),
             cx.subscribe_in(&settings, window, Self::on_settings_event),
             cx.subscribe_in(&font, window, Self::on_font_event),
             cx.subscribe_in(&search, window, Self::on_search_event),
@@ -389,6 +431,8 @@ impl ChatView {
                 }
             }),
         ];
+        self.emoji.reset();
+        self.emoji_grid = None;
         self.inputs = Some(Inputs {
             window: id,
             search,
@@ -397,6 +441,7 @@ impl ChatView {
             palette,
             settings,
             font,
+            emoji_search,
             _subscriptions: subscriptions,
         });
         self.active = window.is_window_active();
@@ -414,6 +459,7 @@ impl ChatView {
             self.draft = inputs.composer.read(cx).value().to_string();
         }
         self.active = false;
+        self.emoji_grid = None;
         self.chat.set_search("");
         self.close_font_picker(false, cx);
         self.chat.close_overlay();
@@ -483,8 +529,10 @@ impl ChatView {
 
     /// Applies a core event, shown or not.
     pub fn on_event(&mut self, event: &Event, cx: &mut Context<Self>) {
-        if let Event::Account(account) = event {
-            self.account = Some(account.clone());
+        match event {
+            Event::Account(account) => self.account = Some(account.clone()),
+            Event::RecentEmoji(recent) => self.recent_emoji.clone_from(&recent.0),
+            _ => {}
         }
         let shown = self.open_state();
         let effects = self.chat.apply(event, self.active);
@@ -611,6 +659,7 @@ impl ChatView {
 
     /// Clears the composer for the open conversation and focuses it.
     fn ready_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.emoji_grid = None;
         let placeholder = self
             .chat
             .open_conversation()
@@ -762,11 +811,15 @@ impl ChatView {
                 self.chat.cancel();
             }
             self.typing(&text, cx);
+            self.composer_changed(composer, window, cx);
         }
         if let InputEvent::PressEnter { shift: false, .. } = event {
-            let Some(command) = self.chat.submit(&composer.read(cx).value()) else {
+            let emoticons = Settings::get(cx).composer.convert_emoticons;
+            let text = super::emoji::on_send(&composer.read(cx).value(), emoticons);
+            let Some(command) = self.chat.submit(&text) else {
                 return;
             };
+            self.emoji.reset();
             self.typing_idle = None;
             self.core.send(command);
             composer.update(cx, |composer, cx| composer.set_value("", window, cx));
@@ -1089,6 +1142,7 @@ impl Render for ChatView {
             .on_action(cx.listener(Self::start_new_chat))
             .on_action(cx.listener(Self::toggle_palette))
             .on_action(cx.listener(Self::open_settings))
+            .on_action(cx.listener(Self::toggle_emoji_grid))
             .on_action(cx.listener(Self::hide_window))
             .on_action(
                 cx.listener(|view, _: &PreviousChat, window, cx| view.step_chat(-1, window, cx)),

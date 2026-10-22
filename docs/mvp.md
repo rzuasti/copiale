@@ -14,7 +14,11 @@ Scope, UI design, architecture and work items for the first usable release.
   delivered or read once every member has.
 - Edits, remote deletes and quoted replies: render incoming, send own.
 - Disappearing messages: honor timers on incoming and outgoing messages.
-- Emoji: render incoming as color glyphs; OS emoji input works; no picker.
+- Emoji: render as color glyphs, one to five alone drawn larger; OS
+  emoji input works. The composer converts emoticons (`:)`, optional)
+  and `:shortcodes:`, and `:` plus two letters lists matching emoji.
+  `Ctrl+E` or the composer's `:)` opens a searchable picker by category,
+  recently used first (kept in the database).
 - Non-text content (images, files, stickers, reactions, calls): muted
   placeholder line, e.g. `[image] open on your phone`, above any caption.
 - Group and timer changes: system lines, e.g. `-- alice added bob · 10:04`.
@@ -27,8 +31,8 @@ Scope, UI design, architecture and work items for the first usable release.
 
 ### Out
 
-- Sending or viewing attachments, emoji picker, reactions, stickers, calls,
-  voice notes.
+- Sending or viewing attachments, reactions, stickers, calls, voice
+  notes.
 - Message history transfer: chats start empty at link time.
 - Group creation and management.
 - Custom themes, base16 import, accent override.
@@ -226,6 +230,9 @@ message_style = "log"     # log | blocks | bubbles
 timestamps = "always"     # always | hover | never
 clock = "24h"             # 24h | 12h
 avatars = false
+
+[composer]
+convert_emoticons = true  # :) becomes 🙂 as you type
 
 [window]
 opacity = 1.0             # background, 0.5-1.0

@@ -10,21 +10,22 @@ use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, Context, HighlightStyle, Hsla, InteractiveElement as _, IntoElement,
+    AnyElement, App, Context, Font, HighlightStyle, Hsla, InteractiveElement as _, IntoElement,
     ParentElement as _, Pixels, Rems, SharedString, StatefulInteractiveElement as _, Styled as _,
     StyledText, TestSupportExt as _, TextRun, Window, div, font, list, px, relative, rems,
 };
 
+use crate::chat::jumbo::jumbo_size;
 use crate::chat::layout::Spacing;
 use crate::chat::model::{Row, member_list, title};
 use crate::chat::text::{isolate, message_markdown};
 use crate::kinetic::kinetic;
 use crate::settings::Settings;
-use crate::theme::{ActivePalette as _, Fonts};
+use crate::theme::{self, ActivePalette as _, Fonts};
 
 use super::{
-    Cancel, ChatView, DeleteForEveryone, DeleteForMe, LOG_PADDING, TogglePalette, full_size,
-    key_hint,
+    Cancel, ChatView, DeleteForEveryone, DeleteForMe, EMOJI_PICKING, LOG_PADDING, TogglePalette,
+    full_size, key_hint,
 };
 
 /// Load the previous page when the top visible row is this close to the
@@ -171,7 +172,33 @@ impl ChatView {
                     }))
                     .map(|composer| match self.render_request_banner(cx) {
                         Some(banner) => composer.child(banner),
-                        None => composer.child(Textarea::new(&self.inputs().composer)),
+                        None => composer
+                            .relative()
+                            .children(self.render_emoji_grid(cx))
+                            .children(self.render_emoji_picker(cx))
+                            .child(
+                                div()
+                                    .relative()
+                                    .when(self.emoji.picker().is_some(), |input| {
+                                        input.key_context(EMOJI_PICKING)
+                                    })
+                                    .on_action(cx.listener(Self::pick_emoji))
+                                    .on_action(cx.listener(Self::emoji_previous))
+                                    .on_action(cx.listener(Self::emoji_next))
+                                    .on_action(cx.listener(Self::close_emoji_picker))
+                                    // Room for the emoji button inside the frame.
+                                    .child(Textarea::new(&self.inputs().composer).pr(px(32.)))
+                                    .child(
+                                        div()
+                                            .absolute()
+                                            .top_0()
+                                            .bottom_0()
+                                            .right_1()
+                                            .flex()
+                                            .items_center()
+                                            .child(self.render_emoji_button(cx)),
+                                    ),
+                            ),
                     }),
             )
             .into_any_element()
@@ -339,7 +366,10 @@ fn log_row(
     let font_size = PREFIX_SIZE.to_pixels(window.rem_size());
     let run = TextRun {
         len: prefix.len(),
-        font: font(mono.clone()),
+        font: Font {
+            fallbacks: theme::emoji_fallbacks(),
+            ..font(mono.clone())
+        },
         color: muted,
         background_color: None,
         underline: None,
@@ -528,7 +558,7 @@ fn sender_color(row: &Row<'_>, cx: &App) -> Hsla {
 }
 
 /// The quote and placeholder lines, then the text; links ask before
-/// opening.
+/// opening, and a few emoji alone draw large.
 fn message_text(row: &Row<'_>, window: &Window, cx: &Context<ChatView>) -> Vec<AnyElement> {
     let mono = cx.theme().mono_font_family.clone();
     let muted = cx.palette().text_muted;
@@ -550,6 +580,9 @@ fn message_text(row: &Row<'_>, window: &Window, cx: &Context<ChatView>) -> Vec<A
         .chain(row.message.content.body().map(|body| {
             let view = cx.weak_entity();
             TextView::markdown(("body", id.get() as u64), message_markdown(body.as_str()))
+                .when_some(jumbo_size(body.as_str()), |view, size| {
+                    view.text_size(rems(size))
+                })
                 .selectable(true)
                 .on_link_click(move |href, _, window, cx| {
                     view.update(cx, |view, cx| view.ask_open_link(href, window, cx))

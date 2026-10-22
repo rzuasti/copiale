@@ -26,8 +26,8 @@ use crate::model::{
     Account, AccountSettings, BlockedList, Change, ChatRef, ChatState, Content, ConversationId,
     Destination, GroupId, GroupMasterKey, GroupRef, GroupUpdate, Identity, IdentityKey,
     IncomingMessage, Message, MessageBody, MessageChange, MessageId, MessageRef, MessageStatus,
-    Outgoing, Peer, Quote, ReceiptKind, RequestResponse, SentMessage, ServiceId, Timestamp,
-    Verification,
+    Outgoing, Peer, Quote, ReceiptKind, RecentEmoji, RequestResponse, SentMessage, ServiceId,
+    Timestamp, Verification,
 };
 use crate::storage::{Database, Removed, StorageError};
 
@@ -289,6 +289,8 @@ impl<'a, B: SignalBackend> Session<'a, B> {
             Some(Command::OpenConversation(peer)) => self.open_conversation(peer).await,
             Some(Command::LoadConversations) => self.send_conversations().await,
             Some(Command::LoadContacts) => self.send_contacts().await,
+            Some(Command::LoadRecentEmoji) => self.send_recent_emoji().await,
+            Some(Command::SetRecentEmoji(recent)) => self.set_recent_emoji(recent).await,
             Some(Command::LoadMessages {
                 conversation,
                 before,
@@ -1984,6 +1986,19 @@ impl<'a, B: SignalBackend> Session<'a, B> {
         match self.db.contacts().await {
             Ok(contacts) => self.emit(Event::Contacts(contacts)),
             Err(error) => self.database_error(error),
+        }
+    }
+
+    async fn send_recent_emoji(&self) {
+        match self.db.recent_emoji().await {
+            Ok(recent) => self.emit(Event::RecentEmoji(recent)),
+            Err(error) => self.database_error(error),
+        }
+    }
+
+    async fn set_recent_emoji(&self, recent: RecentEmoji) {
+        if let Err(error) = self.db.set_recent_emoji(&recent).await {
+            self.database_error(error);
         }
     }
 

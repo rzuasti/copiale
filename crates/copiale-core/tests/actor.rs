@@ -12,8 +12,8 @@ use copiale_core::{
     Direction, EDIT_WINDOW, Event, Events, Expiry, GroupId, GroupInfo, GroupRef, GroupUpdate,
     Identity, Incoming, IncomingMessage, MAX_SENT_EDITS, Member, Message, MessageBody,
     MessageChange, MessagePreview, MessageRef, MessageStatus, Outgoing, Peer, PhoneNumber, Quote,
-    Quoted, ReceiptKind, RequestResponse, RetryRequest, SentMessage, StorageFailure, StoredChat,
-    StoredChats, StoredIdentity, Timestamp, Undecryptable, Verification,
+    Quoted, ReceiptKind, RecentEmoji, RequestResponse, RetryRequest, SentMessage, StorageFailure,
+    StoredChat, StoredChats, StoredIdentity, Timestamp, Undecryptable, Verification,
 };
 use copiale_testkit::{
     DEVICE_NAME, FAKE_LINK_URL, FakeNetwork, FakePhone, ManualClock, MemorySecretStore, OWN_ID,
@@ -459,6 +459,21 @@ async fn synced_contacts_are_listed_and_title_chats() {
 
     send(&running, Command::LoadContacts);
     assert_eq!(contacts(&mut running.events).await, [alice, bob]);
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn recent_emoji_are_kept() {
+    let (_dir, mut running) = ready().await;
+    let recent = RecentEmoji(vec!["👍".into(), "❤️".into()]);
+    send(&running, Command::SetRecentEmoji(recent.clone()));
+    send(&running, Command::LoadRecentEmoji);
+    loop {
+        if let Event::RecentEmoji(loaded) = next_event(&mut running.events).await {
+            assert_eq!(loaded, recent);
+            break;
+        }
+    }
     stop(running).await;
 }
 
