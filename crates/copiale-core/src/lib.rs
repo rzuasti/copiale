@@ -23,7 +23,7 @@ pub use actor::{
     MAX_SENT_EDITS, StorageFailure, TYPING_TIMEOUT, spawn, spawn_with_options,
 };
 pub use backend::{
-    BackendError, Incoming, Linker, PeerIdentity, Resendable, RetryRequest, SignalBackend,
+    Ack, BackendError, Incoming, Linker, PeerIdentity, Resendable, RetryRequest, SignalBackend,
     StoredChats, Undecryptable,
 };
 pub use clock::{Clock, SystemClock};

@@ -19,6 +19,7 @@ use copiale_testkit::{
     DEVICE_NAME, FAKE_LINK_URL, FakeNetwork, FakePhone, ManualClock, MemorySecretStore, OWN_ID,
     SentText, fake_backend, fake_linker, group_key, identity_key, safety_number, service_id, text,
 };
+use futures::FutureExt as _;
 use tempfile::TempDir;
 
 const CHEAP_KDF: KdfParams = KdfParams {
@@ -212,6 +213,26 @@ async fn redelivered_message_is_ignored() {
     running.network.deliver(Incoming::QueueEmpty);
 
     expect(&mut running.events, Event::Synced).await;
+    running
+        .network
+        .wait_until(|network| network.acknowledged() == 3)
+        .await;
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn messages_are_acknowledged_once_stored() {
+    let (_dir, mut running) = ready().await;
+
+    running.network.deliver(incoming(1, 100, "hello"));
+    running
+        .network
+        .wait_until(|network| network.acknowledged() == 1)
+        .await;
+
+    // Reported once stored, before the acknowledgement.
+    let reported = running.events.recv().now_or_never().flatten();
+    assert!(matches!(reported, Some(Event::MessageAdded(_))));
     stop(running).await;
 }
 

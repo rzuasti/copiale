@@ -33,6 +33,10 @@ each one once its patches are merged and the pin is updated.
     that failed to decode ended the contact list silently, so a corrupt
     list looked complete; it ends with `ParseContactError::Protobuf` now.
     Upstream PR: [whisperfish/libsignal-service-rs#486](https://github.com/whisperfish/libsignal-service-rs/pull/486).
+  - `patches/libsignal-service-deferred-acks.patch`. Envelopes were
+    acknowledged as soon as read off the websocket, so quitting or crashing
+    before storing one lost it; `MessagePipe::stream_unacknowledged` yields
+    each with an `Acknowledgement` to send once handled. Not upstream yet.
 - **Used via:** `[patch."https://github.com/whisperfish/libsignal-service-rs"]`
   in the root `Cargo.toml`.
 
@@ -82,6 +86,11 @@ libsignal-service git hash back to `nix/package.nix`.
     be read, parsed or saved in full, to drop contacts the phone no longer
     has.
     Upstream PR: [whisperfish/presage#470](https://github.com/whisperfish/presage/pull/470).
+  - `patches/presage-deferred-acks.patch`, on top of libsignal-service's.
+    `Manager::receive_messages_unacknowledged` yields each message with its
+    `Acknowledgement`, to send once the client stored it; messages handled
+    in presage are acknowledged there. `DuplicatedMessage` (decrypted
+    before, not acknowledged) is skipped quietly. Not upstream yet.
 - **Used via:** `[patch."https://github.com/whisperfish/presage"]` in the
   root `Cargo.toml`.
 

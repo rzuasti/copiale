@@ -90,6 +90,27 @@ pub enum Incoming {
     },
 }
 
+/// Tells the server an [`Incoming`] item was handled, so it isn't sent
+/// again. Dropped instead, it's received again on the next connection.
+#[must_use = "unacknowledged items are received again"]
+pub struct Ack(Box<dyn FnOnce()>);
+
+impl Ack {
+    pub fn new(ack: impl FnOnce() + 'static) -> Self {
+        Self(Box::new(ack))
+    }
+
+    pub fn ack(self) {
+        (self.0)();
+    }
+}
+
+impl fmt::Debug for Ack {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Ack")
+    }
+}
+
 /// An account's identity key as sessions with it use it, and its safety
 /// number with this account.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -262,17 +283,18 @@ impl BackendError {
 /// Futures need not be `Send`: presage's are not, so the core drives the
 /// backend from a single thread.
 pub trait SignalBackend {
-    /// Opens the connection and streams incoming content until it closes.
+    /// Opens the connection and streams incoming content until it closes,
+    /// each item to acknowledge once handled.
     ///
     /// The future doesn't borrow the backend, so the core can keep serving
     /// while it connects.
     fn receive(
         &mut self,
-    ) -> LocalBoxFuture<'static, Result<LocalBoxStream<'static, Incoming>, BackendError>>;
+    ) -> LocalBoxFuture<'static, Result<LocalBoxStream<'static, (Incoming, Ack)>, BackendError>>;
 
-    /// Ends the stream from [`Self::receive`] once what was already received
-    /// has come through: the server may count it as delivered, so dropping
-    /// the stream instead would lose it.
+    /// Ends the stream from [`Self::receive`] once what is being received
+    /// has come through, as cancelling a decryption may lose the message.
+    /// Acknowledgements still go out after it ends.
     fn stop_receiving(&mut self);
 
     /// Sends a message, or a change to one of ours, to one account or a

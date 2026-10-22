@@ -299,10 +299,13 @@ crates/
   Connecting runs in the background and gives up after 30 s.
 - Once connected, the core asks the phone for contacts (daily, hourly while
   none have come) and settings (until known), in the background.
-- Losing the connection or quitting first stores what was already received:
-  the server counts it as delivered once read. The receive task decrypts
-  only a few messages ahead, never cancels a decryption, and gives the
-  websocket a moment to send its acknowledgements.
+- Each message is acknowledged to the server once stored (or dropped for
+  good); the server sends unacknowledged ones again on the next connection.
+  Losing the connection or quitting first stores what was already
+  decrypted, as it won't decrypt again; what's still unread is left to the
+  server. The receive task decrypts only a few messages ahead, never
+  cancels a decryption, and gives the websocket a moment to send the
+  acknowledgements.
 - A dead network can leave the connection looking open for minutes, so the
   core asks the server who it is every 20 s and reconnects if there is no
   answer within 10 s.

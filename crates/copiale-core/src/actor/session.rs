@@ -19,7 +19,7 @@ use super::retries::Limiter;
 use super::run::{Core, ignored};
 use super::{Command, DELETE_WINDOW, EDIT_WINDOW, Event, MAX_SENT_EDITS};
 use crate::backend::{
-    BackendError, Incoming, RetryRequest, SignalBackend, StoredChats, Undecryptable,
+    Ack, BackendError, Incoming, RetryRequest, SignalBackend, StoredChats, Undecryptable,
 };
 use crate::clock::Clock;
 use crate::model::{
@@ -86,7 +86,7 @@ struct Session<'a, B> {
     storage_wanted: bool,
     /// The Storage Service manifest version last applied.
     storage_version: Option<u64>,
-    incoming: Option<LocalBoxStream<'static, Incoming>>,
+    incoming: Option<LocalBoxStream<'static, (Incoming, Ack)>>,
     connecting: Option<LocalBoxFuture<'static, Connecting>>,
     retry_at: Option<Instant>,
     /// Next reconnect delay.
@@ -211,8 +211,10 @@ impl<'a, B: SignalBackend> Session<'a, B> {
                     None
                 }
                 item = next_incoming(&mut self.incoming) => match item {
-                    Some(item) => {
+                    Some((item, ack)) => {
                         self.receive(item).await;
+                        // Stored, or dropped for good.
+                        ack.ack();
                         None
                     }
                     None => self.closed().await,
@@ -2021,7 +2023,7 @@ impl<'a, B: SignalBackend> Session<'a, B> {
 }
 
 /// A connection attempt's result.
-type Connecting = Result<LocalBoxStream<'static, Incoming>, BackendError>;
+type Connecting = Result<LocalBoxStream<'static, (Incoming, Ack)>, BackendError>;
 
 /// A Storage Service read's result.
 type StoredRead = Result<Option<StoredChats>, BackendError>;
@@ -2146,7 +2148,9 @@ async fn maybe<T>(future: &mut Option<LocalBoxFuture<'static, T>>) -> T {
 }
 
 /// Next item from the stream; never resolves without one.
-async fn next_incoming(stream: &mut Option<LocalBoxStream<'static, Incoming>>) -> Option<Incoming> {
+async fn next_incoming(
+    stream: &mut Option<LocalBoxStream<'static, (Incoming, Ack)>>,
+) -> Option<(Incoming, Ack)> {
     match stream {
         Some(stream) => stream.next().await,
         None => std::future::pending().await,

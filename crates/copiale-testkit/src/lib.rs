@@ -8,10 +8,10 @@ use std::time::Duration;
 
 use copiale_core::storage::{Database, SecretError, SecretStore};
 use copiale_core::{
-    BackendError, BlockedList, ChatRef, Clock, Contact, Destination, GroupInfo, GroupMasterKey,
-    GroupMembers, IdentityKey, Incoming, Linker, MessageBody, Outgoing, PeerIdentity,
-    RequestResponse, Resendable, RetryRequest, SafetyNumber, ServiceId, SignalBackend, StoredChats,
-    Timestamp,
+    Ack, BackendError, BlockedList, ChatRef, Clock, Contact, Destination, GroupInfo,
+    GroupMasterKey, GroupMembers, IdentityKey, Incoming, Linker, MessageBody, Outgoing,
+    PeerIdentity, RequestResponse, Resendable, RetryRequest, SafetyNumber, ServiceId,
+    SignalBackend, StoredChats, Timestamp,
 };
 use futures::future::LocalBoxFuture;
 use futures::stream::LocalBoxStream;
@@ -108,6 +108,8 @@ struct State {
     /// [`SignalBackend::stop_receiving`] leaves the connection open.
     ignore_stops: bool,
     connections: usize,
+    /// Items the core acknowledged.
+    acknowledged: usize,
     receive_failures: VecDeque<BackendError>,
     sent: Vec<SentText>,
     sends_started: usize,
@@ -211,24 +213,35 @@ impl SignalBackend for FakeBackend {
     /// Opens once connections aren't stalled.
     fn receive(
         &mut self,
-    ) -> LocalBoxFuture<'static, Result<LocalBoxStream<'static, Incoming>, BackendError>> {
+    ) -> LocalBoxFuture<'static, Result<LocalBoxStream<'static, (Incoming, Ack)>, BackendError>>
+    {
         let state = self.state.clone();
+        let changes = self.changes.clone();
         let mut link = self.link.subscribe();
         async move {
             link.wait_for(|link| !link.connections_stalled).await.ok();
             if link.borrow().offline {
                 return Err(BackendError::network("offline"));
             }
-            let mut state = state.lock().unwrap();
-            if let Some(error) = state.receive_failures.pop_front() {
-                return Err(error);
-            }
-            let (tx, rx) = unbounded_channel();
-            state.connection = Some(tx);
-            state.connections += 1;
-            let stream = futures::stream::unfold(rx, |mut rx| async move {
-                let item = rx.recv().await?;
-                Some((item, rx))
+            let rx = {
+                let mut state = state.lock().unwrap();
+                if let Some(error) = state.receive_failures.pop_front() {
+                    return Err(error);
+                }
+                let (tx, rx) = unbounded_channel();
+                state.connection = Some(tx);
+                state.connections += 1;
+                rx
+            };
+            let stream = futures::stream::unfold(rx, move |mut rx| {
+                let (state, changes) = (state.clone(), changes.clone());
+                async move {
+                    let item = rx.recv().await?;
+                    let ack = Ack::new(move || {
+                        record(&state, &changes, |state| state.acknowledged += 1);
+                    });
+                    Some(((item, ack), rx))
+                }
             });
             Ok(stream.boxed_local())
         }
@@ -719,6 +732,11 @@ impl FakeNetwork {
     /// Connections opened so far.
     pub fn connections(&self) -> usize {
         self.state.lock().unwrap().connections
+    }
+
+    /// Items the core acknowledged so far.
+    pub fn acknowledged(&self) -> usize {
+        self.state.lock().unwrap().acknowledged
     }
 
     pub fn contact_sync_requests(&self) -> usize {

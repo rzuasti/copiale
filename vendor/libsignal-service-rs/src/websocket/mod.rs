@@ -344,8 +344,9 @@ impl SignalWebSocketProcess {
                             let buffer = msg.encode_to_vec();
                             self.ws.send(buffer.into()).await?;
                         }
+                        // Unacknowledged envelopes are sent again on the next connection.
                         Some(Err(error)) => {
-                            tracing::error!(%error, "could not generate response to a Signal request; responder was canceled. continuing.");
+                            tracing::debug!(%error, "no response to a Signal request; responder was dropped. continuing.");
                         }
                         None => {
                             unreachable!("outgoing responses should never fuse")

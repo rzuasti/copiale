@@ -1,6 +1,6 @@
 //! The [`Linker`] and the [`SignalBackend`] of a linked account.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -39,7 +39,7 @@ use super::errors::{presage_error, storage_service_error, store_error};
 use super::incoming::{identity_key, incoming, service_id};
 use super::store::AppStore;
 use crate::backend::{
-    BackendError, Incoming, Linker, PeerIdentity, Resendable, RetryRequest, SignalBackend,
+    Ack, BackendError, Incoming, Linker, PeerIdentity, Resendable, RetryRequest, SignalBackend,
     StoredChats,
 };
 use crate::model::{
@@ -167,7 +167,8 @@ impl SignalBackend for PresageBackend {
     /// doesn't wait for the stream. Must run inside a `LocalSet`.
     fn receive(
         &mut self,
-    ) -> LocalBoxFuture<'static, Result<LocalBoxStream<'static, Incoming>, BackendError>> {
+    ) -> LocalBoxFuture<'static, Result<LocalBoxStream<'static, (Incoming, Ack)>, BackendError>>
+    {
         let mut manager = self.manager.clone();
         let me = manager.registration_data().service_ids.aci();
         let server = ServiceConfiguration::from(manager.registration_data().signal_servers)
@@ -176,7 +177,7 @@ impl SignalBackend for PresageBackend {
         let (items_tx, items_rx) = mpsc::channel(RECEIVE_BUFFER);
         let (stop, stop_rx) = oneshot::channel();
         let task = tokio::task::spawn_local(async move {
-            let stream = match manager.receive_messages().await {
+            let stream = match manager.receive_messages_unacknowledged().await {
                 Ok(stream) => {
                     opened_tx.send(Ok(())).ok();
                     stream
@@ -186,6 +187,14 @@ impl SignalBackend for PresageBackend {
                     return;
                 }
             };
+            let stream = stream.map(|(received, acknowledgement)| {
+                let ack = Ack::new(move || {
+                    if let Err(error) = acknowledgement.acknowledge() {
+                        tracing::debug!(%error, "acknowledging a message failed");
+                    }
+                });
+                (received, ack)
+            });
             relay(stream, me, &server, items_tx, stop_rx).await;
         });
         let receiver = Receiver {
@@ -840,63 +849,70 @@ const RECEIVE_BUFFER: usize = 8;
 /// decrypting, so cancelling it loses nothing.
 const DRAIN_IDLE: Duration = Duration::from_secs(2);
 
-/// While stopping, no read starts after this long.
-const DRAIN_LIMIT: Duration = Duration::from_secs(5);
-
-/// While stopping, how long after the last read the websocket gets to send
-/// its queued acknowledgements; the server sends unacknowledged messages
-/// again, which then fail to decrypt.
+/// How long after the last acknowledgement the websocket gets to send it
+/// before closing; the server sends unacknowledged messages again, and those
+/// decrypted already then fail to decrypt.
 const ACK_FLUSH: Duration = Duration::from_millis(250);
 
-/// Passes on what `stream` receives until it ends or `stop` fires, then
-/// what was already on its way: presage acknowledges messages before
-/// decrypting them, and cancelling a decryption may lose the message.
+/// Passes on what `stream` receives until it ends or `stop` fires, then the
+/// read in progress, as cancelling a decryption may lose the message; the
+/// server sends what's left unread again. Acknowledges what the core doesn't
+/// care about, and returns once the core acknowledged or dropped the rest and
+/// the websocket had time to send the acknowledgements.
 async fn relay(
-    stream: impl Stream<Item = Received>,
+    stream: impl Stream<Item = (Received, Ack)>,
     me: Aci,
     server: &ServerPublicParams,
-    items: mpsc::Sender<Incoming>,
+    items: mpsc::Sender<(Incoming, Ack)>,
     mut stop: oneshot::Receiver<()>,
 ) {
     let mut stream = Box::pin(stream);
-    let mut stop_by = None;
-    let mut last_read = None;
-    loop {
-        if stop_by.is_some_and(|at| Instant::now() >= at) {
-            break;
-        }
+    // Each ack handed out holds a sender until it's acknowledged or dropped.
+    let (unacked, mut all_acked) = mpsc::channel::<()>(1);
+    let last_ack = Rc::new(Cell::new(None));
+    let mut stopping = false;
+    while !stopping {
         let started = Instant::now();
         let mut next = stream.next();
-        // `None`: stopping, and only waiting for the server.
-        let received = match stop_by {
-            Some(_) => tokio::time::timeout_at(started + DRAIN_IDLE, &mut next)
-                .await
-                .ok(),
-            None => tokio::select! {
-                received = &mut next => Some(received),
-                _ = &mut stop => {
-                    stop_by = Some(Instant::now() + DRAIN_LIMIT);
-                    tokio::time::timeout_at(started + DRAIN_IDLE, &mut next).await.ok()
+        let received = tokio::select! {
+            biased;
+            _ = &mut stop => {
+                stopping = true;
+                tokio::time::timeout_at(started + DRAIN_IDLE, &mut next)
+                    .await
+                    .ok()
+                    .flatten()
+            }
+            received = &mut next => received,
+        };
+        let Some((received, ack)) = received else {
+            break;
+        };
+        let ack = noted(ack, unacked.clone(), last_ack.clone());
+        match incoming(received, me, server) {
+            Some(item) => {
+                if items.send((item, ack)).await.is_err() {
+                    break;
                 }
-            },
-        };
-        let Some(Some(received)) = received else {
-            break;
-        };
-        last_read = Some(Instant::now());
-        if let Some(item) = incoming(received, me, server)
-            && items.send(item).await.is_err()
-        {
-            break;
+            }
+            None => ack.ack(),
         }
     }
-    drop(stream);
+    drop(unacked);
     // `items` stays open meanwhile, so the backend, and its websocket, live.
-    if stop_by.is_some()
-        && let Some(at) = last_read
-    {
+    all_acked.recv().await;
+    if let Some(at) = last_ack.get() {
         tokio::time::sleep_until(at + ACK_FLUSH).await;
     }
+}
+
+/// `ack`, noting when it went out; holds `unacked` until then.
+fn noted(ack: Ack, unacked: mpsc::Sender<()>, last_ack: Rc<Cell<Option<Instant>>>) -> Ack {
+    Ack::new(move || {
+        ack.ack();
+        last_ack.set(Some(Instant::now()));
+        drop(unacked);
+    })
 }
 
 /// Most Storage Service records read per request.
@@ -1320,48 +1336,71 @@ mod tests {
         db.close().await;
     }
 
-    /// Relays `stream`, asking it to stop after `stop_after`; returns when
-    /// each item, and the end, came through.
+    /// Relays `stream`, asking it to stop after `stop_after`, the core
+    /// acknowledging each item after `handling` unless `None`; returns when
+    /// each item came through, and when relaying ended.
     async fn relayed(
-        stream: impl Stream<Item = Received>,
+        stream: impl Stream<Item = (Received, Ack)>,
         stop_after: Duration,
+        handling: Option<Duration>,
     ) -> (Vec<Duration>, Duration) {
         let start = Instant::now();
-        let (items_tx, mut items) = mpsc::channel(RECEIVE_BUFFER);
+        let (items_tx, mut items) = mpsc::channel::<(Incoming, Ack)>(RECEIVE_BUFFER);
         let (stop, stop_rx) = oneshot::channel();
         let stopper = async {
             tokio::time::sleep(stop_after).await;
             stop.send(()).ok();
         };
-        let collect = async {
+        let core = async {
             let mut arrived = Vec::new();
-            while items.recv().await.is_some() {
+            while let Some((_, ack)) = items.recv().await {
                 arrived.push(start.elapsed());
+                if let Some(handling) = handling {
+                    tokio::time::sleep(handling).await;
+                    ack.ack();
+                }
             }
-            (arrived, start.elapsed())
+            arrived
         };
-        let ((), (), relayed) = tokio::join!(
+        let relay = async {
             relay(
                 stream,
                 Aci::from(uuid::Uuid::nil()),
                 server(),
                 items_tx,
-                stop_rx
-            ),
-            stopper,
-            collect
-        );
-        relayed
+                stop_rx,
+            )
+            .await;
+            start.elapsed()
+        };
+        let (ended, (), arrived) = tokio::join!(relay, stopper, core);
+        (arrived, ended)
+    }
+
+    /// `items` arriving together after `at`, with acks counted in `acked`.
+    fn counted(
+        items: impl IntoIterator<Item = Received>,
+        at: Duration,
+        acked: &Rc<Cell<usize>>,
+    ) -> impl Stream<Item = (Received, Ack)> {
+        let acked = acked.clone();
+        let items = futures::stream::iter(items).map(move |received| {
+            let acked = acked.clone();
+            (received, Ack::new(move || acked.set(acked.get() + 1)))
+        });
+        futures::stream::once(tokio::time::sleep(at))
+            .filter_map(|()| async { None })
+            .chain(items)
     }
 
     /// `count` messages, one per `period`, on a connection that stays open.
-    fn arrivals(period: Duration, count: usize) -> impl Stream<Item = Received> {
+    fn arrivals(period: Duration, count: usize) -> impl Stream<Item = (Received, Ack)> {
         futures::stream::unfold(0, move |n| async move {
             if n == count {
                 std::future::pending::<()>().await;
             }
             tokio::time::sleep(period).await;
-            Some((Received::QueueEmpty, n + 1))
+            Some(((Received::QueueEmpty, Ack::new(|| {})), n + 1))
         })
     }
 
@@ -1369,48 +1408,97 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn relays_until_the_connection_closes() {
-        let stream = futures::stream::iter([Received::QueueEmpty, Received::QueueEmpty]);
+        let acked = Rc::default();
+        let stream = counted(
+            [Received::QueueEmpty, Received::QueueEmpty],
+            Duration::ZERO,
+            &acked,
+        );
 
-        let (arrived, ended) = relayed(stream, 3600 * SECOND).await;
+        let (arrived, ended) = relayed(stream, 3600 * SECOND, Some(Duration::ZERO)).await;
 
         assert_eq!(arrived, [Duration::ZERO; 2]);
-        assert_eq!(ended, Duration::ZERO);
+        assert_eq!(acked.get(), 2);
+        assert_eq!(ended, ACK_FLUSH);
     }
 
     #[tokio::test(start_paused = true)]
-    async fn stopping_lets_messages_already_received_through() {
-        let received = futures::stream::iter([Received::QueueEmpty, Received::QueueEmpty]);
-        let stream = received.chain(futures::stream::pending());
+    async fn acknowledges_what_the_core_ignores() {
+        let acked = Rc::default();
+        let foreign_sync = content(ContentBody::SynchronizeMessage(SyncMessage::default()));
+        let stream = counted(
+            [Received::Content(Box::new(foreign_sync))],
+            Duration::ZERO,
+            &acked,
+        );
 
-        let (arrived, ended) = relayed(stream, Duration::ZERO).await;
+        let (arrived, ended) = relayed(stream, 3600 * SECOND, None).await;
 
-        assert_eq!(arrived.len(), 2);
-        assert_eq!(ended, DRAIN_IDLE);
+        assert_eq!(arrived, []);
+        assert_eq!(acked.get(), 1);
+        assert_eq!(ended, ACK_FLUSH);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stopping_leaves_unread_messages_to_the_server() {
+        let acked = Rc::default();
+        let stream = counted([Received::QueueEmpty, Received::QueueEmpty], SECOND, &acked);
+
+        let (arrived, ended) = relayed(stream, Duration::ZERO, Some(Duration::ZERO)).await;
+
+        assert_eq!(arrived, [SECOND]);
+        assert_eq!(acked.get(), 1);
+        assert_eq!(ended, SECOND + ACK_FLUSH);
     }
 
     #[tokio::test(start_paused = true)]
     async fn stopping_waits_for_a_message_being_decrypted() {
-        let (arrived, ended) = relayed(arrivals(SECOND, 1), Duration::ZERO).await;
+        let (arrived, ended) =
+            relayed(arrivals(SECOND, 1), Duration::ZERO, Some(Duration::ZERO)).await;
 
         assert_eq!(arrived, [SECOND]);
-        assert_eq!(ended, SECOND + DRAIN_IDLE);
+        assert_eq!(ended, SECOND + ACK_FLUSH);
     }
 
     #[tokio::test(start_paused = true)]
     async fn stopping_an_idle_connection_ends_at_once() {
-        let (arrived, ended) = relayed(futures::stream::pending(), 10 * SECOND).await;
+        let (arrived, ended) = relayed(
+            futures::stream::pending(),
+            10 * SECOND,
+            Some(Duration::ZERO),
+        )
+        .await;
 
         assert_eq!(arrived, []);
         assert_eq!(ended, 10 * SECOND);
     }
 
     #[tokio::test(start_paused = true)]
-    async fn stopping_reads_for_a_limited_time_then_flushes_acknowledgements() {
-        let (arrived, ended) = relayed(arrivals(SECOND, usize::MAX), Duration::ZERO).await;
+    async fn ends_once_the_core_acknowledged_what_it_got() {
+        let acked = Rc::default();
+        let stream = counted(
+            [Received::QueueEmpty, Received::QueueEmpty],
+            Duration::ZERO,
+            &acked,
+        );
 
-        assert_eq!(arrived.len(), 5);
-        assert_eq!(arrived.last(), Some(&DRAIN_LIMIT));
-        assert_eq!(ended, DRAIN_LIMIT + ACK_FLUSH);
+        let (arrived, ended) = relayed(stream, 3600 * SECOND, Some(3 * SECOND)).await;
+
+        assert_eq!(arrived, [Duration::ZERO, 3 * SECOND]);
+        assert_eq!(acked.get(), 2);
+        assert_eq!(ended, 6 * SECOND + ACK_FLUSH);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn messages_the_core_dropped_are_not_waited_for() {
+        let acked = Rc::default();
+        let stream = counted([Received::QueueEmpty], Duration::ZERO, &acked);
+
+        let (arrived, ended) = relayed(stream, 3600 * SECOND, None).await;
+
+        assert_eq!(arrived, [Duration::ZERO]);
+        assert_eq!(acked.get(), 0);
+        assert_eq!(ended, Duration::ZERO);
     }
 
     /// Linking generates Kyber prekeys deep in async frames; leave them

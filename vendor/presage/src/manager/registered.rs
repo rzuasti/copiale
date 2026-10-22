@@ -17,7 +17,7 @@ use libsignal_service::{
     encrypt_device_name,
     groups_v2::{decrypt_group, GroupsManager, InMemoryCredentialsCache},
     master_key::{MasterKey, StorageServiceKey},
-    messagepipe::{Incoming, MessagePipe, ServiceCredentials},
+    messagepipe::{Acknowledgement, Incoming, MessagePipe, ServiceCredentials},
     prelude::{phonenumber::PhoneNumber, MessageSenderError, ProtobufMessage, Uuid},
     profile_cipher::ProfileCipher,
     proto::{
@@ -617,9 +617,23 @@ impl<S: Store> Manager<S, Registered> {
     /// are processed _before_ trying to encrypt and send messages, which might get rejected by recipients otherwise.
     ///
     /// Returns a [futures::Stream] of messages to consume. Messages will also be stored by the implementation of the [Store].
+    /// They are acknowledged to the server as they are yielded.
     pub async fn receive_messages(
         &mut self,
     ) -> Result<impl Stream<Item = Received>, Error<S::Error>> {
+        let messages = self.receive_messages_unacknowledged().await?;
+        Ok(messages.map(|(received, acknowledgement)| {
+            acknowledge(acknowledgement);
+            received
+        }))
+    }
+
+    /// Like [`Self::receive_messages`], but each message comes with its [`Acknowledgement`], to
+    /// acknowledge once the client handled it: the server sends unacknowledged messages again on
+    /// the next connection. Messages handled here and not yielded are acknowledged here.
+    pub async fn receive_messages_unacknowledged(
+        &mut self,
+    ) -> Result<impl Stream<Item = (Received, Acknowledgement)>, Error<S::Error>> {
         struct StreamState<Receiver, Store, AciStore, PniStore> {
             store: Store,
             identified_websocket: SignalWebSocket<websocket::Identified>,
@@ -676,7 +690,7 @@ impl<S: Store> Manager<S, Registered> {
             store: self.store.clone(),
             identified_websocket,
             unidentified_websocket: self.unidentified_websocket().await?,
-            encrypted_messages: Box::pin(encrypted_messages.stream()),
+            encrypted_messages: Box::pin(encrypted_messages.stream_unacknowledged()),
             message_receiver: MessageReceiver::new(identified_push_service),
             service_cipher_aci: self.new_service_cipher_aci(),
             service_cipher_pni: self.new_service_cipher_pni(),
@@ -694,12 +708,13 @@ impl<S: Store> Manager<S, Registered> {
             async move {
                 loop {
                     match state.encrypted_messages.next().await {
-                        Some(Ok(Incoming::Envelope(envelope))) => {
+                        Some(Ok((Incoming::Envelope(envelope), acknowledgement))) => {
                             let envelope = {
                                 // the permit is released at the end of the block (impl Drop)
                                 match envelope.parse_destination_service_id() {
                                     None => {
                                         warn!("Message has no destination service ID, dropping.");
+                                        acknowledge(acknowledgement);
                                         continue;
                                     }
                                     Some(ServiceId::Aci(_)) => {
@@ -713,6 +728,7 @@ impl<S: Store> Manager<S, Registered> {
                                             && envelope.parse_source_service_id().is_none()
                                         {
                                             warn!("Got a sealed sender message to our PNI? Invalid message, ignoring.");
+                                            acknowledge(acknowledgement);
                                             continue;
                                         }
                                         state
@@ -730,6 +746,7 @@ impl<S: Store> Manager<S, Registered> {
                                             != ServiceId::Aci(state.service_ids.aci())
                                     {
                                         warn!("dropping sync message not sent by this account");
+                                        acknowledge(acknowledgement);
                                         continue;
                                     }
 
@@ -744,8 +761,13 @@ impl<S: Store> Manager<S, Registered> {
                                         )
                                         .await
                                         {
-                                            Some(received) => return Some((received, state)),
-                                            None => continue,
+                                            Some(received) => {
+                                                return Some(((received, acknowledgement), state))
+                                            }
+                                            None => {
+                                                acknowledge(acknowledgement);
+                                                continue;
+                                            }
                                         }
                                     }
 
@@ -866,7 +888,7 @@ impl<S: Store> Manager<S, Registered> {
                                         .await;
                                         let complete = contacts.complete();
                                         return Some((
-                                            Received::Contacts { complete, saved },
+                                            (Received::Contacts { complete, saved }, acknowledgement),
                                             state,
                                         ));
                                     }
@@ -1014,23 +1036,38 @@ impl<S: Store> Manager<S, Registered> {
                                         error!(%error, "error saving message to store");
                                     }
 
-                                    return Some((Received::Content(Box::new(content)), state));
+                                    return Some((
+                                        (Received::Content(Box::new(content)), acknowledgement),
+                                        state,
+                                    ));
                                 }
                                 Ok(None) => {
-                                    debug!("empty envelope, message will be skipped!")
+                                    debug!("empty envelope, message will be skipped!");
+                                    acknowledge(acknowledgement);
                                 }
                                 Err(libsignal_service::prelude::ServiceError::DecryptionFailed(
                                     failure,
                                 )) => {
                                     error!(%failure, "failed to decrypt a message");
-                                    return Some((Received::DecryptionError(failure), state));
+                                    return Some((
+                                        (Received::DecryptionError(failure), acknowledgement),
+                                        state,
+                                    ));
+                                }
+                                // decrypted before, but not acknowledged
+                                Err(libsignal_service::prelude::ServiceError::SignalProtocolError(
+                                    libsignal_service::protocol::SignalProtocolError::DuplicatedMessage(..),
+                                )) => {
+                                    debug!("message already received, skipping");
+                                    acknowledge(acknowledgement);
                                 }
                                 Err(error) => {
                                     error!(%error, "error opening envelope, message will be skipped!");
+                                    acknowledge(acknowledgement);
                                 }
                             }
                         }
-                        Some(Ok(Incoming::QueueEmpty)) => {
+                        Some(Ok((Incoming::QueueEmpty, acknowledgement))) => {
                             debug!("got empty queue");
                             if state.account_entropy_pool.is_none() {
                                 debug!("device does not have the needed keys; requesting from primary device");
@@ -1055,7 +1092,7 @@ impl<S: Store> Manager<S, Registered> {
                                     }
                                 });
                             }
-                            return Some((Received::QueueEmpty, state));
+                            return Some(((Received::QueueEmpty, acknowledgement), state));
                         }
                         Some(Err(error)) => {
                             error!(%error, "unexpected error in message receiving loop")
@@ -1792,6 +1829,13 @@ impl<S: Store> Manager<S, Registered> {
             .unlink_device(self.device_id())
             .await?;
         Ok(())
+    }
+}
+
+/// Acknowledges a message to the server, which then won't send it again.
+fn acknowledge(acknowledgement: Acknowledgement) {
+    if let Err(error) = acknowledgement.acknowledge() {
+        debug!(%error, "failed to acknowledge a message");
     }
 }
 
