@@ -71,7 +71,9 @@ went unsolved until 2011.
     read only.
   - Contacts: only the phone's synced ones are listed. Contacts presage
     saves on first sight (they carry a profile key) never replace them,
-    and name chats only after profile names (`storage::contacts`).
+    and name chats only after profile names (`storage::contacts`). A
+    complete contact sync read in full drops synced contacts missing
+    from it.
   - Links: `http(s)://` and `www.` URLs (any case; `www.` over `https`)
     without bidi or invisible characters; a click asks first, showing the
     host in punycode.

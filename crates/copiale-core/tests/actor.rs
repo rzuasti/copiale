@@ -336,7 +336,9 @@ async fn contacts_are_requested_and_refresh_conversations() {
     // Never asked yet, so the core asks once connected.
     until(&running, |network| network.contact_sync_requests() == 1).await;
 
-    running.network.deliver(Incoming::ContactsSynced);
+    running
+        .network
+        .deliver(Incoming::ContactsSynced { all: None });
 
     assert!(matches!(
         next_event(&mut running.events).await,
@@ -436,6 +438,37 @@ async fn synced_contacts_are_listed_and_title_chats() {
 
     send(&running, Command::LoadContacts);
     assert_eq!(contacts(&mut running.events).await, [alice, bob]);
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn contacts_removed_on_the_phone_go_with_complete_syncs_only() {
+    let (_dir, mut running) = ready().await;
+    let alice = contact(1, Some("Alice"), None);
+    let bob = contact(2, Some("Bob"), None);
+    running
+        .network
+        .sync_contacts(&[alice.clone(), bob.clone()])
+        .await;
+    assert_eq!(
+        contacts(&mut running.events).await,
+        [alice.clone(), bob.clone()]
+    );
+
+    running
+        .network
+        .sync_some_contacts(std::slice::from_ref(&alice))
+        .await;
+    assert_eq!(
+        contacts(&mut running.events).await,
+        [alice.clone(), bob.clone()]
+    );
+
+    running
+        .network
+        .sync_contacts(std::slice::from_ref(&alice))
+        .await;
+    assert_eq!(contacts(&mut running.events).await, [alice]);
     stop(running).await;
 }
 
@@ -1997,7 +2030,9 @@ async fn synced_contacts_refresh_group_members() {
         },
     );
 
-    running.network.deliver(Incoming::ContactsSynced);
+    running
+        .network
+        .deliver(Incoming::ContactsSynced { all: None });
 
     assert!(matches!(
         next_event(&mut running.events).await,

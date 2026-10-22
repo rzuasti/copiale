@@ -3,6 +3,8 @@
 //! presage also saves every sender with a profile key as a contact, named
 //! by their profile, "on first sight"; those count as unknown here.
 
+use std::collections::HashSet;
+
 use presage::libsignal_service::profile_name::ProfileName;
 use presage::libsignal_service::protocol::{Aci, ServiceId as SignalServiceId};
 use presage::model::contacts::Contact as StoredContact;
@@ -61,6 +63,30 @@ impl Database {
             (name.is_none(), name, phone)
         });
         Ok(contacts)
+    }
+
+    /// Deletes synced contacts not in `kept`; returns how many.
+    pub(crate) async fn prune_contacts(&self, kept: &[ServiceId]) -> Result<usize, StorageError> {
+        let kept: HashSet<_> = kept.iter().map(ServiceId::uuid).collect();
+        let stale: Vec<_> = self
+            .presage
+            .contacts()
+            .await
+            .map_err(presage_error)?
+            .filter_map(Result::ok)
+            .filter(|contact| synced(contact) && !kept.contains(&contact.uuid))
+            .map(|contact| contact.uuid)
+            .collect();
+        let mut tx = self.begin_write().await?;
+        for uuid in &stale {
+            sqlx::query("DELETE FROM contacts WHERE uuid = ? AND length(profile_key) = 0")
+                .bind(uuid.as_bytes().as_slice())
+                .execute(&mut *tx)
+                .await
+                .map_err(database_error)?;
+        }
+        tx.commit().await.map_err(database_error)?;
+        Ok(stale.len())
     }
 
     async fn profile_name(&self, peer: ServiceId) -> Option<String> {
@@ -200,6 +226,27 @@ mod tests {
         assert_eq!(db.contact_count().await.unwrap(), 1);
         let ids: Vec<_> = db.contacts().await.unwrap().iter().map(|c| c.id).collect();
         assert_eq!(ids, [peer(2)]);
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn pruning_drops_only_synced_contacts_not_kept() {
+        let (_dir, db) = db().await;
+        save(&db, 1, "Alice", None).await;
+        save(&db, 2, "Bob", None).await;
+        save_first_sight(&db, 3, "Stranger").await;
+
+        assert_eq!(db.prune_contacts(&[peer(1)]).await.unwrap(), 1);
+        assert_eq!(db.prune_contacts(&[peer(1)]).await.unwrap(), 0);
+
+        let ids: Vec<_> = db.contacts().await.unwrap().iter().map(|c| c.id).collect();
+        assert_eq!(ids, [peer(1)]);
+        let first_sight = db
+            .presage
+            .contact_by_id(&Aci::from(Uuid::from_u128(3)).into())
+            .await
+            .unwrap();
+        assert!(first_sight.is_some());
         db.close().await;
     }
 

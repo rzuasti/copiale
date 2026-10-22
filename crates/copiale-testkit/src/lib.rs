@@ -852,11 +852,24 @@ impl FakeNetwork {
         self.state.lock().unwrap().stored_reads
     }
 
-    /// Saves contacts to presage's store, as a sync from the phone does, and
-    /// delivers [`Incoming::ContactsSynced`].
+    /// Saves contacts to presage's store, as a sync of all the phone's
+    /// contacts does, and delivers [`Incoming::ContactsSynced`].
     ///
     /// Panics before the account is loaded or linked.
     pub async fn sync_contacts(&self, contacts: &[Contact]) {
+        self.save_contacts(contacts).await;
+        let all = contacts.iter().map(|contact| contact.id).collect();
+        self.deliver(Incoming::ContactsSynced { all: Some(all) });
+    }
+
+    /// As [`Self::sync_contacts`], for a sync not known to hold all the
+    /// phone's contacts.
+    pub async fn sync_some_contacts(&self, contacts: &[Contact]) {
+        self.save_contacts(contacts).await;
+        self.deliver(Incoming::ContactsSynced { all: None });
+    }
+
+    async fn save_contacts(&self, contacts: &[Contact]) {
         let mut store = self
             .state
             .lock()
@@ -881,7 +894,6 @@ impl FakeNetwork {
             };
             store.save_contact(&stored).await.expect("contact saved");
         }
-        self.deliver(Incoming::ContactsSynced);
     }
 
     /// Sets the identity key sessions with `peer` use, as their first

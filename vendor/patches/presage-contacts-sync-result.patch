@@ -1,0 +1,142 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ricardo Zuasti <rzuasti@pm.me>
+Date: Thu, 22 Oct 2026 12:00:00 -0400
+Subject: [PATCH] feat: report what a contacts sync saved
+
+`Received::Contacts` carries the sync's `complete` flag and the contacts
+saved, or `None` if the list couldn't be read, parsed or saved in full,
+so clients can drop contacts the primary device no longer has. Entries
+without an ACI are skipped, as before.
+
+Assisted-by: Claude Opus 5.5
+---
+diff --git a/src/manager/registered.rs b/src/manager/registered.rs
+index 00f1f24..97c0904 100644
+--- a/src/manager/registered.rs
++++ b/src/manager/registered.rs
+@@ -5,6 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
+ 
+ use chrono::TimeZone;
+ use futures::{future, AsyncReadExt, Stream, StreamExt};
++use libsignal_service::models::ParseContactError;
+ use libsignal_service::prelude::SessionStoreExt;
+ use libsignal_service::protocol::{ProtocolAddress, SessionStore};
+ use libsignal_service::provisioning::ProvisioningSecrets;
+@@ -857,30 +858,17 @@ impl<S: Store> Manager<S, Registered> {
+                                         ..
+                                     }) = &content.body
+                                     {
+-                                        match state
+-                                            .message_receiver
+-                                            .retrieve_contacts(contacts)
+-                                            .await
+-                                        {
+-                                            Ok(contacts) => {
+-                                                info!("saving contacts");
+-                                                for contact in contacts.filter_map(Result::ok) {
+-                                                    if let Err(error) = state
+-                                                        .store
+-                                                        .save_contact(&contact.into())
+-                                                        .await
+-                                                    {
+-                                                        warn!(%error, "failed to save contacts");
+-                                                        break;
+-                                                    }
+-                                                }
+-                                            }
+-                                            Err(error) => {
+-                                                warn!(%error, "failed to retrieve contacts");
+-                                            }
+-                                        }
+-
+-                                        return Some((Received::Contacts, state));
++                                        let saved = save_contacts(
++                                            &mut state.message_receiver,
++                                            &mut state.store,
++                                            contacts,
++                                        )
++                                        .await;
++                                        let complete = contacts.complete();
++                                        return Some((
++                                            Received::Contacts { complete, saved },
++                                            state,
++                                        ));
+                                     }
+ 
+                                     // sticker pack operations
+@@ -2200,6 +2188,48 @@ async fn save_message<S: Store>(
+     Ok(())
+ }
+ 
++/// Saves the contacts of a sync; returns them, or `None` if not all could be read, parsed
++/// and saved.
++async fn save_contacts<S: Store>(
++    receiver: &mut MessageReceiver,
++    store: &mut S,
++    contacts: &sync_message::Contacts,
++) -> Option<Vec<Uuid>> {
++    if contacts.blob.is_none() {
++        warn!("contacts sync without contacts");
++        return None;
++    }
++    let parsed = match receiver.retrieve_contacts(contacts).await {
++        Ok(parsed) => parsed,
++        Err(error) => {
++            warn!(%error, "failed to retrieve contacts");
++            return None;
++        }
++    };
++    info!("saving contacts");
++    let mut saved = Some(Vec::new());
++    for contact in parsed {
++        match contact {
++            Ok(contact) => {
++                let uuid = contact.uuid;
++                if let Err(error) = store.save_contact(&contact.into()).await {
++                    warn!(%error, "failed to save contacts");
++                    return None;
++                }
++                if let Some(saved) = &mut saved {
++                    saved.push(uuid);
++                }
++            }
++            Err(ParseContactError::MissingUuid) => {}
++            Err(error) => {
++                warn!(%error, "failed to parse contact");
++                saved = None;
++            }
++        }
++    }
++    saved
++}
++
+ async fn upsert_contact_from_profile<S: Store>(
+     mut store: S,
+     mut identified_websocket: SignalWebSocket<websocket::Identified>,
+diff --git a/src/model/messages.rs b/src/model/messages.rs
+index ea3db1a..06c4fda 100644
+--- a/src/model/messages.rs
++++ b/src/model/messages.rs
+@@ -1,6 +1,6 @@
+ use libsignal_service::{
+     cipher::DecryptionFailure,
+-    prelude::Content,
++    prelude::{Content, Uuid},
+     proto,
+     protocol::{DeviceId, ServiceId},
+ };
+@@ -13,7 +13,13 @@ pub enum Received {
+ 
+     /// Got contacts (only applies if linked to a primary device
+     /// Contacts can be later queried in the store.
+-    Contacts,
++    Contacts {
++        /// Whether the primary device sent all its contacts.
++        complete: bool,
++        /// The contacts saved, or `None` if the list couldn't be read, parsed or saved in full.
++        /// Entries without an ACI are skipped.
++        saved: Option<Vec<Uuid>>,
++    },
+ 
+     /// A message from a known sender failed to decrypt. Send
+     /// [`DecryptionFailure::retry_request`] with

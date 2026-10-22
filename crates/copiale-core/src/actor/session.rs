@@ -344,7 +344,7 @@ impl<'a, B: SignalBackend> Session<'a, B> {
                 key,
                 verified,
             } => self.verified_synced(peer, key, verified).await,
-            Incoming::ContactsSynced => self.contacts_synced().await,
+            Incoming::ContactsSynced { all } => self.contacts_synced(all).await,
             Incoming::RequestResponse { chat, response } => {
                 self.request_answered(chat, response).await
             }
@@ -1161,7 +1161,15 @@ impl<'a, B: SignalBackend> Session<'a, B> {
         }
     }
 
-    async fn contacts_synced(&mut self) {
+    /// With `all` the phone's contacts, drops those it no longer has.
+    async fn contacts_synced(&mut self, all: Option<Vec<ServiceId>>) {
+        if let Some(all) = all {
+            match self.db.prune_contacts(&all).await {
+                Ok(0) => {}
+                Ok(removed) => tracing::info!(removed, "contacts removed on the phone"),
+                Err(error) => self.database_error(error),
+            }
+        }
         match self.db.contact_count().await {
             Ok(count) => tracing::info!(count, "contacts synced"),
             Err(error) => self.database_error(error),

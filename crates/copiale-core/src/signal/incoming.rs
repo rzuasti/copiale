@@ -49,7 +49,11 @@ pub(super) fn incoming(
             .or_else(|| message_change(&content).map(Incoming::Change))
             .or_else(|| received_message(&content, server).map(Incoming::Message))
             .or_else(|| sent_message(&content, server).map(Incoming::Sent)),
-        Received::Contacts => Some(Incoming::ContactsSynced),
+        Received::Contacts { complete, saved } => Some(Incoming::ContactsSynced {
+            all: saved
+                .filter(|_| complete)
+                .map(|saved| saved.into_iter().map(ServiceId::new).collect()),
+        }),
         Received::DecryptionError(failure) => {
             Some(Incoming::Undecryptable(undecryptable(&failure)))
         }
@@ -1806,10 +1810,18 @@ pub(super) mod tests {
             incoming(Received::QueueEmpty, me, server()),
             Some(Incoming::QueueEmpty)
         );
+        let contacts = |complete, saved| Received::Contacts { complete, saved };
+        let synced = |all| Some(Incoming::ContactsSynced { all });
+        let ids = vec![SENDER, OTHER];
         assert_eq!(
-            incoming(Received::Contacts, me, server()),
-            Some(Incoming::ContactsSynced)
+            incoming(contacts(true, Some(ids.clone())), me, server()),
+            synced(Some(vec![ServiceId::new(SENDER), ServiceId::new(OTHER)]))
         );
+        assert_eq!(
+            incoming(contacts(false, Some(ids)), me, server()),
+            synced(None)
+        );
+        assert_eq!(incoming(contacts(true, None), me, server()), synced(None));
     }
 
     fn failure(content_hint: ContentHint, group_id: Option<Vec<u8>>) -> Received {

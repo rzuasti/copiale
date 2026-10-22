@@ -29,6 +29,10 @@ each one once its patches are merged and the pin is updated.
     lists the devices a send reached, to answer retry requests only from
     those.
     Upstream PR: [whisperfish/libsignal-service-rs#485](https://github.com/whisperfish/libsignal-service-rs/pull/485).
+  - `patches/libsignal-service-contacts-decode-errors.patch`. A contact
+    that failed to decode ended the contact list silently, so a corrupt
+    list looked complete; it ends with `ParseContactError::Protobuf` now.
+    Not upstream yet.
 - **Used via:** `[patch."https://github.com/whisperfish/libsignal-service-rs"]`
   in the root `Cargo.toml`.
 
@@ -72,6 +76,11 @@ libsignal-service git hash back to `nix/package.nix`.
     answers sync requests; a linked one answered a blocked list request
     with an empty list, which could clear the list on the device asking.
     Not upstream yet.
+  - `patches/presage-contacts-sync-result.patch`, on top of
+    libsignal-service's. `Received::Contacts` carries the sync's
+    `complete` flag and the contacts saved, or `None` if the list couldn't
+    be read, parsed or saved in full, to drop contacts the phone no longer
+    has. Not upstream yet.
 - **Used via:** `[patch."https://github.com/whisperfish/presage"]` in the
   root `Cargo.toml`.
 

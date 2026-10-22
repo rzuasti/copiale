@@ -30,8 +30,11 @@ pub enum Incoming {
         messages: Vec<MessageRef>,
         conversations: Vec<ChatRef>,
     },
-    /// Contacts synced from the phone are now in the store.
-    ContactsSynced,
+    /// Contacts synced from the phone are now in the store; `all` lists
+    /// them when the phone sent all it has and each was read.
+    ContactsSynced {
+        all: Option<Vec<ServiceId>>,
+    },
     /// `sender` got or read our messages sent at `timestamps`.
     Receipt {
         sender: ServiceId,
