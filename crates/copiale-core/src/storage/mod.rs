@@ -18,6 +18,7 @@ mod retries;
 mod secrets;
 #[cfg(test)]
 mod testing;
+mod timers;
 
 use std::path::{Path, PathBuf};
 
@@ -26,6 +27,7 @@ pub(crate) use identities::VerifiedKeys;
 pub use key::{DatabaseKey, KdfParams, Passphrase};
 pub(crate) use messages::Removed;
 pub use secrets::{OsKeychain, SecretError, SecretStore};
+pub(crate) use timers::PeerTimers;
 
 use key::KeyFile;
 

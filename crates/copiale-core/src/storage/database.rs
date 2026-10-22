@@ -286,15 +286,23 @@ mod tests {
         migrator.run(pool).await.unwrap();
     }
 
-    #[tokio::test]
-    async fn group_migration_keeps_conversations_and_messages() {
+    /// A plain database with presage's tables, and a pool on it.
+    async fn plain(dir: &Path) -> (SqliteStore, SqlitePool) {
         initialize_sqlcipher().await.unwrap();
-        let dir = tempfile::tempdir().unwrap();
         let options = SqliteConnectOptions::new()
-            .filename(dir.path().join("plain.db"))
+            .filename(dir.join("plain.db"))
             .create_if_missing(true)
             .foreign_keys(true);
-        let pool = SqlitePool::connect_with(options).await.unwrap();
+        let store = SqliteStore::open_with_options(options.clone(), OnNewIdentity::Trust)
+            .await
+            .unwrap();
+        (store, SqlitePool::connect_with(options).await.unwrap())
+    }
+
+    #[tokio::test]
+    async fn group_migration_keeps_conversations_and_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, pool) = plain(dir.path()).await;
         // Up to and including message status, before groups.
         migrate(&pool, Some(3)).await;
         let peer = [7u8; 16];
@@ -348,6 +356,75 @@ mod tests {
             .unwrap();
         assert_eq!(left, 0);
         pool.close().await;
+        store.close().await;
+    }
+
+    #[tokio::test]
+    async fn first_sight_contacts_are_dropped_keeping_names_and_timers() {
+        use presage::libsignal_service::prelude::ProfileKey;
+        use presage::model::contacts::Contact;
+        use presage::store::ContentsStore as _;
+        use uuid::Uuid;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, pool) = plain(dir.path()).await;
+        let all = migrator().migrations.len();
+        migrate(&pool, Some(all - 1)).await;
+        let contact = |n: u128, name: &str, profile_key: Vec<u8>, timer: u32| Contact {
+            uuid: Uuid::from_u128(n),
+            phone_number: None,
+            name: name.into(),
+            verified: Default::default(),
+            profile_key,
+            expire_timer: timer,
+            expire_timer_version: 2,
+            inbox_position: 0,
+            avatar: None,
+        };
+        let key = ProfileKey::create([9; 32]);
+        store
+            .save_contact(&contact(1, "Synced", Vec::new(), 60))
+            .await
+            .unwrap();
+        store
+            .save_contact(&contact(2, "Stranger", key.bytes.to_vec(), 30))
+            .await
+            .unwrap();
+        store
+            .upsert_profile_key(&Uuid::from_u128(2), key)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO app_meta (key, value) VALUES ('contacts_requested_at', '5')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        migrate(&pool, None).await;
+
+        let names: Vec<String> = store
+            .contacts()
+            .await
+            .unwrap()
+            .map(|contact| contact.unwrap().name)
+            .collect();
+        assert_eq!(names, ["Synced"]);
+        let profile = store.profile(Uuid::from_u128(2), key).await.unwrap();
+        assert_eq!(profile.unwrap().name.unwrap().to_string(), "Stranger");
+        let timers: Vec<(Vec<u8>, u32, u32)> =
+            sqlx::query_as("SELECT peer, timer, version FROM peer_timers ORDER BY peer")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        let peer = |n: u128| Uuid::from_u128(n).as_bytes().to_vec();
+        assert_eq!(timers, [(peer(1), 60, 2), (peer(2), 30, 2)]);
+        let requested: i64 = sqlx::query_scalar("SELECT count(*) FROM app_meta WHERE key = ?")
+            .bind("contacts_requested_at")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(requested, 0);
+        pool.close().await;
+        store.close().await;
     }
 
     #[tokio::test]

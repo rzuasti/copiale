@@ -62,6 +62,7 @@ impl Linker for PresageLinker {
         let store = AppStore::new(
             db.presage_store().clone(),
             db.verified_keys(),
+            db.peer_timers(),
             identity_changes_tx,
         );
         if !store.is_registered().await {
@@ -83,6 +84,7 @@ impl Linker for PresageLinker {
         let store = AppStore::new(
             db.presage_store().clone(),
             db.verified_keys(),
+            db.peer_timers(),
             identity_changes_tx,
         );
         let (url_tx, url_rx) = futures::channel::oneshot::channel();
@@ -508,8 +510,8 @@ impl SignalBackend for PresageBackend {
         .boxed_local()
     }
 
-    /// presage's copy: synced contacts' timers, kept current from their
-    /// messages, and groups' from their state.
+    /// presage's copy: 1:1 timers, kept current from messages and contact
+    /// syncs, and groups' from their state.
     fn expire_timer(
         &mut self,
         destination: Destination,
@@ -1205,7 +1207,12 @@ mod tests {
             .await
             .unwrap();
         let (changes, _) = unbounded_channel();
-        let store = AppStore::new(db.presage_store().clone(), db.verified_keys(), changes);
+        let store = AppStore::new(
+            db.presage_store().clone(),
+            db.verified_keys(),
+            db.peer_timers(),
+            changes,
+        );
         let thread = Thread::Contact(Aci::from(SENDER).into());
 
         store
@@ -1215,6 +1222,47 @@ mod tests {
 
         assert_eq!(store.messages(&thread, ..).await.unwrap().count(), 0);
         assert!(!store.is_registered().await);
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn store_keeps_timers_for_contacts_and_others() {
+        use presage::model::contacts::Contact;
+        use presage::store::{ContentsStore as _, Thread};
+
+        let dir = tempfile::tempdir().unwrap();
+        let key = crate::storage::DatabaseKey::generate();
+        let db = Database::open(&dir.path().join("test.db"), &key)
+            .await
+            .unwrap();
+        let (changes, _) = unbounded_channel();
+        let mut store = AppStore::new(
+            db.presage_store().clone(),
+            db.verified_keys(),
+            db.peer_timers(),
+            changes,
+        );
+        let stranger = Thread::Contact(Aci::from(SENDER).into());
+
+        store.update_expire_timer(&stranger, 60, 2).await.unwrap();
+        store.update_expire_timer(&stranger, 30, 1).await.unwrap();
+
+        assert_eq!(store.expire_timer(&stranger).await.unwrap(), Some((60, 2)));
+        let contact = Contact {
+            uuid: SENDER,
+            phone_number: None,
+            name: "Ali".into(),
+            verified: Default::default(),
+            profile_key: Vec::new(),
+            expire_timer: 300,
+            expire_timer_version: 3,
+            inbox_position: 0,
+            avatar: None,
+        };
+        store.save_contact(&contact).await.unwrap();
+        assert_eq!(store.expire_timer(&stranger).await.unwrap(), Some((300, 3)));
+        let other = Thread::Contact(Aci::from(OTHER).into());
+        assert_eq!(store.expire_timer(&other).await.unwrap(), None);
         db.close().await;
     }
 

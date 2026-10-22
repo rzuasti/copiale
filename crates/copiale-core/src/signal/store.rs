@@ -19,14 +19,16 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use super::protocol::AciStore;
 use crate::model;
-use crate::storage::VerifiedKeys;
+use crate::storage::{PeerTimers, VerifiedKeys};
 
 /// Delegates to [`SqliteStore`], except that [`ContentsStore::save_message`]
-/// stores nothing and the ACI protocol store is an [`AciStore`].
+/// stores nothing, 1:1 timers are [`PeerTimers`], and the ACI protocol
+/// store is an [`AciStore`].
 #[derive(Clone)]
 pub(crate) struct AppStore {
     inner: SqliteStore,
     verified: VerifiedKeys,
+    timers: PeerTimers,
     /// For the ACI protocol store to report identity key changes.
     identity_changes: UnboundedSender<model::ServiceId>,
 }
@@ -35,11 +37,13 @@ impl AppStore {
     pub(crate) fn new(
         inner: SqliteStore,
         verified: VerifiedKeys,
+        timers: PeerTimers,
         identity_changes: UnboundedSender<model::ServiceId>,
     ) -> Self {
         Self {
             inner,
             verified,
+            timers,
             identity_changes,
         }
     }
@@ -182,31 +186,45 @@ impl ContentsStore for AppStore {
         self.inner.messages(thread, range)
     }
 
-    fn expire_timer(
-        &self,
-        thread: &Thread,
-    ) -> impl Future<Output = Result<Option<(u32, u32)>, Error>> {
-        self.inner.expire_timer(thread)
+    async fn expire_timer(&self, thread: &Thread) -> Result<Option<(u32, u32)>, Error> {
+        match thread {
+            Thread::Contact(peer) => Ok(self.timers.get(peer.raw_uuid()).await?),
+            Thread::Group(_) => self.inner.expire_timer(thread).await,
+        }
     }
 
-    fn update_expire_timer(
+    async fn update_expire_timer(
         &mut self,
         thread: &Thread,
         timer: u32,
         version: u32,
-    ) -> impl Future<Output = Result<(), Error>> {
-        self.inner.update_expire_timer(thread, timer, version)
+    ) -> Result<(), Error> {
+        match thread {
+            Thread::Contact(peer) => Ok(self.timers.set(peer.raw_uuid(), timer, version).await?),
+            Thread::Group(_) => self.inner.update_expire_timer(thread, timer, version).await,
+        }
     }
 
     fn clear_contacts(&mut self) -> impl Future<Output = Result<(), Error>> {
         self.inner.clear_contacts()
     }
 
+    /// Also keeps the timer a contact sync carries.
     fn save_contact(
         &mut self,
         contact: &Contact,
     ) -> impl Future<Output = Result<(), Error>> + Send {
-        self.inner.save_contact(contact)
+        let saved = self.inner.save_contact(contact);
+        let timers = self.timers.clone();
+        let (peer, timer, version) = (
+            contact.uuid,
+            contact.expire_timer,
+            contact.expire_timer_version,
+        );
+        async move {
+            saved.await?;
+            Ok(timers.set(peer, timer, version).await?)
+        }
     }
 
     fn contacts(&self) -> impl Future<Output = Result<Self::ContactsIter, Error>> {
@@ -278,7 +296,7 @@ impl ContentsStore for AppStore {
         uuid: Uuid,
         key: ProfileKey,
         profile: Profile,
-    ) -> impl Future<Output = Result<(), Error>> {
+    ) -> impl Future<Output = Result<(), Error>> + Send {
         self.inner.save_profile(uuid, key, profile)
     }
 
@@ -286,7 +304,7 @@ impl ContentsStore for AppStore {
         &self,
         uuid: Uuid,
         key: ProfileKey,
-    ) -> impl Future<Output = Result<Option<Profile>, Error>> {
+    ) -> impl Future<Output = Result<Option<Profile>, Error>> + Send {
         self.inner.profile(uuid, key)
     }
 

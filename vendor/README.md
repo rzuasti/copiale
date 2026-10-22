@@ -72,6 +72,12 @@ libsignal-service git hash back to `nix/package.nix`.
     answers sync requests; a linked one answered a blocked list request
     with an empty list, which could clear the list on the device asking.
     Not upstream yet.
+  - `patches/presage-first-sight-profiles.patch`. Senders with a profile
+    key were saved as contacts named by their profile, mixing strangers
+    into the synced contacts and replacing synced contacts' names. Their
+    profiles are saved instead, once per profile key; 1:1 timers of
+    non-contacts are up to the store (Copiale's `peer_timers`). Not
+    upstream yet.
 - **Used via:** `[patch."https://github.com/whisperfish/presage"]` in the
   root `Cargo.toml`.
 

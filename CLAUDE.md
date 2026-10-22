@@ -69,6 +69,8 @@ went unsolved until 2011.
     text. Blocked accounts and groups are dropped. Accept/block state
     syncs both ways with the phone (`chat_states`); Storage Service is
     read only.
+  - Contacts come only from the phone's contact sync; senders' profiles
+    are kept apart, and only name chats without a contact name.
   - Links: `http(s)://` and `www.` URLs (any case; `www.` over `https`)
     without bidi or invisible characters; a click asks first, showing the
     host in punycode.
