@@ -1,7 +1,11 @@
 //! Contacts synced from the phone, as presage stores them.
+//!
+//! presage also saves every sender with a profile key as a contact, named
+//! by their profile, "on first sight"; those count as unknown here.
 
 use presage::libsignal_service::profile_name::ProfileName;
 use presage::libsignal_service::protocol::{Aci, ServiceId as SignalServiceId};
+use presage::model::contacts::Contact as StoredContact;
 use presage::store::ContentsStore as _;
 
 use super::StorageError;
@@ -21,7 +25,7 @@ impl Database {
     /// Contacts synced from the phone.
     pub(crate) async fn contact_count(&self) -> Result<usize, StorageError> {
         let contacts = self.presage.contacts().await.map_err(presage_error)?;
-        Ok(contacts.count())
+        Ok(contacts.filter_map(Result::ok).filter(synced).count())
     }
 
     /// Contacts with a name or number, by name.
@@ -32,6 +36,7 @@ impl Database {
             .await
             .map_err(presage_error)?
             .filter_map(Result::ok)
+            .filter(synced)
             .collect();
         let mut contacts = Vec::with_capacity(stored.len());
         for contact in stored {
@@ -97,20 +102,32 @@ impl Database {
     }
 }
 
-/// The contact's name, else their profile name from its parts, cleaned;
-/// `None` if unknown or blank.
+/// Whether the phone synced `contact`: those carry no profile key, while
+/// presage's first-sight ones always do.
+pub(crate) fn synced(contact: &StoredContact) -> bool {
+    contact.profile_key.is_empty()
+}
+
+/// The contact's name, else their profile name from its parts, else the
+/// name presage saved on first sight, cleaned; `None` if unknown or blank.
 pub(super) fn display_name(
     contact: Option<String>,
     given_name: Option<String>,
     family_name: Option<String>,
+    first_sight: Option<String>,
 ) -> Option<String> {
-    contact.as_deref().and_then(clean_name).or_else(|| {
+    let profile = || {
         let name = ProfileName {
             given_name: given_name?,
             family_name,
         };
         clean_name(&name.to_string())
-    })
+    };
+    contact
+        .as_deref()
+        .and_then(clean_name)
+        .or_else(profile)
+        .or_else(|| first_sight.as_deref().and_then(clean_name))
 }
 
 fn presage_error(error: impl std::error::Error) -> StorageError {
@@ -121,7 +138,6 @@ fn presage_error(error: impl std::error::Error) -> StorageError {
 mod tests {
     use presage::libsignal_service::Profile;
     use presage::libsignal_service::prelude::{ProfileKey, phonenumber};
-    use presage::model::contacts::Contact as StoredContact;
     use uuid::Uuid;
 
     use super::*;
@@ -141,6 +157,68 @@ mod tests {
             avatar: None,
         };
         db.presage.clone().save_contact(&contact).await.unwrap();
+    }
+
+    /// Saves a contact as presage does on first sight.
+    async fn save_first_sight(db: &Database, n: u128, name: &str) {
+        let contact = StoredContact {
+            uuid: Uuid::from_u128(n),
+            phone_number: None,
+            name: name.into(),
+            verified: Default::default(),
+            profile_key: vec![n as u8; 32],
+            expire_timer: 0,
+            expire_timer_version: 1,
+            inbox_position: 0,
+            avatar: None,
+        };
+        db.presage.clone().save_contact(&contact).await.unwrap();
+    }
+
+    #[test]
+    fn synced_contacts_carry_no_profile_key() {
+        let contact = presage::libsignal_service::models::Contact {
+            uuid: Uuid::from_u128(1),
+            phone_number: None,
+            name: "Alice".into(),
+            expire_timer: 0,
+            expire_timer_version: 1,
+            inbox_position: 0,
+            avatar: None,
+        };
+        assert!(synced(&contact.into()));
+    }
+
+    #[tokio::test]
+    async fn first_sight_contacts_are_not_listed() {
+        let (_dir, db) = db().await;
+        save_first_sight(&db, 1, "Stranger").await;
+        assert!(!db.has_contacts().await.unwrap());
+        assert!(db.contacts().await.unwrap().is_empty());
+
+        save(&db, 2, "Alice", None).await;
+        assert_eq!(db.contact_count().await.unwrap(), 1);
+        let ids: Vec<_> = db.contacts().await.unwrap().iter().map(|c| c.id).collect();
+        assert_eq!(ids, [peer(2)]);
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn first_sight_names_come_after_profile_names() {
+        let (_dir, db) = db().await;
+        let conversations =
+            [incoming(&db, 1).await, incoming(&db, 2).await].map(|message| message.conversation);
+        save_first_sight(&db, 1, "Seen").await;
+        save_first_sight(&db, 2, "Seen").await;
+        save_profile(&db, 2, "Grace", None).await;
+
+        let mut titles = Vec::new();
+        for id in conversations {
+            titles.push(db.conversation(id).await.unwrap().unwrap().title);
+        }
+
+        assert_eq!(titles, [Some("Seen".into()), Some("Grace".into())]);
+        db.close().await;
     }
 
     async fn incoming(db: &Database, n: u128) -> crate::model::Message {

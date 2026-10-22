@@ -47,7 +47,7 @@ use crate::model::{
     Member, MessageBody, Outgoing, Quote, RequestResponse, SafetyNumber, ServiceId, StoredChat,
     StoredIdentity, Timestamp,
 };
-use crate::storage::Database;
+use crate::storage::{Database, synced};
 use crate::text::clean_name;
 
 /// Loads or links the account in the app's database.
@@ -989,21 +989,25 @@ impl ProfileFetches {
     }
 }
 
-/// A member's contact name, else cached profile name, cleaned; blank ones
-/// count as unknown.
+/// A member's synced contact name, else cached profile name, else the name
+/// presage saved on first sight, cleaned; blank ones count as unknown.
 async fn member_name(store: &AppStore, member: &presage::model::groups::Member) -> Option<String> {
     let id: SignalServiceId = member.aci.into();
-    if let Ok(Some(contact)) = store.contact_by_id(&id).await
+    let contact = store.contact_by_id(&id).await.ok().flatten();
+    if let Some(contact) = &contact
+        && synced(contact)
         && let Some(name) = clean_name(&contact.name)
     {
         return Some(name);
     }
-    let profile = store
-        .profile(member.aci.into(), member.profile_key)
-        .await
-        .ok()
-        .flatten()?;
-    clean_name(&profile.name?.to_string())
+    if let Ok(Some(profile)) = store.profile(member.aci.into(), member.profile_key).await
+        && let Some(name) = profile.name.and_then(|name| clean_name(&name.to_string()))
+    {
+        return Some(name);
+    }
+    contact
+        .filter(|contact| !synced(contact))
+        .and_then(|contact| clean_name(&contact.name))
 }
 
 /// How a reply quotes a message; `None` authors are this account.
@@ -1024,6 +1028,8 @@ fn proto_quote(quote: Quote, me: uuid::Uuid) -> data_message::Quote {
 mod tests {
 
     use super::*;
+    use presage::model::contacts::Contact;
+
     use crate::signal::incoming::tests::{OTHER, SENDER, content, server, text};
 
     #[test]
@@ -1225,9 +1231,32 @@ mod tests {
         db.close().await;
     }
 
+    fn stored_contact(name: &str, profile_key: Vec<u8>, timer: u32, version: u32) -> Contact {
+        Contact {
+            uuid: SENDER,
+            phone_number: None,
+            name: name.into(),
+            verified: Default::default(),
+            profile_key,
+            expire_timer: timer,
+            expire_timer_version: version,
+            inbox_position: 0,
+            avatar: None,
+        }
+    }
+
+    async fn app_store(db: &Database) -> AppStore {
+        let (changes, _) = unbounded_channel();
+        AppStore::new(
+            db.presage_store().clone(),
+            db.verified_keys(),
+            db.peer_timers(),
+            changes,
+        )
+    }
+
     #[tokio::test]
     async fn store_keeps_timers_for_contacts_and_others() {
-        use presage::model::contacts::Contact;
         use presage::store::{ContentsStore as _, Thread};
 
         let dir = tempfile::tempdir().unwrap();
@@ -1235,34 +1264,59 @@ mod tests {
         let db = Database::open(&dir.path().join("test.db"), &key)
             .await
             .unwrap();
-        let (changes, _) = unbounded_channel();
-        let mut store = AppStore::new(
-            db.presage_store().clone(),
-            db.verified_keys(),
-            db.peer_timers(),
-            changes,
-        );
+        let mut store = app_store(&db).await;
         let stranger = Thread::Contact(Aci::from(SENDER).into());
 
         store.update_expire_timer(&stranger, 60, 2).await.unwrap();
         store.update_expire_timer(&stranger, 30, 1).await.unwrap();
+        store
+            .save_contact(&stored_contact("Ali", vec![1; 32], 10, 9))
+            .await
+            .unwrap();
 
         assert_eq!(store.expire_timer(&stranger).await.unwrap(), Some((60, 2)));
-        let contact = Contact {
-            uuid: SENDER,
-            phone_number: None,
-            name: "Ali".into(),
-            verified: Default::default(),
-            profile_key: Vec::new(),
-            expire_timer: 300,
-            expire_timer_version: 3,
-            inbox_position: 0,
-            avatar: None,
-        };
-        store.save_contact(&contact).await.unwrap();
+        store
+            .save_contact(&stored_contact("Ali", Vec::new(), 300, 3))
+            .await
+            .unwrap();
         assert_eq!(store.expire_timer(&stranger).await.unwrap(), Some((300, 3)));
         let other = Thread::Contact(Aci::from(OTHER).into());
         assert_eq!(store.expire_timer(&other).await.unwrap(), None);
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn first_sight_contacts_dont_replace_synced_ones() {
+        use presage::store::ContentsStore as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let key = crate::storage::DatabaseKey::generate();
+        let db = Database::open(&dir.path().join("test.db"), &key)
+            .await
+            .unwrap();
+        let mut store = app_store(&db).await;
+        let id = Aci::from(SENDER).into();
+        let name = async |store: &AppStore| store.contact_by_id(&id).await.unwrap().unwrap().name;
+
+        store
+            .save_contact(&stored_contact("Seen", vec![1; 32], 0, 1))
+            .await
+            .unwrap();
+        store
+            .save_contact(&stored_contact("Seen again", vec![2; 32], 0, 1))
+            .await
+            .unwrap();
+        assert_eq!(name(&store).await, "Seen again");
+
+        store
+            .save_contact(&stored_contact("Alice", Vec::new(), 0, 1))
+            .await
+            .unwrap();
+        store
+            .save_contact(&stored_contact("Mallory", vec![3; 32], 0, 1))
+            .await
+            .unwrap();
+        assert_eq!(name(&store).await, "Alice");
         db.close().await;
     }
 

@@ -22,6 +22,7 @@ mod timers;
 
 use std::path::{Path, PathBuf};
 
+pub(crate) use contacts::synced;
 pub use database::Database;
 pub(crate) use identities::VerifiedKeys;
 pub use key::{DatabaseKey, KdfParams, Passphrase};

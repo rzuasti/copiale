@@ -8,7 +8,7 @@ use presage::AvatarBytes;
 use presage::libsignal_service::Profile;
 use presage::libsignal_service::libsignal_account_keys::AccountEntropyPool;
 use presage::libsignal_service::prelude::{Content, MasterKey, ProfileKey, Uuid};
-use presage::libsignal_service::protocol::{IdentityKeyPair, SenderCertificate, ServiceId};
+use presage::libsignal_service::protocol::{Aci, IdentityKeyPair, SenderCertificate, ServiceId};
 use presage::libsignal_service::zkgroup::GroupMasterKeyBytes;
 use presage::manager::RegistrationData;
 use presage::model::contacts::Contact;
@@ -19,11 +19,11 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use super::protocol::AciStore;
 use crate::model;
-use crate::storage::{PeerTimers, VerifiedKeys};
+use crate::storage::{PeerTimers, VerifiedKeys, synced};
 
 /// Delegates to [`SqliteStore`], except that [`ContentsStore::save_message`]
-/// stores nothing, 1:1 timers are [`PeerTimers`], and the ACI protocol
-/// store is an [`AciStore`].
+/// stores nothing, first-sight contacts don't replace synced ones, 1:1
+/// timers are [`PeerTimers`], and the ACI protocol store is an [`AciStore`].
 #[derive(Clone)]
 pub(crate) struct AppStore {
     inner: SqliteStore,
@@ -209,22 +209,27 @@ impl ContentsStore for AppStore {
         self.inner.clear_contacts()
     }
 
-    /// Also keeps the timer a contact sync carries.
-    fn save_contact(
-        &mut self,
-        contact: &Contact,
-    ) -> impl Future<Output = Result<(), Error>> + Send {
-        let saved = self.inner.save_contact(contact);
-        let timers = self.timers.clone();
-        let (peer, timer, version) = (
-            contact.uuid,
-            contact.expire_timer,
-            contact.expire_timer_version,
-        );
-        async move {
-            saved.await?;
-            Ok(timers.set(peer, timer, version).await?)
+    /// Keeps a synced contact over one presage saves on first sight, and
+    /// the timer a contact sync carries.
+    async fn save_contact(&mut self, contact: &Contact) -> Result<(), Error> {
+        let peer = Aci::from(contact.uuid).into();
+        if !synced(contact)
+            && let Some(stored) = self.inner.contact_by_id(&peer).await?
+            && synced(&stored)
+        {
+            return Ok(());
         }
+        self.inner.save_contact(contact).await?;
+        if synced(contact) {
+            self.timers
+                .set(
+                    contact.uuid,
+                    contact.expire_timer,
+                    contact.expire_timer_version,
+                )
+                .await?;
+        }
+        Ok(())
     }
 
     fn contacts(&self) -> impl Future<Output = Result<Self::ContactsIter, Error>> {
@@ -296,7 +301,7 @@ impl ContentsStore for AppStore {
         uuid: Uuid,
         key: ProfileKey,
         profile: Profile,
-    ) -> impl Future<Output = Result<(), Error>> + Send {
+    ) -> impl Future<Output = Result<(), Error>> {
         self.inner.save_profile(uuid, key, profile)
     }
 
@@ -304,7 +309,7 @@ impl ContentsStore for AppStore {
         &self,
         uuid: Uuid,
         key: ProfileKey,
-    ) -> impl Future<Output = Result<Option<Profile>, Error>> + Send {
+    ) -> impl Future<Output = Result<Option<Profile>, Error>> {
         self.inner.profile(uuid, key)
     }
 

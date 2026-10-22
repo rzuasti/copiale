@@ -25,7 +25,9 @@ macro_rules! summary_query {
                 (SELECT count(*) FROM messages u WHERE u.conversation_id = c.id AND u.read = 0)
                     AS unread,
                 m.outgoing, m.body, m.content,
-                ct.name AS contact_name, p.given_name, p.family_name,
+                CASE WHEN length(ct.profile_key) = 0 THEN ct.name END AS contact_name,
+                p.given_name, p.family_name,
+                CASE WHEN length(ct.profile_key) > 0 THEN ct.name END AS first_sight_name,
                 CASE
                     WHEN coalesce(s.blocked, 0) THEN 'blocked'
                     WHEN coalesce(s.accepted, 0) OR NOT EXISTS (
@@ -70,6 +72,7 @@ struct SummaryRow {
     contact_name: Option<String>,
     given_name: Option<String>,
     family_name: Option<String>,
+    first_sight_name: Option<String>,
     state: String,
 }
 
@@ -580,7 +583,12 @@ fn summary(row: SummaryRow, members: Vec<Member>) -> Result<ConversationSummary,
     let (peer, title, members) = match (row.peer, row.group_id) {
         (Some(peer), _) => {
             let peer = service_id(&peer)?;
-            let title = display_name(row.contact_name, row.given_name, row.family_name);
+            let title = display_name(
+                row.contact_name,
+                row.given_name,
+                row.family_name,
+                row.first_sight_name,
+            );
             (Peer::Contact(peer), title, Vec::new())
         }
         (None, Some(group_id)) => {

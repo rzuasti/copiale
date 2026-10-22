@@ -301,14 +301,14 @@ pub trait ContentsStore: Send + Sync {
         uuid: Uuid,
         key: ProfileKey,
         profile: Profile,
-    ) -> impl Future<Output = Result<(), Self::ContentsStoreError>> + Send;
+    ) -> impl Future<Output = Result<(), Self::ContentsStoreError>>;
 
     /// Retrieve a profile by [Uuid] and [ProfileKey].
     fn profile(
         &self,
         uuid: Uuid,
         key: ProfileKey,
-    ) -> impl Future<Output = Result<Option<Profile>, Self::ContentsStoreError>> + Send;
+    ) -> impl Future<Output = Result<Option<Profile>, Self::ContentsStoreError>>;
 
     /// Save a profile avatar by [Uuid] and [ProfileKey].
     fn save_profile_avatar(

@@ -25,6 +25,7 @@ use libsignal_service::{
             self, sticker_pack_operation, Content as SyncContent, StickerPackOperation,
         },
         AttachmentPointer, DataMessage, EditMessage, GroupContextV2, NullMessage, SyncMessage,
+        Verified,
     },
     protocol::{
         Aci, DecryptionErrorMessage, DeviceId, IdentityKeyStore, SenderCertificate, ServiceId,
@@ -58,6 +59,7 @@ use tokio::sync::Mutex;
 use tracing::{debug, error, info, trace, warn};
 use url::Url;
 
+use crate::model::contacts::Contact;
 use crate::model::messages::SentContent;
 use crate::serde::serde_profile_key;
 use crate::store::{ContentsStore, Sticker, StickerPack, StickerPackManifest, Store, Thread};
@@ -2045,16 +2047,25 @@ async fn save_message<S: Store>(
                 let profile_key = ProfileKey::create(profile_key_bytes);
                 debug!(sender = %sender.service_id_string(), "inserting profile key for");
 
-                // Fetch and store the profile if not stored for this key yet.
-                // Contacts come only from the primary device's contact sync.
+                // Either:
+                // - insert a new contact with the profile information
+                // - update the contact if the profile key has changed
+                // TODO: mark this contact as "created by us" maybe to know whether we should update it or not
                 // NOTE: this needs to happen in the background!
                 let store_inner = store.clone();
                 let websocket_inner = identified_websocket.clone();
+                let data_message_inner = data_message.clone();
                 tokio::spawn(async move {
-                    if let Err(error) =
-                        upsert_profile(store_inner, websocket_inner, sender, profile_key).await
+                    if let Err(error) = upsert_contact_from_profile(
+                        store_inner,
+                        websocket_inner,
+                        &data_message_inner,
+                        sender,
+                        profile_key,
+                    )
+                    .await
                     {
-                        error!(%error, "failed to upsert newly seen profile!");
+                        error!(%error, "failed to upsert newly seen contact!");
                     }
                 });
             }
@@ -2189,30 +2200,56 @@ async fn save_message<S: Store>(
     Ok(())
 }
 
-async fn upsert_profile<S: Store>(
+async fn upsert_contact_from_profile<S: Store>(
     mut store: S,
     mut identified_websocket: SignalWebSocket<websocket::Identified>,
+    data_message: &DataMessage,
     sender: ServiceId,
     profile_key: ProfileKey,
 ) -> Result<(), Error<<S as Store>::Error>> {
-    let Some(aci) = sender.aci() else {
-        debug!("not storing profile for PNI sender");
-        return Ok(());
-    };
-    let sender_uuid: Uuid = aci.into();
-    if store.profile(sender_uuid, profile_key).await?.is_some() {
-        return Ok(());
-    }
-    let encrypted_profile = identified_websocket
-        .retrieve_profile_by_id(aci, Some(profile_key))
-        .await?;
-    let profile_cipher = ProfileCipher::new(profile_key);
-    let decrypted_profile = profile_cipher.decrypt(encrypted_profile)?;
+    if store.contact_by_id(&sender).await?.is_none()
+        || store
+            .profile_key(&sender)
+            .await?
+            .is_none_or(|p| p.bytes != profile_key.bytes)
+    {
+        if let Some(aci) = sender.aci() {
+            let sender_uuid: Uuid = aci.into();
+            let encrypted_profile = identified_websocket
+                .retrieve_profile_by_id(aci, Some(profile_key))
+                .await?;
+            let profile_cipher = ProfileCipher::new(profile_key);
+            let decrypted_profile = profile_cipher.decrypt(encrypted_profile)?;
 
-    info!(%sender_uuid, "saved profile on first sight");
-    store
-        .save_profile(sender_uuid, profile_key, decrypted_profile)
-        .await?;
+            let contact = Contact {
+                uuid: sender_uuid,
+                phone_number: None,
+                name: decrypted_profile
+                    .name
+                    // FIXME: this assumes [firstname] [lastname]
+                    .map(|pn| {
+                        if let Some(family_name) = pn.family_name {
+                            format!("{} {}", pn.given_name, family_name)
+                        } else {
+                            pn.given_name
+                        }
+                    })
+                    .unwrap_or_default(),
+                profile_key: profile_key.bytes.to_vec(),
+                expire_timer: data_message.expire_timer.unwrap_or_default(),
+                expire_timer_version: data_message.expire_timer_version.unwrap_or(1),
+                inbox_position: 0,
+                avatar: None,
+                verified: Verified::default(),
+            };
+
+            info!(%sender_uuid, "saved contact on first sight");
+            store.save_contact(&contact).await?;
+            store.upsert_profile_key(&sender_uuid, profile_key).await?;
+        } else {
+            debug!("not storing profile for PNI contact");
+        }
+    }
     Ok(())
 }
 
