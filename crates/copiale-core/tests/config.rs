@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use copiale_core::config::{
     Config, ConfigError, ConfigEvent, ConfigFile, ConfigSync, Density, Loaded, MessageStyle,
-    NotificationContent, Setting, ThemeMode, TimeFormat, TimestampVisibility,
+    NotificationContent, Setting, ThemeName, TimeFormat, TimestampVisibility,
 };
 
 /// Generous: file watching on a loaded machine can be slow.
@@ -27,12 +27,15 @@ fn missing_file_means_defaults() {
 fn write_creates_file_and_reads_back() {
     let (_dir, file) = config_file();
 
-    file.write(&[Setting::Theme(ThemeMode::Dark), Setting::FontSize(16)])
-        .unwrap();
+    file.write(&[
+        Setting::Theme(ThemeName::CopialeDark),
+        Setting::FontSize(16),
+    ])
+    .unwrap();
 
     let loaded = file.load();
     assert_eq!(loaded.warnings, vec![]);
-    assert_eq!(loaded.config.appearance.theme, ThemeMode::Dark);
+    assert_eq!(loaded.config.appearance.theme, ThemeName::CopialeDark);
     assert_eq!(loaded.config.typography.size, 16);
 }
 
@@ -40,7 +43,7 @@ fn write_creates_file_and_reads_back() {
 fn set_matches_writing_and_reloading() {
     let (_dir, file) = config_file();
     let settings = [
-        Setting::Theme(ThemeMode::Light),
+        Setting::Theme(ThemeName::CopialeLight),
         Setting::UiFont(Some("Inter".into())),
         Setting::MonoFont(Some(String::new())),
         Setting::BodyFont(None),
@@ -161,7 +164,7 @@ fn sync_reports_external_edits() {
     std::fs::write(file.path(), "[appearance]\ntheme = \"light\"\n").unwrap();
 
     let (loaded, saved) = changed(&rx);
-    assert_eq!(loaded.config.appearance.theme, ThemeMode::Light);
+    assert_eq!(loaded.config.appearance.theme, ThemeName::CopialeLight);
     assert_eq!(saved, 0);
 }
 

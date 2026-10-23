@@ -1,0 +1,30 @@
+# Rosé Pine, after rosepinetheme.com. Tokens are described in dark.toml.
+# Nudged for contrast: text_muted, nicks.
+name = "Rosé Pine"
+appearance = "dark"
+
+[colors]
+background = "#191724"
+sidebar = "#1f1d2e"
+surface = "#26233a"
+border = "#403d52"
+text = "#e0def4"
+text_secondary = "#908caa"
+text_muted = "#8985a1"
+accent = "#ebbcba"
+accent_text = "#191724"
+action = "#f6c177"
+success = "#9ccfd8"
+danger = "#eb6f92"
+link = "#c4a7e7"
+selection = "#ebbcba4c"
+nicks = [
+    "#f6c177",
+    "#ebbcba",
+    "#9ccfd8",
+    "#5093b7",
+    "#c4a7e7",
+    "#eb6f92",
+    "#908caa",
+    "#dfdcf3",
+]

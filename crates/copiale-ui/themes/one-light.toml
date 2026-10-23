@@ -1,0 +1,30 @@
+# One Light, after github.com/atom/one-light-syntax. Tokens are described in dark.toml.
+# Nudged for contrast: text_secondary, text_muted, accent, action, danger, link, nicks.
+name = "One Light"
+appearance = "light"
+
+[colors]
+background = "#fafafa"
+sidebar = "#eaeaeb"
+surface = "#e5e5e6"
+border = "#dbdbdc"
+text = "#383a42"
+text_secondary = "#626570"
+text_muted = "#67686e"
+accent = "#2269f2"
+accent_text = "#fafafa"
+action = "#845e01"
+success = "#50a14f"
+danger = "#dc281b"
+link = "#017aa8"
+selection = "#2269f24c"
+nicks = [
+    "#845e01",
+    "#816001",
+    "#297428",
+    "#016c92",
+    "#0d59e7",
+    "#a626a4",
+    "#c2281b",
+    "#c81242",
+]

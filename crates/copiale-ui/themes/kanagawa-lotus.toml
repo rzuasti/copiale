@@ -1,0 +1,30 @@
+# Kanagawa Lotus, after github.com/rebelot/kanagawa.nvim. Tokens are described in dark.toml.
+# Nudged for contrast: text, text_muted, accent, action, danger, link, nicks.
+name = "Kanagawa Lotus"
+appearance = "light"
+
+[colors]
+background = "#f2ecbc"
+sidebar = "#e5ddb0"
+surface = "#e7dba0"
+border = "#e4d794"
+text = "#424252"
+text_secondary = "#43436c"
+text_muted = "#616057"
+accent = "#4c689a"
+accent_text = "#f2ecbc"
+action = "#8e4e00"
+success = "#6f894e"
+danger = "#bb3748"
+link = "#3e6b97"
+selection = "#4c689a4c"
+nicks = [
+    "#8c4d00",
+    "#645e2c",
+    "#4b652a",
+    "#41635d",
+    "#415d8f",
+    "#624c83",
+    "#973f5d",
+    "#a5363d",
+]

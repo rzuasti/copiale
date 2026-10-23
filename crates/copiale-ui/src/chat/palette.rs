@@ -3,7 +3,6 @@
 
 use std::ops::Range;
 
-use copiale_core::config::ThemeMode;
 use copiale_core::{ConversationId, ServiceId};
 
 use crate::fuzzy::fuzzy_match;
@@ -25,17 +24,16 @@ pub enum PaletteAction {
     DeleteRequest(ConversationId),
     NewChat,
     Settings,
-    Theme(ThemeMode),
+    /// Opens the theme picker.
+    Theme,
     Quit,
 }
 
 /// Commands, in the order they list after chats.
-const COMMANDS: [(PaletteAction, &str); 6] = [
+const COMMANDS: [(PaletteAction, &str); 4] = [
     (PaletteAction::NewChat, "New chat"),
     (PaletteAction::Settings, "Settings"),
-    (PaletteAction::Theme(ThemeMode::System), "Theme: system"),
-    (PaletteAction::Theme(ThemeMode::Dark), "Theme: dark"),
-    (PaletteAction::Theme(ThemeMode::Light), "Theme: light"),
+    (PaletteAction::Theme, "Theme…"),
     (PaletteAction::Quit, "Quit"),
 ];
 
@@ -110,17 +108,7 @@ mod tests {
         assert_eq!(
             labels(&entries),
             [
-                "Alice",
-                "Bob",
-                "C",
-                "D",
-                "E",
-                "New chat",
-                "Settings",
-                "Theme: system",
-                "Theme: dark",
-                "Theme: light",
-                "Quit",
+                "Alice", "Bob", "C", "D", "E", "New chat", "Settings", "Theme…", "Quit",
             ]
         );
         assert_eq!(
@@ -132,10 +120,7 @@ mod tests {
     #[test]
     fn query_ranks_chats_and_commands_together() {
         let entries = entries(chats(&["Bob", "Theo"]), [], "the");
-        assert_eq!(
-            labels(&entries),
-            ["Theo", "Theme: system", "Theme: dark", "Theme: light"]
-        );
+        assert_eq!(labels(&entries), ["Theo", "Theme…"]);
         assert_eq!(entries[0].highlights, vec![0..3]);
 
         let entries = super::entries(chats(&["Bob", "Quinn"]), [], "q");

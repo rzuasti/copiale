@@ -23,7 +23,9 @@ Scope, UI design, architecture and work items for the first usable release.
   placeholder line, e.g. `[image] open on your phone`, above any caption.
 - Group and timer changes: system lines, e.g. `-- alice added bob · 10:04`.
 - Dark and light themes: follow the system by default (dark without a
-  system preference), overridable in settings.
+  system preference), overridable in settings with a built-in theme
+  (Catppuccin, Dracula, Everforest, Gruvbox, Kanagawa, Nord, One, Rosé Pine,
+  Solarized, Tokyo Night), or a custom one in `config.toml`.
 - Notifications showing the sender name only by default; message content is
   opt-in.
 - Runs in the background when the window is closed, with a tray icon.
@@ -35,7 +37,7 @@ Scope, UI design, architecture and work items for the first usable release.
   notes.
 - Message history transfer: chats start empty at link time.
 - Group creation and management.
-- Custom themes, base16 import, accent override.
+- Base16 import, accent override.
 - Global hotkey, notification quick reply.
 - Multiple accounts.
 - CI.
@@ -122,8 +124,7 @@ Scope, UI design, architecture and work items for the first usable release.
   (native on macOS; off with reduced motion).
 - `Ctrl/⌘+K` command palette, over the window like the contact picker:
   fuzzy search over other chats (most recent first, at most 5) and commands
-  with their keys: new chat, settings, theme (`system`, `dark`, `light`;
-  saved to `config.toml`), quit. `Ctrl/⌘+K` again, `Esc` or a click outside
+  with their keys: new chat, settings, theme (opens the theme picker), quit. `Ctrl/⌘+K` again, `Esc` or a click outside
   closes it. One overlay shows at a time.
 - In search, `↑`/`↓` move the highlight and `Enter` opens the chat.
 - Other default bindings:
@@ -217,7 +218,16 @@ the source of truth (`copiale_core::config`).
 
 ```toml
 [appearance]
-theme = "system"          # system | dark | light
+theme = "system"          # system | copiale-dark | copiale-light | nord | …
+                          # | custom (reads [theme])
+
+# Only for theme = "custom": every token of a theme file, no name; see
+# crates/copiale-ui/themes/dark.toml. Unusable: the system theme.
+# [theme]
+# appearance = "dark"
+# [theme.colors]
+# background = "#16181d"
+# …
 
 [typography]
 # ui_font, mono_font, body_font: font names; unset = built-in default
@@ -406,8 +416,8 @@ crates/
 
 - GPUI with GPUI Kit.
 - Views are thin; state and logic live in view models covered by tests.
-- Theme tokens loaded from built-in dark/light TOML; system appearance
-  observed live.
+- Theme tokens loaded from built-in TOML themes or `[theme]`; system
+  appearance observed live.
 
 ## Risks to verify early
 

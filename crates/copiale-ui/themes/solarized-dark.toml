@@ -1,0 +1,30 @@
+# Solarized Dark, after ethanschoonover.com/solarized. Tokens are described in dark.toml.
+# Nudged for contrast: text, text_secondary, text_muted, accent, action, danger, nicks.
+name = "Solarized Dark"
+appearance = "dark"
+
+[colors]
+background = "#002b36"
+sidebar = "#00212b"
+surface = "#073642"
+border = "#0b4352"
+text = "#a8b6b6"
+text_secondary = "#859698"
+text_muted = "#7d939a"
+accent = "#3395d9"
+accent_text = "#002b36"
+action = "#c19500"
+success = "#859900"
+danger = "#dc6e6b"
+link = "#2aa198"
+selection = "#3395d94c"
+nicks = [
+    "#e96f40",
+    "#b98d00",
+    "#899d00",
+    "#2aa39a",
+    "#3d9ad9",
+    "#8c8dd9",
+    "#d376a2",
+    "#dc7673",
+]

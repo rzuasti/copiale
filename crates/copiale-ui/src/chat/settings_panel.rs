@@ -5,12 +5,13 @@ use std::ops::Range;
 
 use copiale_core::Account;
 use copiale_core::config::{
-    Choice, Config, Density, MessageStyle, NotificationContent, Setting, ThemeMode, TimeFormat,
+    Choice, Config, Density, MessageStyle, NotificationContent, Setting, ThemeName, TimeFormat,
     TimestampVisibility, Typography, WindowConfig,
 };
 
 use crate::capture;
 use crate::fuzzy::fuzzy_match;
+use crate::theme::{self, Theme};
 
 /// Most fonts the font picker lists.
 pub const MAX_FONTS: usize = 8;
@@ -101,8 +102,8 @@ pub enum Value {
     },
     Number(String),
     Toggle(bool),
-    /// `None`: the built-in default.
-    Font(Option<String>),
+    /// Picked from a list; `None`: the built-in default.
+    Pick(Option<String>),
     /// Read-only: set on the phone.
     Info(String),
     /// Something `Enter` does, not a value.
@@ -113,10 +114,17 @@ pub enum Value {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Activation {
     Change(Setting),
-    PickFont(FontRole),
+    Pick(Picking),
     /// Ask before unlinking and wiping.
     ConfirmUnlink,
     Nothing,
+}
+
+/// What a picker picks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Picking {
+    Font(FontRole),
+    Theme,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -210,7 +218,18 @@ impl Field {
             Self::CaptureProtection => Some(capture::unsupported_hint()),
             Self::Avatars => Some("in the chat list"),
             Self::Emoticons => Some(":) becomes 🙂 as you type"),
+            Self::Theme => Some("custom ones in the config file"),
             Self::Unlink => Some("deletes messages on this device"),
+            _ => None,
+        }
+    }
+
+    /// Why the row's value isn't in effect, if it isn't.
+    pub fn problem(self, config: &Config) -> Option<String> {
+        match (self, config.appearance.theme) {
+            (Self::Theme, ThemeName::Custom) => Theme::custom(config)
+                .err()
+                .map(|error| format!("{error}; using system")),
             _ => None,
         }
     }
@@ -227,10 +246,10 @@ impl Field {
             })
         };
         match self {
-            Self::Theme => choice(config.appearance.theme),
-            Self::UiFont => Value::Font(typography.ui_font.clone()),
-            Self::MonoFont => Value::Font(typography.mono_font.clone()),
-            Self::BodyFont => Value::Font(typography.body_font.clone()),
+            Self::Theme => Value::Pick(Some(theme::label(config.appearance.theme).into())),
+            Self::UiFont => Value::Pick(typography.ui_font.clone()),
+            Self::MonoFont => Value::Pick(typography.mono_font.clone()),
+            Self::BodyFont => Value::Pick(typography.body_font.clone()),
             Self::FontSize => Value::Number(format!("{} px", typography.size)),
             Self::LineHeight => Value::Number(format!("{:.1}", typography.line_height)),
             Self::Density => choice(layout.density),
@@ -267,7 +286,11 @@ impl Field {
         let layout = &config.layout;
         let window = &config.window;
         let setting = match self {
-            Self::Theme => Setting::Theme(nudge(config.appearance.theme, step)?),
+            Self::Theme => {
+                let themes = theme::listed();
+                let ix = themes.iter().position(|t| *t == config.appearance.theme)?;
+                Setting::Theme(*themes.get(ix.checked_add_signed(step as isize)?)?)
+            }
             Self::FontSize => {
                 let size = typography.size.checked_add_signed(step)?;
                 Typography::SIZE_RANGE
@@ -310,13 +333,13 @@ impl Field {
         Some(setting)
     }
 
-    /// `Enter`: toggles, cycles choices, or opens the font picker.
+    /// `Enter`: toggles, cycles choices, or opens a picker.
     pub fn activate(self, config: &Config) -> Activation {
         match self {
-            Self::UiFont => Activation::PickFont(FontRole::Ui),
-            Self::MonoFont => Activation::PickFont(FontRole::Mono),
-            Self::BodyFont => Activation::PickFont(FontRole::Body),
-            Self::Theme => Activation::Change(Setting::Theme(cycle(config.appearance.theme))),
+            Self::UiFont => Activation::Pick(Picking::Font(FontRole::Ui)),
+            Self::MonoFont => Activation::Pick(Picking::Font(FontRole::Mono)),
+            Self::BodyFont => Activation::Pick(Picking::Font(FontRole::Body)),
+            Self::Theme => Activation::Pick(Picking::Theme),
             Self::Density => Activation::Change(Setting::Density(cycle(config.layout.density))),
             Self::MessageStyle => {
                 Activation::Change(Setting::MessageStyle(cycle(config.layout.message_style)))
@@ -339,7 +362,6 @@ impl Field {
     /// The setting picking option `ix` of a choice makes.
     pub fn choose(self, ix: usize) -> Option<Setting> {
         Some(match self {
-            Self::Theme => Setting::Theme(nth::<ThemeMode>(ix)?),
             Self::Density => Setting::Density(nth::<Density>(ix)?),
             Self::MessageStyle => Setting::MessageStyle(nth::<MessageStyle>(ix)?),
             Self::Timestamps => Setting::Timestamps(nth::<TimestampVisibility>(ix)?),
@@ -386,31 +408,30 @@ fn within(value: f64, range: &std::ops::RangeInclusive<f64>) -> bool {
     value > range.start() - 1e-9 && value < range.end() + 1e-9
 }
 
-/// The list's query and highlighted row, and the font picker over it.
+/// The list's query and highlighted row, and the picker over it.
 #[derive(Debug, Default)]
 pub struct SettingsPanel {
     query: String,
     selected: usize,
-    fonts: Option<FontPicker>,
+    picker: Option<SettingPicker>,
     /// Asking whether to unlink and wipe.
     confirming_unlink: bool,
 }
 
-/// Picks a font for one role, previewing as it goes.
+/// Picks a font or theme, previewing as it goes.
 #[derive(Debug)]
-pub struct FontPicker {
-    pub role: FontRole,
-    /// The font before picking, restored on cancel.
-    pub original: Option<String>,
+pub struct SettingPicker {
+    pub picking: Picking,
+    /// The setting before picking, restored on cancel.
+    pub original: Setting,
     query: String,
     selected: usize,
 }
 
-/// A font picker entry.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FontEntry {
-    /// `None`: the built-in default.
-    pub font: Option<String>,
+/// A picker entry.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PickerEntry {
+    pub setting: Setting,
     pub label: String,
     pub highlights: Vec<Range<usize>>,
 }
@@ -457,11 +478,15 @@ impl SettingsPanel {
             .min(count.saturating_sub(1));
     }
 
-    /// Opens the font picker on the current font for `role`.
-    pub fn pick_font(&mut self, role: FontRole, config: &Config) {
-        self.fonts = Some(FontPicker {
-            role,
-            original: role.current(config),
+    /// Opens the picker on the current value.
+    pub fn pick(&mut self, picking: Picking, config: &Config) {
+        let original = match picking {
+            Picking::Font(role) => role.setting(role.current(config)),
+            Picking::Theme => Setting::Theme(config.appearance.theme),
+        };
+        self.picker = Some(SettingPicker {
+            picking,
+            original,
             query: String::new(),
             selected: 0,
         });
@@ -479,52 +504,67 @@ impl SettingsPanel {
         self.confirming_unlink
     }
 
-    pub fn font_picker(&self) -> Option<&FontPicker> {
-        self.fonts.as_ref()
+    pub fn picker(&self) -> Option<&SettingPicker> {
+        self.picker.as_ref()
     }
 
-    pub fn font_picker_mut(&mut self) -> Option<&mut FontPicker> {
-        self.fonts.as_mut()
+    pub fn picker_mut(&mut self) -> Option<&mut SettingPicker> {
+        self.picker.as_mut()
     }
 
-    /// Closes the font picker; the setting restoring its original font,
-    /// unless `keep`.
-    pub fn close_font_picker(&mut self, keep: bool) -> Option<Setting> {
-        let picker = self.fonts.take()?;
-        (!keep).then(|| picker.role.setting(picker.original))
+    /// Closes the picker; the setting restoring its original value, unless
+    /// `keep`.
+    pub fn close_picker(&mut self, keep: bool) -> Option<Setting> {
+        let picker = self.picker.take()?;
+        (!keep).then_some(picker.original)
     }
 }
 
-impl FontPicker {
+impl SettingPicker {
     pub fn set_query(&mut self, query: &str) {
         self.query = query.to_owned();
         self.selected = 0;
     }
 
-    /// The default, then `installed` fonts matching the query, best first.
-    pub fn entries(&self, installed: &[String]) -> Vec<FontEntry> {
-        let default = fuzzy_match(&self.query, "Default").map(|m| FontEntry {
-            font: None,
-            label: "Default".into(),
-            highlights: m.ranges,
-        });
-        let mut matched: Vec<_> = installed
-            .iter()
-            .filter_map(|font| Some((fuzzy_match(&self.query, font)?, font)))
-            .collect();
-        matched.sort_by_key(|(m, _)| -m.score);
-        default
-            .into_iter()
-            .chain(
-                matched
+    /// Fonts: the default, then `installed` fonts matching the query, best
+    /// first. Themes: all but custom, matching the query, best first.
+    pub fn entries(&self, installed: &[String]) -> Vec<PickerEntry> {
+        let (first, rest, max) = match self.picking {
+            Picking::Font(role) => (
+                Some((role.setting(None), "Default".to_owned())),
+                installed
+                    .iter()
+                    .map(|font| (role.setting(Some(font.clone())), font.clone()))
+                    .collect(),
+                MAX_FONTS,
+            ),
+            Picking::Theme => (
+                None,
+                theme::listed()
                     .into_iter()
-                    .take(MAX_FONTS)
-                    .map(|(m, font)| FontEntry {
-                        font: Some(font.clone()),
-                        label: font.clone(),
-                        highlights: m.ranges,
-                    }),
-            )
+                    .map(|name| (Setting::Theme(name), theme::label(name).to_owned()))
+                    .collect::<Vec<_>>(),
+                usize::MAX,
+            ),
+        };
+        let entry = |(setting, label): (Setting, String)| {
+            let m = fuzzy_match(&self.query, &label)?;
+            Some((
+                m.score,
+                PickerEntry {
+                    setting,
+                    label,
+                    highlights: m.ranges,
+                },
+            ))
+        };
+        let mut matched: Vec<_> = rest.into_iter().filter_map(entry).collect();
+        matched.sort_by_key(|(score, _)| -score);
+        first
+            .and_then(entry)
+            .into_iter()
+            .chain(matched.into_iter().take(max))
+            .map(|(_, entry)| entry)
             .collect()
     }
 
@@ -542,12 +582,6 @@ impl FontPicker {
 
     pub fn select(&mut self, ix: usize) {
         self.selected = ix;
-    }
-
-    /// The setting for entry `ix` of `entries`.
-    pub fn setting(&self, entries: &[FontEntry], ix: usize) -> Option<Setting> {
-        let entry = entries.get(ix)?;
-        Some(self.role.setting(entry.font.clone()))
     }
 }
 
@@ -575,9 +609,13 @@ mod tests {
         settings.extend((0..).map_while(|ix| field.choose(ix)));
         match field.activate(config) {
             Activation::Change(setting) => settings.push(setting),
-            Activation::PickFont(role) => {
+            Activation::Pick(Picking::Font(role)) => {
                 settings.push(role.setting(Some("Inter".into())));
                 settings.push(role.setting(None));
+            }
+            Activation::Pick(Picking::Theme) => {
+                settings.extend(theme::listed().into_iter().map(Setting::Theme));
+                settings.push(Setting::Theme(ThemeName::Custom));
             }
             Activation::ConfirmUnlink | Activation::Nothing => {}
         }
@@ -656,22 +694,57 @@ mod tests {
     }
 
     #[test]
-    fn choices_step_to_the_ends_and_cycle_on_enter() {
+    fn themes_step_through_the_list_and_pick_on_enter() {
         let mut config = Config::default();
         assert_eq!(
             Field::Theme.value(&config, None),
-            Value::Choice {
-                options: vec!["system", "dark", "light"],
-                selected: 0,
-            }
+            Value::Pick(Some("System".into()))
         );
         assert_eq!(Field::Theme.step(&config, -1), None);
         stepped(&mut config, Field::Theme, 2);
-        assert_eq!(config.appearance.theme, ThemeMode::Light);
+        assert_eq!(config.appearance.theme, ThemeName::CopialeLight);
+        assert_eq!(
+            Field::Theme.value(&config, None),
+            Value::Pick(Some("Copiale Light".into()))
+        );
+        config.appearance.theme = *theme::listed().last().unwrap();
         assert_eq!(Field::Theme.step(&config, 1), None);
         assert_eq!(
             Field::Theme.activate(&config),
-            Activation::Change(Setting::Theme(ThemeMode::System))
+            Activation::Pick(Picking::Theme)
+        );
+        assert_eq!(Field::Theme.choose(0), None);
+        // Custom is set in the file only.
+        config.appearance.theme = ThemeName::Custom;
+        assert_eq!(Field::Theme.step(&config, 1), None);
+        assert_eq!(Field::Theme.step(&config, -1), None);
+    }
+
+    #[test]
+    fn unusable_custom_theme_is_a_problem() {
+        let mut config = Config::default();
+        assert_eq!(Field::Theme.problem(&config), None);
+        config.appearance.theme = ThemeName::Custom;
+        assert_eq!(
+            Field::Theme.problem(&config).as_deref(),
+            Some("no [theme] table in the config file; using system")
+        );
+        assert_eq!(
+            Field::Theme.value(&config, None),
+            Value::Pick(Some("Custom".into()))
+        );
+        assert_eq!(Field::Density.problem(&config), None);
+    }
+
+    #[test]
+    fn choices_step_to_the_ends_and_cycle_on_enter() {
+        let mut config = Config::default();
+        assert_eq!(Field::Density.step(&config, 2), None);
+        stepped(&mut config, Field::Density, 1);
+        assert_eq!(config.layout.density, Density::Roomy);
+        assert_eq!(
+            Field::Density.activate(&config),
+            Activation::Change(Setting::Density(Density::Compact))
         );
         assert_eq!(
             Field::Density.choose(0),
@@ -818,6 +891,10 @@ mod tests {
         );
     }
 
+    fn labels(entries: Vec<PickerEntry>) -> Vec<String> {
+        entries.into_iter().map(|entry| entry.label).collect()
+    }
+
     #[test]
     fn font_picker_lists_default_then_matches_and_restores_on_cancel() {
         let mut config = Config::default();
@@ -825,47 +902,76 @@ mod tests {
         let mut panel = SettingsPanel::default();
         assert_eq!(
             Field::UiFont.activate(&config),
-            Activation::PickFont(FontRole::Ui)
+            Activation::Pick(Picking::Font(FontRole::Ui))
         );
-        panel.pick_font(FontRole::Ui, &config);
+        panel.pick(Picking::Font(FontRole::Ui), &config);
         let installed: Vec<String> = ["Inter", "Iosevka", "Noto Sans", "Fira Code"]
             .map(String::from)
             .into();
 
-        let picker = panel.font_picker_mut().unwrap();
-        let labels = |entries: Vec<FontEntry>| -> Vec<String> {
-            entries.into_iter().map(|entry| entry.label).collect()
-        };
+        let picker = panel.picker_mut().unwrap();
         assert_eq!(
             labels(picker.entries(&installed)),
             ["Default", "Inter", "Iosevka", "Noto Sans", "Fira Code"]
         );
+        assert_eq!(picker.entries(&installed)[0].setting, Setting::UiFont(None));
         picker.set_query("fira");
         let entries = picker.entries(&installed);
         assert_eq!(labels(entries.clone()), ["Fira Code"]);
         assert_eq!(
-            picker.setting(&entries, 0),
-            Some(Setting::UiFont(Some("Fira Code".into())))
+            entries[0].setting,
+            Setting::UiFont(Some("Fira Code".into()))
         );
         picker.step(5, entries.len());
         assert_eq!(picker.selected(), 0);
 
         assert_eq!(
-            panel.close_font_picker(false),
+            panel.close_picker(false),
             Some(Setting::UiFont(Some("Inter".into())))
         );
-        assert!(panel.font_picker().is_none());
-        panel.pick_font(FontRole::Mono, &config);
-        assert_eq!(panel.close_font_picker(true), None);
+        assert!(panel.picker().is_none());
+        panel.pick(Picking::Font(FontRole::Mono), &config);
+        assert_eq!(panel.close_picker(true), None);
     }
 
     #[test]
     fn font_picker_shows_at_most_max_fonts() {
         let mut panel = SettingsPanel::default();
-        panel.pick_font(FontRole::Body, &Config::default());
+        panel.pick(Picking::Font(FontRole::Body), &Config::default());
         let installed: Vec<String> = (0..20).map(|ix| format!("Font {ix}")).collect();
-        let entries = panel.font_picker().unwrap().entries(&installed);
+        let entries = panel.picker().unwrap().entries(&installed);
         assert_eq!(entries.len(), MAX_FONTS + 1);
-        assert_eq!(entries[0].font, None);
+        assert_eq!(entries[0].setting, Setting::BodyFont(None));
+    }
+
+    #[test]
+    fn theme_picker_lists_every_theme_but_custom() {
+        let mut config = Config::default();
+        config.appearance.theme = ThemeName::Nord;
+        let mut panel = SettingsPanel::default();
+        panel.pick(Picking::Theme, &config);
+        let picker = panel.picker_mut().unwrap();
+        assert_eq!(picker.original, Setting::Theme(ThemeName::Nord));
+        let entries = picker.entries(&[]);
+        assert_eq!(entries.len(), theme::listed().len());
+        assert_eq!(
+            labels(entries.clone())[..3],
+            ["System", "Copiale Dark", "Copiale Light"]
+        );
+        assert!(
+            !entries
+                .iter()
+                .any(|entry| entry.setting == Setting::Theme(ThemeName::Custom))
+        );
+
+        picker.set_query("rose");
+        assert_eq!(
+            labels(picker.entries(&[])),
+            ["Rosé Pine", "Rosé Pine Moon", "Rosé Pine Dawn"]
+        );
+        assert_eq!(
+            panel.close_picker(false),
+            Some(Setting::Theme(ThemeName::Nord))
+        );
     }
 }

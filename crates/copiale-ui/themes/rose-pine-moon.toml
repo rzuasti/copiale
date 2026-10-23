@@ -1,0 +1,30 @@
+# Rosé Pine Moon, after rosepinetheme.com. Tokens are described in dark.toml.
+# Nudged for contrast: text_secondary, text_muted, nicks.
+name = "Rosé Pine Moon"
+appearance = "dark"
+
+[colors]
+background = "#232136"
+sidebar = "#2a273f"
+surface = "#393552"
+border = "#44415a"
+text = "#e0def4"
+text_secondary = "#9692b0"
+text_muted = "#938fab"
+accent = "#ea9a97"
+accent_text = "#232136"
+action = "#f6c177"
+success = "#9ccfd8"
+danger = "#eb6f92"
+link = "#c4a7e7"
+selection = "#ea9a974c"
+nicks = [
+    "#f6c177",
+    "#ea9a97",
+    "#9ccfd8",
+    "#549ec4",
+    "#c4a7e7",
+    "#eb6f92",
+    "#9692b0",
+    "#dedaf2",
+]

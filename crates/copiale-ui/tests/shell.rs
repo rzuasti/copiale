@@ -5,7 +5,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use copiale_core::config::{
-    Config, ConfigFile, Density, MessageStyle, NotificationContent, Setting, ThemeMode, TimeFormat,
+    Config, ConfigFile, Density, MessageStyle, NotificationContent, Setting, ThemeName, TimeFormat,
 };
 use copiale_core::{
     Account, AccountSettings, Attachment, BackendError, ChatState, Command, Contact, Content,
@@ -1851,9 +1851,18 @@ fn palette_theme_overrides_the_system(cx: &mut TestAppContext) {
         ui.press("enter", cx);
     };
 
-    pick("theme dark", cx);
+    let choose = |query: &str, cx: &mut TestAppContext| {
+        pick("theme", cx);
+        assert!(ui.shows("picker-list", cx));
+        ui.type_text(query, cx);
+        ui.frame(cx);
+        ui.press("enter", cx);
+        ui.press("escape", cx);
+    };
+
+    choose("copiale dark", cx);
     let theme = cx.update(|cx| Settings::get(cx).appearance.theme);
-    assert_eq!(theme, ThemeMode::Dark);
+    assert_eq!(theme, ThemeName::CopialeDark);
     cx.update(|cx| assert_theme(&Theme::dark(), cx));
     assert!(composer_focused(&ui, cx));
 
@@ -1861,8 +1870,60 @@ fn palette_theme_overrides_the_system(cx: &mut TestAppContext) {
     cx.update(|cx| theme::follow(Scheme::Light, cx));
     cx.update(|cx| assert_theme(&Theme::dark(), cx));
 
-    pick("theme system", cx);
+    choose("system", cx);
     cx.update(|cx| assert_theme(&Theme::light(), cx));
+
+    choose("gruvbox light", cx);
+    let gruvbox = Theme::built_in(ThemeName::GruvboxLight).unwrap();
+    cx.update(|cx| assert_theme(&gruvbox, cx));
+}
+
+#[gpui_kit::test]
+fn theme_picker_previews_and_saves_or_restores(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.open_alice(cx);
+    cx.update(|cx| theme::follow(Scheme::Dark, cx));
+    open_settings(&ui, "theme", cx);
+    ui.press("enter", cx);
+    assert!(ui.shows(("picked", 0u64), cx));
+    ui.press("down", cx);
+    ui.press("down", cx);
+    assert_eq!(config(cx).appearance.theme, ThemeName::CopialeLight);
+    cx.update(|cx| assert_theme(&Theme::light(), cx));
+    ui.press("escape", cx);
+    assert_eq!(config(cx).appearance.theme, ThemeName::System);
+    cx.update(|cx| assert_theme(&Theme::dark(), cx));
+    assert!(ui.shows("settings-list", cx));
+
+    ui.press("enter", cx);
+    ui.type_text("nord", cx);
+    ui.frame(cx);
+    ui.press("enter", cx);
+    assert_eq!(config(cx).appearance.theme, ThemeName::Nord);
+    let nord = Theme::built_in(ThemeName::Nord).unwrap();
+    cx.update(|cx| assert_theme(&nord, cx));
+}
+
+#[gpui_kit::test]
+fn custom_theme_applies_or_falls_back_to_the_system(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.open_alice(cx);
+    cx.update(|cx| theme::follow(Scheme::Light, cx));
+    let mut custom = config(cx);
+    custom.appearance.theme = ThemeName::Custom;
+    cx.update(|cx| cx.set_global(Settings(custom.clone())));
+    cx.update(|cx| assert_theme(&Theme::light(), cx));
+    open_settings(&ui, "theme", cx);
+    assert!(ui.shows(("setting-problem", 0u64), cx));
+    ui.press("escape", cx);
+
+    let table = include_str!("../themes/nord.toml").replace("name = \"Nord\"\n", "");
+    custom.custom_theme = Some(toml::from_str(&table).unwrap());
+    cx.update(|cx| cx.set_global(Settings(custom)));
+    let nord = Theme::built_in(ThemeName::Nord).unwrap();
+    cx.update(|cx| assert_theme(&nord, cx));
+    open_settings(&ui, "theme", cx);
+    assert!(!ui.shows(("setting-problem", 0u64), cx));
 }
 
 #[gpui_kit::test]
@@ -1908,10 +1969,9 @@ fn settings_change_live_from_the_keyboard(cx: &mut TestAppContext) {
     );
 
     ui.press("right", cx);
-    assert_eq!(config(cx).appearance.theme, ThemeMode::Dark);
-    cx.update(|cx| assert_theme(&Theme::dark(), cx));
-    ui.press("enter", cx);
-    assert_eq!(config(cx).appearance.theme, ThemeMode::Light);
+    ui.press("right", cx);
+    assert_eq!(config(cx).appearance.theme, ThemeName::CopialeLight);
+    cx.update(|cx| assert_theme(&Theme::light(), cx));
 
     ui.press("down", cx);
     ui.press("down", cx);
@@ -1979,7 +2039,7 @@ fn font_picker_previews_and_saves_or_restores(cx: &mut TestAppContext) {
 
     open_settings(&ui, "ui font", cx);
     ui.press("enter", cx);
-    assert!(ui.shows(("font", 0u64), cx));
+    assert!(ui.shows(("picked", 0u64), cx));
     ui.press("down", cx);
     assert_eq!(ui_font(cx).as_deref(), Some("Alpha Sans"));
     assert_eq!(

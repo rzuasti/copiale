@@ -1,4 +1,4 @@
-//! The settings list and font picker.
+//! The settings list and its font and theme picker.
 
 use copiale_core::config;
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
@@ -6,18 +6,18 @@ use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, Context, Entity, Hsla, InteractiveElement as _, IntoElement, ParentElement as _,
-    SharedString, StatefulInteractiveElement as _, Styled as _, StyledText, TestSupportExt as _,
-    Window, div, px, rems,
+    Pixels, SharedString, StatefulInteractiveElement as _, Styled as _, StyledText,
+    TestSupportExt as _, Window, div, px, rems,
 };
 
-use crate::chat::settings_panel::{Activation, FIELDS, Field, FontRole, Section, Value};
+use crate::chat::settings_panel::{Activation, FIELDS, Field, FontRole, Picking, Section, Value};
 use crate::settings::{self, Settings};
 use crate::theme::{ActivePalette as _, InstalledFonts};
 
 use super::overlays::{match_highlights, picker_row};
 use super::{
-    ChatView, PICKING, PickNext, PickPrevious, SETTINGS, SettingDecrease, SettingIncrease,
-    SettingNext, SettingPrevious,
+    ChatView, OpenSettings, PICKING, PickNext, PickPrevious, SETTINGS, SettingDecrease,
+    SettingIncrease, SettingNext, SettingPrevious,
 };
 
 impl ChatView {
@@ -47,10 +47,7 @@ impl ChatView {
     fn activate_setting(&mut self, field: Field, window: &mut Window, cx: &mut Context<Self>) {
         match field.activate(Settings::get(cx)) {
             Activation::Change(setting) => settings::change(setting, cx),
-            Activation::PickFont(role) => {
-                self.settings_panel.pick_font(role, Settings::get(cx));
-                Self::ready_query(&self.inputs().font, window, cx);
-            }
+            Activation::Pick(picking) => self.open_picker(picking, window, cx),
             Activation::ConfirmUnlink => {
                 self.settings_panel.confirm_unlink();
                 // Neither button: `Enter` alone can't wipe.
@@ -58,6 +55,29 @@ impl ChatView {
             }
             Activation::Nothing => {}
         }
+        cx.notify();
+    }
+
+    /// Opens the picker over the settings list.
+    fn open_picker(&mut self, picking: Picking, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings_panel.pick(picking, Settings::get(cx));
+        self.picker_scroll.scroll_to_item(0);
+        let input = self.inputs().picker.clone();
+        let placeholder = match picking {
+            Picking::Font(_) => "Font…",
+            Picking::Theme => "Theme…",
+        };
+        input.update(cx, |input, cx| {
+            input.set_placeholder(placeholder, window, cx)
+        });
+        Self::ready_query(&input, window, cx);
+    }
+
+    /// Opens settings on the theme picker.
+    pub(super) fn pick_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_settings(&OpenSettings, window, cx);
+        self.settings_panel.select(Field::Theme);
+        self.open_picker(Picking::Theme, window, cx);
         cx.notify();
     }
 
@@ -92,74 +112,76 @@ impl ChatView {
         }
     }
 
-    pub(super) fn on_font_event(
+    pub(super) fn on_picker_query_event(
         &mut self,
         input: &Entity<InputState>,
         event: &InputEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(picker) = self.settings_panel.font_picker_mut() else {
+        let Some(picker) = self.settings_panel.picker_mut() else {
             return;
         };
         match event {
             InputEvent::Change => {
                 picker.set_query(&input.read(cx).value());
+                self.picker_scroll.scroll_to_item(0);
                 cx.notify();
             }
-            InputEvent::PressEnter { .. } => self.choose_font(None, window, cx),
+            InputEvent::PressEnter { .. } => self.choose_picked(None, window, cx),
             _ => {}
         }
     }
 
-    /// Moves the font picker's highlight and previews that font.
-    fn step_font(&mut self, step: isize, cx: &mut Context<Self>) {
+    /// Moves the picker's highlight and previews that entry.
+    fn step_picked(&mut self, step: isize, cx: &mut Context<Self>) {
         let installed = InstalledFonts::get(cx);
-        let Some(picker) = self.settings_panel.font_picker_mut() else {
+        let Some(picker) = self.settings_panel.picker_mut() else {
             return;
         };
         let entries = picker.entries(&installed);
         picker.step(step, entries.len());
-        if let Some(setting) = picker.setting(&entries, picker.selected()) {
-            settings::preview(&setting, cx);
+        self.picker_scroll.scroll_to_item(picker.selected());
+        if let Some(entry) = entries.get(picker.selected()) {
+            settings::preview(&entry.setting, cx);
         }
         cx.notify();
     }
 
-    /// Saves font entry `ix`, or the highlighted one, and returns to the
-    /// list.
-    fn choose_font(&mut self, ix: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
+    /// Saves entry `ix`, or the highlighted one, and returns to the list.
+    fn choose_picked(&mut self, ix: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
         let installed = InstalledFonts::get(cx);
-        let Some(picker) = self.settings_panel.font_picker_mut() else {
+        let Some(picker) = self.settings_panel.picker_mut() else {
             return;
         };
-        let entries = picker.entries(&installed);
-        let setting = picker.setting(&entries, ix.unwrap_or(picker.selected()));
-        self.settings_panel.close_font_picker(true);
-        if let Some(setting) = setting {
-            settings::change(setting, cx);
+        let mut entries = picker.entries(&installed);
+        let ix = ix.unwrap_or(picker.selected());
+        self.settings_panel.close_picker(true);
+        if ix < entries.len() {
+            settings::change(entries.swap_remove(ix).setting, cx);
         }
         Self::focus_input(&self.inputs().settings, window, cx);
         cx.notify();
     }
 
-    /// Closes the font picker, undoing its preview unless `keep`.
-    pub(super) fn close_font_picker(&mut self, keep: bool, cx: &mut Context<Self>) {
-        if let Some(setting) = self.settings_panel.close_font_picker(keep) {
+    /// Closes the picker, undoing its preview unless `keep`.
+    pub(super) fn close_picker(&mut self, keep: bool, cx: &mut Context<Self>) {
+        if let Some(setting) = self.settings_panel.close_picker(keep) {
             settings::preview(&setting, cx);
         }
     }
 
-    fn cancel_font(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.close_font_picker(false, cx);
+    fn cancel_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_picker(false, cx);
         Self::focus_input(&self.inputs().settings, window, cx);
         cx.notify();
     }
 
-    /// Every setting by section, filtered by the query; or the font picker.
+    /// Every setting by section, filtered by the query; or the picker.
     pub(super) fn render_settings(&self, window: &Window, cx: &mut Context<Self>) -> gpui_kit::Div {
-        if self.settings_panel.font_picker().is_some() {
-            return self.render_font_picker(cx);
+        let max_height = (window.viewport_size().height - px(220.)).max(px(160.));
+        if self.settings_panel.picker().is_some() {
+            return self.render_picker(max_height, cx);
         }
         if self.settings_panel.confirming_unlink() {
             return self.render_unlink_confirm(cx);
@@ -191,7 +213,6 @@ impl ChatView {
             || "No config directory: not saved".to_owned(),
             |path| path.display().to_string(),
         );
-        let max_height = (window.viewport_size().height - px(220.)).max(px(160.));
         v_flex()
             .key_context(SETTINGS)
             .on_action(cx.listener(|view, _: &SettingPrevious, _, cx| view.step_setting(-1, cx)))
@@ -322,8 +343,8 @@ impl ChatView {
                     }))
                     .test_support()
                     .into_any_element(),
-                Value::Font(font) => div()
-                    .id(("setting-font", n))
+                Value::Pick(font) => div()
+                    .id(("setting-pick", n))
                     .cursor_pointer()
                     .max_w(px(200.))
                     .truncate()
@@ -375,11 +396,23 @@ impl ChatView {
                     .child(if selected { "▸" } else { "" }),
             )
             .child(
-                v_flex().flex_1().min_w_0().child(field.label()).children(
-                    field
-                        .hint()
-                        .map(|hint| div().text_xs().text_color(muted).child(hint)),
-                ),
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .child(field.label())
+                    .children(
+                        field
+                            .hint()
+                            .map(|hint| div().text_xs().text_color(muted).child(hint)),
+                    )
+                    .children(field.problem(config).map(|problem| {
+                        div()
+                            .id(("setting-problem", n))
+                            .text_xs()
+                            .text_color(palette.danger)
+                            .child(problem)
+                            .test_support()
+                    })),
             )
             .child(
                 div()
@@ -393,37 +426,38 @@ impl ChatView {
             .into_any_element()
     }
 
-    /// Fonts to pick from, previewed as the highlight moves.
-    fn render_font_picker(&self, cx: &mut Context<Self>) -> gpui_kit::Div {
+    /// Fonts or themes to pick from, previewed as the highlight moves.
+    fn render_picker(&self, max_height: Pixels, cx: &mut Context<Self>) -> gpui_kit::Div {
         let installed = InstalledFonts::get(cx);
-        let Some(picker) = self.settings_panel.font_picker() else {
+        let Some(picker) = self.settings_panel.picker() else {
             return div();
         };
         let palette = cx.palette();
         let (muted, border) = (palette.text_muted, palette.border);
         let mono = cx.theme().mono_font_family.clone();
-        let rows: Vec<_> = picker
-            .entries(&installed)
-            .into_iter()
-            .enumerate()
-            .map(|(ix, entry)| {
-                let current = (entry.font == picker.original).then(|| "current".into());
-                picker_row(
-                    ("font", ix as u64),
-                    picker.selected() == ix,
-                    None,
-                    StyledText::new(entry.label)
-                        .with_highlights(match_highlights(entry.highlights, cx)),
-                    current,
-                    muted,
-                    mono.clone(),
-                )
-                .on_click(
-                    cx.listener(move |view, _, window, cx| view.choose_font(Some(ix), window, cx)),
-                )
-                .into_any_element()
-            })
-            .collect();
+        let rows: Vec<_> =
+            picker
+                .entries(&installed)
+                .into_iter()
+                .enumerate()
+                .map(|(ix, entry)| {
+                    let current = (entry.setting == picker.original).then(|| "current".into());
+                    picker_row(
+                        ("picked", ix as u64),
+                        picker.selected() == ix,
+                        None,
+                        StyledText::new(entry.label)
+                            .with_highlights(match_highlights(entry.highlights, cx)),
+                        current,
+                        muted,
+                        mono.clone(),
+                    )
+                    .on_click(cx.listener(move |view, _, window, cx| {
+                        view.choose_picked(Some(ix), window, cx)
+                    }))
+                    .into_any_element()
+                })
+                .collect();
         let empty = rows.is_empty().then(|| {
             div()
                 .px_3()
@@ -432,17 +466,18 @@ impl ChatView {
                 .text_color(muted)
                 .child("No matches")
         });
-        let label = match picker.role {
-            FontRole::Ui => Field::UiFont,
-            FontRole::Mono => Field::MonoFont,
-            FontRole::Body => Field::BodyFont,
+        let label = match picker.picking {
+            Picking::Font(FontRole::Ui) => Field::UiFont,
+            Picking::Font(FontRole::Mono) => Field::MonoFont,
+            Picking::Font(FontRole::Body) => Field::BodyFont,
+            Picking::Theme => Field::Theme,
         }
         .label();
         v_flex()
             .key_context(PICKING)
-            .on_action(cx.listener(|view, _: &PickPrevious, _, cx| view.step_font(-1, cx)))
-            .on_action(cx.listener(|view, _: &PickNext, _, cx| view.step_font(1, cx)))
-            .on_action(cx.listener(|view, _: &Escape, window, cx| view.cancel_font(window, cx)))
+            .on_action(cx.listener(|view, _: &PickPrevious, _, cx| view.step_picked(-1, cx)))
+            .on_action(cx.listener(|view, _: &PickNext, _, cx| view.step_picked(1, cx)))
+            .on_action(cx.listener(|view, _: &Escape, window, cx| view.cancel_picker(window, cx)))
             .child(
                 h_flex()
                     .px_3()
@@ -459,9 +494,19 @@ impl ChatView {
                     .p_2()
                     .border_b_1()
                     .border_color(border)
-                    .child(Input::new(&self.inputs().font).small()),
+                    .child(Input::new(&self.inputs().picker).small()),
             )
-            .child(v_flex().p_1().children(rows).children(empty))
+            .child(
+                v_flex()
+                    .id("picker-list")
+                    .max_h(max_height)
+                    .overflow_y_scroll()
+                    .track_scroll(&self.picker_scroll)
+                    .p_1()
+                    .children(rows)
+                    .children(empty)
+                    .test_support(),
+            )
     }
 }
 

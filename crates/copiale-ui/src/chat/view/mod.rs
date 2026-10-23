@@ -210,6 +210,7 @@ pub struct ChatView {
     sidebar_top: Rc<Cell<Pixels>>,
     settings_panel: SettingsPanel,
     settings_scroll: ScrollHandle,
+    picker_scroll: ScrollHandle,
     /// Held while asking whether to unlink.
     confirm_focus: FocusHandle,
     /// Held while a safety number shows.
@@ -288,8 +289,8 @@ struct Inputs {
     palette: Entity<InputState>,
     /// The settings list's filter.
     settings: Entity<InputState>,
-    /// The font picker's query.
-    font: Entity<InputState>,
+    /// The font or theme picker's query.
+    picker: Entity<InputState>,
     /// The emoji picker's query.
     emoji_search: Entity<InputState>,
     _subscriptions: Vec<Subscription>,
@@ -354,6 +355,7 @@ impl ChatView {
             sidebar_top: Rc::default(),
             settings_panel: SettingsPanel::default(),
             settings_scroll: ScrollHandle::new(),
+            picker_scroll: ScrollHandle::new(),
             confirm_focus: cx.focus_handle(),
             identity_focus: cx.focus_handle(),
             link_focus: cx.focus_handle(),
@@ -413,12 +415,12 @@ impl ChatView {
         let new_chat = cx.new(|cx| InputState::new(window, cx).placeholder("New chat with…"));
         let palette = cx.new(|cx| InputState::new(window, cx).placeholder("Chat or command…"));
         let settings = cx.new(|cx| InputState::new(window, cx).placeholder("Filter settings…"));
-        let font = cx.new(|cx| InputState::new(window, cx).placeholder("Font…"));
+        let picker = cx.new(|cx| InputState::new(window, cx));
         let emoji_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search emoji…"));
         let subscriptions = vec![
             cx.subscribe_in(&emoji_search, window, Self::on_emoji_search_event),
             cx.subscribe_in(&settings, window, Self::on_settings_event),
-            cx.subscribe_in(&font, window, Self::on_font_event),
+            cx.subscribe_in(&picker, window, Self::on_picker_query_event),
             cx.subscribe_in(&search, window, Self::on_search_event),
             cx.subscribe_in(&new_chat, window, Self::on_picker_event),
             cx.subscribe_in(&palette, window, Self::on_picker_event),
@@ -442,7 +444,7 @@ impl ChatView {
             new_chat,
             palette,
             settings,
-            font,
+            picker,
             emoji_search,
             _subscriptions: subscriptions,
         });
@@ -463,7 +465,7 @@ impl ChatView {
         self.active = false;
         self.emoji_grid = None;
         self.chat.set_search("");
-        self.close_font_picker(false, cx);
+        self.close_picker(false, cx);
         self.chat.close_overlay();
         self.search_hovered = false;
         self.hovered = None;
@@ -869,7 +871,7 @@ impl ChatView {
 
     fn open_settings(&mut self, _: &OpenSettings, window: &mut Window, cx: &mut Context<Self>) {
         self.chat.open_overlay(Overlay::Settings);
-        self.close_font_picker(false, cx);
+        self.close_picker(false, cx);
         self.settings_panel.reset();
         self.settings_scroll.scroll_to_item(0);
         Self::ready_query(&self.inputs().settings, window, cx);
@@ -902,7 +904,7 @@ impl ChatView {
 
     /// Closes any overlay and returns to the composer.
     fn close_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.close_font_picker(false, cx);
+        self.close_picker(false, cx);
         self.chat.close_overlay();
         self.restore_focus(window, cx);
         cx.notify();

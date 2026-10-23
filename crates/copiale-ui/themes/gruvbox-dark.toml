@@ -1,0 +1,30 @@
+# Gruvbox Dark, after github.com/morhetz/gruvbox. Tokens are described in dark.toml.
+# Nudged for contrast: action, danger, nicks.
+name = "Gruvbox Dark"
+appearance = "dark"
+
+[colors]
+background = "#282828"
+sidebar = "#1d2021"
+surface = "#3c3836"
+border = "#504945"
+text = "#ebdbb2"
+text_secondary = "#d5c4a1"
+text_muted = "#a89984"
+accent = "#fabd2f"
+accent_text = "#1d2021"
+action = "#fe811b"
+success = "#b8bb26"
+danger = "#fb5944"
+link = "#83a598"
+selection = "#fabd2f4c"
+nicks = [
+    "#fe8019",
+    "#fabd2f",
+    "#b8bb26",
+    "#8ec07c",
+    "#84a699",
+    "#d5899d",
+    "#d79921",
+    "#bdae93",
+]

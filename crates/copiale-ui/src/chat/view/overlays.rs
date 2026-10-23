@@ -3,7 +3,6 @@
 
 use std::ops::Range;
 
-use copiale_core::config::Setting;
 use copiale_core::{Command, ServiceId, Verification};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
@@ -20,7 +19,6 @@ use crate::Quit;
 use crate::chat::model::Overlay;
 use crate::chat::palette::PaletteAction;
 use crate::chat::text::{isolate, link_host};
-use crate::settings::{self, Settings};
 use crate::theme::ActivePalette as _;
 
 use super::{
@@ -94,10 +92,7 @@ impl ChatView {
             }
             PaletteAction::NewChat => self.start_new_chat(&NewChat, window, cx),
             PaletteAction::Settings => self.open_settings(&OpenSettings, window, cx),
-            PaletteAction::Theme(mode) => {
-                settings::change(Setting::Theme(mode), cx);
-                self.restore_focus(window, cx);
-            }
+            PaletteAction::Theme => self.pick_theme(window, cx),
             PaletteAction::Quit => window.dispatch_action(Quit.boxed_clone(), cx),
         }
         cx.notify();
@@ -232,43 +227,40 @@ impl ChatView {
         let muted = palette.text_muted;
         let mono = cx.theme().mono_font_family.clone();
         let selected = self.chat.picker_selected();
-        let theme = Settings::get(cx).appearance.theme;
-        let rows: Vec<_> = self
-            .chat
-            .palette_entries()
-            .into_iter()
-            .enumerate()
-            .map(|(ix, entry)| {
-                let (glyph, hint) = match entry.action {
-                    PaletteAction::Open(_) => ("#", None),
-                    PaletteAction::SafetyNumber(_)
-                    | PaletteAction::Accept(_)
-                    | PaletteAction::Block(_)
-                    | PaletteAction::Unblock(_)
-                    | PaletteAction::DeleteRequest(_) => (">", None),
-                    PaletteAction::NewChat => (">", key_hint(&NewChat, window)),
-                    PaletteAction::Settings => (">", key_hint(&OpenSettings, window)),
-                    PaletteAction::Theme(mode) => (">", (mode == theme).then(|| "current".into())),
-                    PaletteAction::Quit => (">", key_hint(&Quit, window)),
-                };
-                picker_row(
-                    ("palette-entry", ix as u64),
-                    selected == Some(ix),
-                    Some(glyph),
-                    StyledText::new(entry.label)
-                        .with_highlights(match_highlights(entry.highlights, cx)),
-                    hint,
-                    muted,
-                    mono.clone(),
-                )
-                .on_click(
-                    cx.listener(move |view, _, window, cx| {
+        let rows: Vec<_> =
+            self.chat
+                .palette_entries()
+                .into_iter()
+                .enumerate()
+                .map(|(ix, entry)| {
+                    let (glyph, hint) = match entry.action {
+                        PaletteAction::Open(_) => ("#", None),
+                        PaletteAction::SafetyNumber(_)
+                        | PaletteAction::Accept(_)
+                        | PaletteAction::Block(_)
+                        | PaletteAction::Unblock(_)
+                        | PaletteAction::DeleteRequest(_) => (">", None),
+                        PaletteAction::NewChat => (">", key_hint(&NewChat, window)),
+                        PaletteAction::Settings => (">", key_hint(&OpenSettings, window)),
+                        PaletteAction::Theme => (">", None),
+                        PaletteAction::Quit => (">", key_hint(&Quit, window)),
+                    };
+                    picker_row(
+                        ("palette-entry", ix as u64),
+                        selected == Some(ix),
+                        Some(glyph),
+                        StyledText::new(entry.label)
+                            .with_highlights(match_highlights(entry.highlights, cx)),
+                        hint,
+                        muted,
+                        mono.clone(),
+                    )
+                    .on_click(cx.listener(move |view, _, window, cx| {
                         view.choose_palette(Some(ix), window, cx)
-                    }),
-                )
-                .into_any_element()
-            })
-            .collect();
+                    }))
+                    .into_any_element()
+                })
+                .collect();
         self.picker(&self.inputs().palette, rows, "No matches", cx)
     }
 

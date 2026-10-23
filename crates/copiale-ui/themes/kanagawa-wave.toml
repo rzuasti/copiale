@@ -1,0 +1,30 @@
+# Kanagawa Wave, after github.com/rebelot/kanagawa.nvim. Tokens are described in dark.toml.
+# Nudged for contrast: text_muted, nicks.
+name = "Kanagawa Wave"
+appearance = "dark"
+
+[colors]
+background = "#1f1f28"
+sidebar = "#16161d"
+surface = "#2a2a37"
+border = "#363646"
+text = "#dcd7ba"
+text_secondary = "#c8c093"
+text_muted = "#8a8981"
+accent = "#7e9cd8"
+accent_text = "#16161d"
+action = "#ffa066"
+success = "#98bb6c"
+danger = "#e46876"
+link = "#7fb4ca"
+selection = "#7e9cd84c"
+nicks = [
+    "#ffa066",
+    "#e6c384",
+    "#98bb6c",
+    "#7aa89f",
+    "#7fb4ca",
+    "#9882bb",
+    "#d27e99",
+    "#e46876",
+]

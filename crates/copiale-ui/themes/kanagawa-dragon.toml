@@ -1,0 +1,30 @@
+# Kanagawa Dragon, after github.com/rebelot/kanagawa.nvim. Tokens are described in dark.toml.
+# Nudged for contrast: text_muted.
+name = "Kanagawa Dragon"
+appearance = "dark"
+
+[colors]
+background = "#181616"
+sidebar = "#12120f"
+surface = "#282727"
+border = "#393836"
+text = "#c5c9c5"
+text_secondary = "#a6a69c"
+text_muted = "#7b847b"
+accent = "#8ba4b0"
+accent_text = "#12120f"
+action = "#b6927b"
+success = "#87a987"
+danger = "#c4746e"
+link = "#949fb5"
+selection = "#8ba4b04c"
+nicks = [
+    "#b6927b",
+    "#c4b28a",
+    "#87a987",
+    "#8ea4a2",
+    "#8ba4b0",
+    "#8992a7",
+    "#a292a3",
+    "#c4746e",
+]

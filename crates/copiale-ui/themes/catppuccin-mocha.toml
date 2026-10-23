@@ -1,0 +1,30 @@
+# Catppuccin Mocha, after catppuccin.com. Tokens are described in dark.toml.
+# Nudged for contrast: nicks.
+name = "Catppuccin Mocha"
+appearance = "dark"
+
+[colors]
+background = "#1e1e2e"
+sidebar = "#181825"
+surface = "#313244"
+border = "#45475a"
+text = "#cdd6f4"
+text_secondary = "#bac2de"
+text_muted = "#9399b2"
+accent = "#cba6f7"
+accent_text = "#11111b"
+action = "#fab387"
+success = "#a6e3a1"
+danger = "#f38ba8"
+link = "#74c7ec"
+selection = "#cba6f74c"
+nicks = [
+    "#fab387",
+    "#f9ce87",
+    "#a6e3a1",
+    "#94e2d5",
+    "#89b4fa",
+    "#b4befe",
+    "#f5c2e7",
+    "#f2cbcb",
+]

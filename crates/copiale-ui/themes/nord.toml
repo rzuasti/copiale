@@ -1,0 +1,30 @@
+# Nord, after nordtheme.com. Tokens are described in dark.toml.
+# Nudged for contrast: text_muted, danger, nicks.
+name = "Nord"
+appearance = "dark"
+
+[colors]
+background = "#2e3440"
+sidebar = "#292e39"
+surface = "#3b4252"
+border = "#434c5e"
+text = "#eceff4"
+text_secondary = "#d8dee9"
+text_muted = "#949eb2"
+accent = "#88c0d0"
+accent_text = "#2e3440"
+action = "#ebcb8b"
+success = "#a3be8c"
+danger = "#d88788"
+link = "#81a1c1"
+selection = "#88c0d04c"
+nicks = [
+    "#d69082",
+    "#ebcb8b",
+    "#a3be8c",
+    "#8fbcbb",
+    "#88c0d0",
+    "#85a5c5",
+    "#bc96b5",
+    "#da8d8e",
+]

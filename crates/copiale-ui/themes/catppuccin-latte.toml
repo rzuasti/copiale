@@ -1,0 +1,30 @@
+# Catppuccin Latte, after catppuccin.com. Tokens are described in dark.toml.
+# Nudged for contrast: text, text_muted, action, link, nicks.
+name = "Catppuccin Latte"
+appearance = "light"
+
+[colors]
+background = "#eff1f5"
+sidebar = "#e6e9ef"
+surface = "#ccd0da"
+border = "#bcc0cc"
+text = "#474a64"
+text_secondary = "#5c5f77"
+text_muted = "#63667a"
+accent = "#8839ef"
+accent_text = "#eff1f5"
+action = "#a03001"
+success = "#40a02b"
+danger = "#d20f39"
+link = "#207681"
+selection = "#8839ef4c"
+nicks = [
+    "#b43a01",
+    "#7f5e1d",
+    "#297225",
+    "#176e75",
+    "#0a56e9",
+    "#3449fd",
+    "#bb1583",
+    "#c12222",
+]

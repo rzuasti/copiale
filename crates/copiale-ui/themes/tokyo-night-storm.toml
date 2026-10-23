@@ -1,0 +1,30 @@
+# Tokyo Night Storm, after github.com/folke/tokyonight.nvim. Tokens are described in dark.toml.
+# Nudged for contrast: text_muted.
+name = "Tokyo Night Storm"
+appearance = "dark"
+
+[colors]
+background = "#24283b"
+sidebar = "#1f2335"
+surface = "#292e42"
+border = "#3b4261"
+text = "#c0caf5"
+text_secondary = "#a9b1d6"
+text_muted = "#888fb7"
+accent = "#7aa2f7"
+accent_text = "#1f2335"
+action = "#e0af68"
+success = "#9ece6a"
+danger = "#f7768e"
+link = "#7dcfff"
+selection = "#7aa2f74c"
+nicks = [
+    "#ff9e64",
+    "#e0af68",
+    "#9ece6a",
+    "#73daca",
+    "#7dcfff",
+    "#7aa2f7",
+    "#bb9af7",
+    "#f7768e",
+]

@@ -1,0 +1,30 @@
+# One Dark, after github.com/atom/one-dark-syntax. Tokens are described in dark.toml.
+# Nudged for contrast: text, text_muted, danger, nicks.
+name = "One Dark"
+appearance = "dark"
+
+[colors]
+background = "#282c34"
+sidebar = "#21252b"
+surface = "#2c313a"
+border = "#3e4451"
+text = "#b3bac7"
+text_secondary = "#9da5b4"
+text_muted = "#8e95a2"
+accent = "#61afef"
+accent_text = "#21252b"
+action = "#e5c07b"
+success = "#98c379"
+danger = "#e0747d"
+link = "#56b6c2"
+selection = "#61afef4c"
+nicks = [
+    "#d19a66",
+    "#e5ad55",
+    "#98c379",
+    "#56b6c2",
+    "#61afef",
+    "#c87cdd",
+    "#e07a83",
+    "#d68280",
+]

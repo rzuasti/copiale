@@ -10,6 +10,9 @@ use super::parse::Reader;
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Config {
     pub appearance: Appearance,
+    /// `[theme]`: the palette `appearance.theme = "custom"` uses; checked
+    /// by the UI, which knows the tokens.
+    pub custom_theme: Option<toml::Table>,
     pub typography: Typography,
     pub layout: Layout,
     pub composer: Composer,
@@ -20,7 +23,7 @@ pub struct Config {
 /// `[appearance]`
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Appearance {
-    pub theme: ThemeMode,
+    pub theme: ThemeName,
 }
 
 /// `[typography]`
@@ -109,9 +112,14 @@ pub struct Notifications {
     pub content: NotificationContent,
 }
 
+/// The table `ThemeName::Custom` reads.
+pub(crate) const CUSTOM_THEME: &str = "theme";
+
 /// A setting stored as one of a fixed set of names.
 pub trait Choice: Copy + PartialEq + 'static {
     const CHOICES: &'static [(&'static str, Self)];
+    /// Other names read, never written.
+    const ALIASES: &'static [(&'static str, Self)] = &[];
 
     fn name(self) -> &'static str {
         Self::CHOICES
@@ -124,13 +132,17 @@ pub trait Choice: Copy + PartialEq + 'static {
     fn from_name(name: &str) -> Option<Self> {
         Self::CHOICES
             .iter()
+            .chain(Self::ALIASES)
             .find(|(choice, _)| *choice == name)
             .map(|(_, value)| *value)
     }
 }
 
 macro_rules! choice {
-    ($(#[$meta:meta])* $name:ident { $($(#[$default:ident])? $variant:ident = $text:literal),+ $(,)? }) => {
+    (
+        $(#[$meta:meta])* $name:ident { $($(#[$default:ident])? $variant:ident = $text:literal),+ $(,)? }
+        $(aliases { $($alias:literal => $target:ident),+ $(,)? })?
+    ) => {
         $(#[$meta])*
         #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
         pub enum $name {
@@ -139,13 +151,44 @@ macro_rules! choice {
 
         impl Choice for $name {
             const CHOICES: &'static [(&'static str, Self)] = &[$(($text, Self::$variant)),+];
+            $(const ALIASES: &'static [(&'static str, Self)] = &[$(($alias, Self::$target)),+];)?
         }
     };
 }
 
 choice!(
-    /// Follow the system appearance, or force one.
-    ThemeMode { #[default] System = "system", Dark = "dark", Light = "light" }
+    /// Copiale's dark or light theme following the system appearance, a
+    /// built-in theme, or the `[theme]` table.
+    ThemeName {
+        #[default] System = "system",
+        CopialeDark = "copiale-dark",
+        CopialeLight = "copiale-light",
+        CatppuccinMocha = "catppuccin-mocha",
+        CatppuccinMacchiato = "catppuccin-macchiato",
+        CatppuccinFrappe = "catppuccin-frappe",
+        CatppuccinLatte = "catppuccin-latte",
+        GruvboxDark = "gruvbox-dark",
+        GruvboxLight = "gruvbox-light",
+        Nord = "nord",
+        Dracula = "dracula",
+        SolarizedDark = "solarized-dark",
+        SolarizedLight = "solarized-light",
+        TokyoNight = "tokyo-night",
+        TokyoNightStorm = "tokyo-night-storm",
+        TokyoNightDay = "tokyo-night-day",
+        RosePine = "rose-pine",
+        RosePineMoon = "rose-pine-moon",
+        RosePineDawn = "rose-pine-dawn",
+        EverforestDark = "everforest-dark",
+        EverforestLight = "everforest-light",
+        KanagawaWave = "kanagawa-wave",
+        KanagawaDragon = "kanagawa-dragon",
+        KanagawaLotus = "kanagawa-lotus",
+        OneDark = "one-dark",
+        OneLight = "one-light",
+        Custom = "custom",
+    }
+    aliases { "dark" => CopialeDark, "light" => CopialeLight }
 );
 choice!(Density { Compact = "compact", #[default] Cozy = "cozy", Roomy = "roomy" });
 choice!(MessageStyle { #[default] Log = "log", Blocks = "blocks", Bubbles = "bubbles" });
@@ -227,7 +270,7 @@ macro_rules! settings {
 }
 
 settings! {
-    Theme(ThemeMode): appearance.theme,
+    Theme(ThemeName): appearance.theme,
     /// `None` removes the key, restoring the default font.
     UiFont(Option<String>): typography.ui_font,
     MonoFont(Option<String>): typography.mono_font,

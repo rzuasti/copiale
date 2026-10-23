@@ -1,0 +1,30 @@
+# Tokyo Night Day, after github.com/folke/tokyonight.nvim. Tokens are described in dark.toml.
+# Nudged for contrast: text, text_secondary, text_muted, accent, action, danger, link, nicks.
+name = "Tokyo Night Day"
+appearance = "light"
+
+[colors]
+background = "#e1e2e7"
+sidebar = "#d0d5e3"
+surface = "#c4c8da"
+border = "#a8aecb"
+text = "#273c77"
+text_secondary = "#445593"
+text_muted = "#515982"
+accent = "#165fc5"
+accent_text = "#e1e2e7"
+action = "#7f4300"
+success = "#587539"
+danger = "#c50a3d"
+link = "#006b91"
+selection = "#165fc54c"
+nicks = [
+    "#874700",
+    "#6f5426",
+    "#446125",
+    "#116456",
+    "#005f81",
+    "#1655b1",
+    "#720eeb",
+    "#b10a33",
+]

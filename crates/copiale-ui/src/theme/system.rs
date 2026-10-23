@@ -1,6 +1,6 @@
 //! System appearance and fonts.
 
-use copiale_core::config::{ThemeMode, Typography};
+use copiale_core::config::{Config, ThemeName, Typography};
 use gpui_kit::{App, Global, SharedString, Window, WindowAppearance};
 
 use super::{Theme, apply};
@@ -32,12 +32,16 @@ impl Theme {
         }
     }
 
-    /// The built-in theme for the `appearance.theme` setting.
-    pub fn for_mode(mode: ThemeMode, scheme: Scheme) -> Self {
-        match mode {
-            ThemeMode::System => Self::for_scheme(scheme),
-            ThemeMode::Dark => Self::dark(),
-            ThemeMode::Light => Self::light(),
+    /// The theme `config` sets; the system's for a custom one that can't
+    /// be used.
+    pub fn for_config(config: &Config, scheme: Scheme) -> Self {
+        match config.appearance.theme {
+            ThemeName::System => Self::for_scheme(scheme),
+            ThemeName::Custom => Self::custom(config).unwrap_or_else(|error| {
+                tracing::warn!(%error, "custom theme not used");
+                Self::for_scheme(scheme)
+            }),
+            name => Self::built_in(name).expect("every other name is built in"),
         }
     }
 }
@@ -51,7 +55,8 @@ struct Followed {
 /// What the applied theme depends on.
 #[derive(Clone, Debug, PartialEq)]
 struct Applied {
-    mode: ThemeMode,
+    theme: ThemeName,
+    custom: Option<toml::Table>,
     scheme: Scheme,
     typography: Typography,
     opacity: f64,
@@ -76,7 +81,8 @@ fn refresh(cx: &mut App) {
     };
     let settings = Settings::get(cx);
     let wanted = Applied {
-        mode: settings.appearance.theme,
+        theme: settings.appearance.theme,
+        custom: settings.custom_theme.clone(),
         scheme: followed.scheme,
         typography: settings.typography.clone(),
         opacity: settings.window.opacity,
@@ -84,7 +90,7 @@ fn refresh(cx: &mut App) {
     if followed.applied.as_ref() == Some(&wanted) {
         return;
     }
-    apply(&Theme::for_mode(wanted.mode, wanted.scheme), cx);
+    apply(&Theme::for_config(settings, wanted.scheme), cx);
     cx.global_mut::<Followed>().applied = Some(wanted);
 }
 

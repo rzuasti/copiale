@@ -1,0 +1,30 @@
+# Everforest Light, after github.com/sainnhe/everforest. Tokens are described in dark.toml.
+# Nudged for contrast: text, text_secondary, text_muted, accent, action, danger, link, nicks.
+name = "Everforest Light"
+appearance = "light"
+
+[colors]
+background = "#fdf6e3"
+sidebar = "#f4f0d9"
+surface = "#efebd4"
+border = "#e6e2cc"
+text = "#435159"
+text_secondary = "#5d6c5c"
+text_muted = "#636f61"
+accent = "#637701"
+accent_text = "#fdf6e3"
+action = "#ad4b0a"
+success = "#35a77c"
+danger = "#df0a07"
+link = "#2e788d"
+selection = "#6377014c"
+nicks = [
+    "#ad4b0a",
+    "#876300",
+    "#5b6f01",
+    "#267563",
+    "#29717f",
+    "#c02086",
+    "#d30a07",
+    "#5d6c5c",
+]

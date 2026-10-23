@@ -25,8 +25,8 @@ pub use new_chat::{Candidate, MAX_CANDIDATES};
 pub use notices::{Notice, NoticeAction, NoticeKey, Notices};
 pub use palette::{Entry, MAX_CHATS, PaletteAction};
 pub use settings_panel::{
-    Activation, FIELDS, Field, FontEntry, FontPicker, FontRole, MAX_FONTS, Section, SettingsPanel,
-    Value,
+    Activation, FIELDS, Field, FontRole, MAX_FONTS, PickerEntry, Picking, Section, SettingPicker,
+    SettingsPanel, Value,
 };
 pub use time::LocalClock;
 pub use view::{ChatView, FocusSearch, NewChat, init};

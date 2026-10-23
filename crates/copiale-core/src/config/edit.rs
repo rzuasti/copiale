@@ -66,14 +66,18 @@ fn keep_header_on_top(doc: &mut DocumentMut, table_name: &str) {
 mod tests {
     use super::*;
     use crate::config::parse::parse;
-    use crate::config::{Density, MessageStyle, ThemeMode};
+    use crate::config::{Density, MessageStyle, ThemeName};
 
     #[test]
     fn creates_tables_in_an_empty_file() {
-        let text = apply("", &[Setting::Theme(ThemeMode::Light), Setting::Blur(true)]).unwrap();
+        let text = apply(
+            "",
+            &[Setting::Theme(ThemeName::CopialeLight), Setting::Blur(true)],
+        )
+        .unwrap();
         assert_eq!(
             text,
-            "[appearance]\ntheme = \"light\"\n\n[window]\nblur = true\n"
+            "[appearance]\ntheme = \"copiale-light\"\n\n[window]\nblur = true\n"
         );
     }
 

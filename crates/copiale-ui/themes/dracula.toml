@@ -1,0 +1,30 @@
+# Dracula, after draculatheme.com. Tokens are described in dark.toml.
+# Nudged for contrast: text_muted, danger, nicks.
+name = "Dracula"
+appearance = "dark"
+
+[colors]
+background = "#282a36"
+sidebar = "#21222c"
+surface = "#44475a"
+border = "#44475a"
+text = "#f8f8f2"
+text_secondary = "#e0e0da"
+text_muted = "#8292c4"
+accent = "#bd93f9"
+accent_text = "#21222c"
+action = "#ffb86c"
+success = "#50fa7b"
+danger = "#ff5959"
+link = "#8be9fd"
+selection = "#bd93f94c"
+nicks = [
+    "#ffb86c",
+    "#f1fa8c",
+    "#50fa7b",
+    "#8be9fd",
+    "#bd93f9",
+    "#ff79c6",
+    "#ff6363",
+    "#9aa8d6",
+]

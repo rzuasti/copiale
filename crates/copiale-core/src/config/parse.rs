@@ -2,7 +2,7 @@
 
 use toml_edit::{DocumentMut, Item, Value};
 
-use super::schema::Kind;
+use super::schema::{CUSTOM_THEME, Kind};
 use super::{Config, ConfigWarning, Loaded, Setting};
 
 pub(crate) fn parse(text: &str) -> Loaded {
@@ -24,7 +24,8 @@ pub(crate) fn parse(text: &str) -> Loaded {
         warnings: Vec::new(),
     };
     reader.check_unknown();
-    let config = Config::read(&mut reader);
+    let mut config = Config::read(&mut reader);
+    config.custom_theme = reader.custom_theme(text);
     Loaded {
         config,
         warnings: reader.warnings,
@@ -46,6 +47,9 @@ impl<'a> Reader<'a> {
 
     fn check_unknown(&mut self) {
         for (table_name, item) in self.doc.iter() {
+            if table_name == CUSTOM_THEME {
+                continue;
+            }
             if !Setting::KEYS.iter().any(|(table, _)| *table == table_name) {
                 self.warn(table_name.into(), "unknown setting, ignored".into());
                 continue;
@@ -62,6 +66,22 @@ impl<'a> Reader<'a> {
                     );
                 }
             }
+        }
+    }
+
+    /// The `[theme]` table, as is.
+    fn custom_theme(&mut self, text: &str) -> Option<toml::Table> {
+        if !self.doc.get(CUSTOM_THEME)?.is_table_like() {
+            self.warn(CUSTOM_THEME.into(), "expected a table, ignored".into());
+            return None;
+        }
+        // Valid TOML already, as `doc` parsed.
+        match toml::from_str::<toml::Table>(text)
+            .ok()?
+            .remove(CUSTOM_THEME)
+        {
+            Some(toml::Value::Table(table)) => Some(table),
+            _ => None,
         }
     }
 
@@ -114,7 +134,7 @@ impl<'a> Reader<'a> {
 mod tests {
     use super::*;
     use crate::config::{
-        Density, MessageStyle, NotificationContent, ThemeMode, TimeFormat, TimestampVisibility,
+        Density, MessageStyle, NotificationContent, ThemeName, TimeFormat, TimestampVisibility,
     };
 
     fn settings(loaded: &Loaded) -> Vec<Option<&str>> {
@@ -166,7 +186,7 @@ mod tests {
 
         assert_eq!(loaded.warnings, vec![]);
         let config = loaded.config;
-        assert_eq!(config.appearance.theme, ThemeMode::Dark);
+        assert_eq!(config.appearance.theme, ThemeName::CopialeDark);
         assert_eq!(config.typography.ui_font.as_deref(), Some("Inter"));
         assert_eq!(
             config.typography.mono_font.as_deref(),
@@ -282,6 +302,33 @@ mod tests {
             [Some("colour"), Some("layout.foo"), Some("plugins")]
         );
         assert_eq!(loaded.config, Config::default());
+    }
+
+    #[test]
+    fn custom_theme_table_is_kept_as_is() {
+        let loaded = parse(
+            "[appearance]\ntheme = \"custom\"\n[theme]\nappearance = \"dark\"\n\
+             [theme.colors]\nbackground = \"#000\"\nanything = 1\n",
+        );
+        assert_eq!(loaded.warnings, vec![]);
+        assert_eq!(loaded.config.appearance.theme, ThemeName::Custom);
+        let theme = loaded.config.custom_theme.unwrap();
+        assert_eq!(theme["appearance"].as_str(), Some("dark"));
+        assert_eq!(theme["colors"]["background"].as_str(), Some("#000"));
+        assert_eq!(theme["colors"]["anything"].as_integer(), Some(1));
+
+        let loaded = parse("theme = \"nord\"\n");
+        assert_eq!(settings(&loaded), [Some("theme")]);
+        assert_eq!(loaded.config.custom_theme, None);
+    }
+
+    #[test]
+    fn old_theme_names_still_read() {
+        let loaded = parse("[appearance]\ntheme = \"light\"\n");
+        assert_eq!(loaded.warnings, vec![]);
+        assert_eq!(loaded.config.appearance.theme, ThemeName::CopialeLight);
+        let loaded = parse("[appearance]\ntheme = \"rose-pine-dawn\"\n");
+        assert_eq!(loaded.config.appearance.theme, ThemeName::RosePineDawn);
     }
 
     #[test]

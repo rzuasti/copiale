@@ -1,4 +1,4 @@
-//! Built-in dark and light themes, following the system appearance.
+//! Built-in themes, the system-following default and the custom one.
 //!
 //! Views read colors from the active [`Palette`] only. GPUI Kit components
 //! get the same tokens mapped onto their roles.
@@ -6,6 +6,7 @@
 use std::rc::Rc;
 
 use copiale_core::ServiceId;
+use copiale_core::config::{Config, ThemeName};
 use gpui_kit::component::{self, ThemeConfig, ThemeConfigColors};
 use gpui_kit::{App, Global, Hsla, Rgba, SharedString};
 
@@ -22,8 +23,67 @@ pub use fonts::{Fonts, InstalledFonts};
 pub(crate) use system::watch_settings;
 pub use system::{Scheme, follow, follow_system, follow_window};
 
-const DARK: &str = include_str!("../../themes/dark.toml");
-const LIGHT: &str = include_str!("../../themes/light.toml");
+macro_rules! built_in {
+    ($name:ident, $label:literal, $file:literal) => {
+        (
+            ThemeName::$name,
+            $label,
+            include_str!(concat!("../../themes/", $file, ".toml")),
+        )
+    };
+}
+
+/// Built-in themes in listing order: name, label and file.
+pub const BUILT_IN: [(ThemeName, &str, &str); 25] = [
+    built_in!(CopialeDark, "Copiale Dark", "dark"),
+    built_in!(CopialeLight, "Copiale Light", "light"),
+    built_in!(CatppuccinMocha, "Catppuccin Mocha", "catppuccin-mocha"),
+    built_in!(
+        CatppuccinMacchiato,
+        "Catppuccin Macchiato",
+        "catppuccin-macchiato"
+    ),
+    built_in!(CatppuccinFrappe, "Catppuccin Frappé", "catppuccin-frappe"),
+    built_in!(CatppuccinLatte, "Catppuccin Latte", "catppuccin-latte"),
+    built_in!(Dracula, "Dracula", "dracula"),
+    built_in!(EverforestDark, "Everforest Dark", "everforest-dark"),
+    built_in!(EverforestLight, "Everforest Light", "everforest-light"),
+    built_in!(GruvboxDark, "Gruvbox Dark", "gruvbox-dark"),
+    built_in!(GruvboxLight, "Gruvbox Light", "gruvbox-light"),
+    built_in!(KanagawaWave, "Kanagawa Wave", "kanagawa-wave"),
+    built_in!(KanagawaDragon, "Kanagawa Dragon", "kanagawa-dragon"),
+    built_in!(KanagawaLotus, "Kanagawa Lotus", "kanagawa-lotus"),
+    built_in!(Nord, "Nord", "nord"),
+    built_in!(OneDark, "One Dark", "one-dark"),
+    built_in!(OneLight, "One Light", "one-light"),
+    built_in!(RosePine, "Rosé Pine", "rose-pine"),
+    built_in!(RosePineMoon, "Rosé Pine Moon", "rose-pine-moon"),
+    built_in!(RosePineDawn, "Rosé Pine Dawn", "rose-pine-dawn"),
+    built_in!(SolarizedDark, "Solarized Dark", "solarized-dark"),
+    built_in!(SolarizedLight, "Solarized Light", "solarized-light"),
+    built_in!(TokyoNight, "Tokyo Night", "tokyo-night"),
+    built_in!(TokyoNightStorm, "Tokyo Night Storm", "tokyo-night-storm"),
+    built_in!(TokyoNightDay, "Tokyo Night Day", "tokyo-night-day"),
+];
+
+/// Themes to pick from: `system`, then the built-in ones.
+pub fn listed() -> Vec<ThemeName> {
+    std::iter::once(ThemeName::System)
+        .chain(BUILT_IN.iter().map(|(name, ..)| *name))
+        .collect()
+}
+
+/// How `name` is listed.
+pub fn label(name: ThemeName) -> &'static str {
+    match name {
+        ThemeName::System => "System",
+        ThemeName::Custom => "Custom",
+        _ => BUILT_IN
+            .iter()
+            .find(|(built_in, ..)| *built_in == name)
+            .map_or("", |(_, label, _)| label),
+    }
+}
 
 /// A theme file.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -106,17 +166,47 @@ impl ActivePalette for App {
     }
 }
 
+/// The `[theme]` table in `config.toml`: a theme file without a name.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CustomTheme {
+    appearance: Appearance,
+    colors: Palette,
+}
+
 impl Theme {
     pub fn parse(source: &str) -> Result<Self, toml::de::Error> {
         toml::from_str(source)
     }
 
     pub fn dark() -> Self {
-        Self::parse(DARK).expect("built-in dark theme is valid")
+        Self::built_in(ThemeName::CopialeDark).expect("listed")
     }
 
     pub fn light() -> Self {
-        Self::parse(LIGHT).expect("built-in light theme is valid")
+        Self::built_in(ThemeName::CopialeLight).expect("listed")
+    }
+
+    /// `None` for `system` and `custom`.
+    pub fn built_in(name: ThemeName) -> Option<Self> {
+        let (_, _, source) = BUILT_IN.iter().find(|(built_in, ..)| *built_in == name)?;
+        Some(Self::parse(source).expect("built-in themes are valid"))
+    }
+
+    /// The theme `config` sets as `custom`, or why it can't be used.
+    pub fn custom(config: &Config) -> Result<Self, String> {
+        let table = config
+            .custom_theme
+            .clone()
+            .ok_or("no [theme] table in the config file")?;
+        let custom: CustomTheme = toml::Value::Table(table)
+            .try_into()
+            .map_err(|error: toml::de::Error| format!("[theme]: {}", error.message()))?;
+        Ok(Self {
+            name: label(ThemeName::Custom).into(),
+            appearance: custom.appearance,
+            colors: custom.colors,
+        })
     }
 }
 
@@ -250,6 +340,7 @@ fn parse(text: &str) -> Result<Hsla, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use copiale_core::config::Choice as _;
 
     fn tokens(palette: &Palette) -> [(&'static str, Hsla); 14] {
         [
@@ -287,15 +378,48 @@ mod tests {
         (a.max(b) + 0.05) / (a.min(b) + 0.05)
     }
 
+    const LIGHT: &str = BUILT_IN[1].2;
+
+    fn built_in() -> impl Iterator<Item = (ThemeName, &'static str, Theme)> {
+        BUILT_IN.iter().map(|(name, _, source)| {
+            let theme = Theme::parse(source).unwrap_or_else(|error| panic!("{name:?}: {error}"));
+            (*name, *source, theme)
+        })
+    }
+
+    fn themes() -> impl Iterator<Item = Theme> {
+        built_in().map(|(_, _, theme)| theme)
+    }
+
     #[test]
-    fn built_in_themes_parse_with_their_appearance() {
+    fn built_in_themes_parse_with_their_labels() {
         assert_eq!(Theme::dark().appearance, Appearance::Dark);
         assert_eq!(Theme::light().appearance, Appearance::Light);
+        for (name, _, theme) in built_in() {
+            assert_eq!(theme.name, label(name));
+            assert_eq!(Theme::built_in(name), Some(theme));
+        }
+    }
+
+    #[test]
+    fn every_name_but_system_and_custom_is_built_in_once() {
+        let mut names: Vec<_> = ThemeName::CHOICES.iter().map(|(_, name)| *name).collect();
+        names.retain(|name| !matches!(name, ThemeName::System | ThemeName::Custom));
+        assert_eq!(BUILT_IN.len(), names.len());
+        for (ix, (name, ..)) in BUILT_IN.iter().enumerate() {
+            assert!(!BUILT_IN[..ix].iter().any(|(n, ..)| n == name), "{name:?}");
+        }
+        for name in names {
+            assert!(Theme::built_in(name).is_some(), "{name:?}");
+        }
+        assert_eq!(listed().len(), BUILT_IN.len() + 1);
+        assert_eq!(listed()[0], ThemeName::System);
+        assert!(!listed().contains(&ThemeName::Custom));
     }
 
     #[test]
     fn text_is_readable() {
-        for theme in [Theme::dark(), Theme::light()] {
+        for theme in themes() {
             let c = &theme.colors;
             for (fg, bg, min) in [
                 (c.text, c.background, 7.),
@@ -322,12 +446,7 @@ mod tests {
 
     #[test]
     fn colors_reach_components_exactly() {
-        for theme in [Theme::dark(), Theme::light()] {
-            let source = if theme.appearance == Appearance::Dark {
-                DARK
-            } else {
-                LIGHT
-            };
+        for (_, source, theme) in built_in() {
             let file: toml::Table = toml::from_str(source).unwrap();
             let colors = file["colors"].as_table().unwrap();
             let opaque = |color: &toml::Value| {
@@ -351,7 +470,7 @@ mod tests {
 
     #[test]
     fn names_are_quieter_than_text_and_louder_than_timestamps() {
-        for theme in [Theme::dark(), Theme::light()] {
+        for theme in themes() {
             let c = &theme.colors;
             let text = contrast(c.text, c.background);
             let muted = contrast(c.text_muted, c.background);
@@ -375,6 +494,48 @@ mod tests {
         used.sort();
         used.dedup();
         assert_eq!(used.len(), palette.nicks.len());
+    }
+
+    /// `config.toml` with `appearance.theme = "custom"` and `table` as
+    /// `[theme]`.
+    fn custom_config(table: &str) -> Config {
+        let mut config = Config::default();
+        config.appearance.theme = ThemeName::Custom;
+        config.custom_theme = Some(toml::from_str(table).unwrap());
+        config
+    }
+
+    #[test]
+    fn custom_theme_is_a_full_theme_file_without_a_name() {
+        let table = LIGHT.replace("name = \"Copiale Light\"\n", "");
+        let theme = Theme::custom(&custom_config(&table)).unwrap();
+        assert_eq!(theme.name, "Custom");
+        assert_eq!(theme.appearance, Appearance::Light);
+        assert_eq!(theme.colors, Theme::light().colors);
+    }
+
+    #[test]
+    fn custom_theme_needs_every_token() {
+        let table = LIGHT.replace("name = \"Copiale Light\"\n", "");
+        for (broken, expected) in [
+            (
+                table.replace("link = \"#2a5db0\"\n", ""),
+                "missing field `link`",
+            ),
+            (table.replace("#fbfbfa", "blue"), "blue"),
+            (table.clone() + "\n[extra]\n", "unknown field `extra`"),
+            (LIGHT.to_owned(), "unknown field `name`"),
+        ] {
+            let error = Theme::custom(&custom_config(&broken)).unwrap_err();
+            assert!(error.starts_with("[theme]: "), "{error}");
+            assert!(error.contains(expected), "{error}");
+        }
+        let mut config = Config::default();
+        config.appearance.theme = ThemeName::Custom;
+        assert_eq!(
+            Theme::custom(&config).unwrap_err(),
+            "no [theme] table in the config file"
+        );
     }
 
     #[test]
