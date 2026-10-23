@@ -38,6 +38,10 @@ pub struct Spacing {
     pub message: Pixels,
     /// Above and below a chat in the list.
     pub chat: Pixels,
+    /// Between bubbles in a group; never zero, so bubbles don't touch.
+    pub bubble: Pixels,
+    /// Inside a bubble, horizontal and vertical; never zero.
+    pub bubble_padding: (Pixels, Pixels),
 }
 
 impl Spacing {
@@ -47,16 +51,22 @@ impl Spacing {
                 group: px(1.),
                 message: px(0.),
                 chat: px(2.),
+                bubble: px(2.),
+                bubble_padding: (px(8.), px(3.)),
             },
             Density::Cozy => Self {
                 group: px(4.),
                 message: px(0.),
                 chat: px(4.),
+                bubble: px(4.),
+                bubble_padding: (px(10.), px(5.)),
             },
             Density::Roomy => Self {
                 group: px(10.),
                 message: px(3.),
                 chat: px(8.),
+                bubble: px(6.),
+                bubble_padding: (px(12.), px(8.)),
             },
         }
     }
@@ -73,6 +83,21 @@ mod tests {
         assert!(compact.group < cozy.group && cozy.group < roomy.group);
         assert!(compact.chat < cozy.chat && cozy.chat < roomy.chat);
         assert!(compact.message <= cozy.message && cozy.message < roomy.message);
+        assert!(compact.bubble < cozy.bubble && cozy.bubble < roomy.bubble);
+        assert!(compact.bubble_padding.0 < cozy.bubble_padding.0);
+        assert!(cozy.bubble_padding.0 < roomy.bubble_padding.0);
+        assert!(compact.bubble_padding.1 < cozy.bubble_padding.1);
+        assert!(cozy.bubble_padding.1 < roomy.bubble_padding.1);
+    }
+
+    #[test]
+    fn bubbles_never_touch() {
+        for density in [Density::Compact, Density::Cozy, Density::Roomy] {
+            let spacing = Spacing::for_density(density);
+            assert!(spacing.bubble > px(0.));
+            assert!(spacing.bubble_padding.0 > px(0.) && spacing.bubble_padding.1 > px(0.));
+            assert!(spacing.group * 2. >= spacing.bubble);
+        }
     }
 
     #[test]

@@ -404,7 +404,7 @@ fn log_row(
     h_flex()
         .items_start()
         .gap_2()
-        .pt(group_gap(row, style.spacing, 1.))
+        .pt(group_gap(row, style.spacing.group, style.spacing.message))
         .children(prefix)
         .children(indent)
         .child(
@@ -455,7 +455,11 @@ fn block_row(
     h_flex()
         .items_start()
         .gap_2()
-        .pt(group_gap(row, style.spacing, 2.))
+        .pt(group_gap(
+            row,
+            style.spacing.group * 2.,
+            style.spacing.message,
+        ))
         .child(
             v_flex()
                 .flex_1()
@@ -487,7 +491,7 @@ fn bubble_row(
     let name = row.leads.then(|| {
         div()
             .id(("bubble-name", row.message.id.get() as u64))
-            .px_3()
+            .px(style.spacing.bubble_padding.0)
             .text_xs()
             .font_weight(gpui_kit::FontWeight::SEMIBOLD)
             .text_color(color)
@@ -505,8 +509,8 @@ fn bubble_row(
     let bubble = v_flex()
         .id(("bubble", row.message.id.get() as u64))
         .min_w_0()
-        .px_3()
-        .py(px(6.))
+        .px(style.spacing.bubble_padding.0)
+        .py(style.spacing.bubble_padding.1)
         .rounded(px(12.))
         .bg(if outgoing {
             accent.opacity(0.2)
@@ -525,7 +529,11 @@ fn bubble_row(
         .test_support();
     h_flex()
         .items_start()
-        .pt(group_gap(row, style.spacing, 2.))
+        .pt(group_gap(
+            row,
+            style.spacing.group * 2.,
+            style.spacing.bubble,
+        ))
         .when(outgoing, |row| row.justify_end())
         .child(
             v_flex()
@@ -541,13 +549,9 @@ fn bubble_row(
         )
 }
 
-/// Space above a message: wider before a new group, by `scale`.
-fn group_gap(row: &Row<'_>, spacing: Spacing, scale: f32) -> Pixels {
-    if row.leads {
-        spacing.group * scale
-    } else {
-        spacing.message
-    }
+/// Space above a message: `group` before a new group, else `message`.
+fn group_gap(row: &Row<'_>, group: Pixels, message: Pixels) -> Pixels {
+    if row.leads { group } else { message }
 }
 
 fn sender_color(row: &Row<'_>, cx: &App) -> Hsla {
