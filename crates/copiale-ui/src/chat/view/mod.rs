@@ -14,15 +14,16 @@ use std::time::Duration;
 
 use copiale_core::config;
 use copiale_core::{Account, Command, ConversationId, Event, MessageId, Timestamp};
-use gpui_kit::component::h_flex;
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::component::kbd::Kbd;
+use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::{Icon, Sizable as _, h_flex};
 use gpui_kit::{
-    Action, AnyElement, App, AppContext as _, AsKeystroke as _, Context, Entity, FocusHandle,
+    Action, AnyElement, App, AppContext as _, AsKeystroke as _, Context, Div, Entity, FocusHandle,
     Focusable as _, FollowMode, InteractiveElement as _, IntoElement, KeyBinding, KeyContext,
     ListAlignment, ListState, ParentElement as _, Pixels, Render, ScrollHandle, SharedString,
-    StyleRefinement, Styled as _, Subscription, Task, WeakEntity, Window, WindowId, actions, div,
-    point, px,
+    Stateful, StatefulInteractiveElement as _, StyleRefinement, Styled as _, Subscription, Task,
+    WeakEntity, Window, WindowId, actions, div, point, px,
 };
 
 use super::emoji::EmojiTyping;
@@ -32,6 +33,7 @@ use super::notices::Notices;
 use super::settings_panel::SettingsPanel;
 use super::text::isolate;
 use super::time::LocalClock;
+use crate::icons::IconName;
 use crate::kinetic::{self, Kinetic};
 use crate::notifier::Notifier;
 use crate::settings::Settings;
@@ -1117,6 +1119,34 @@ fn key_hint(action: &dyn Action, window: &Window) -> Option<SharedString> {
     let binding = window.highest_precedence_binding_for_action_in_context(action, context)?;
     let key = binding.keystrokes().first()?;
     Some(Kbd::format(key.as_keystroke()).into())
+}
+
+/// An icon running `action`, its name and key in the tooltip; `active`
+/// while what it opens is shown.
+fn icon_button(
+    id: &'static str,
+    icon: IconName,
+    name: &'static str,
+    action: &dyn Action,
+    active: bool,
+    cx: &App,
+) -> Stateful<Div> {
+    let palette = cx.palette();
+    let hover = palette.action;
+    let action = action.boxed_clone();
+    div()
+        .id(id)
+        .flex_none()
+        .p_1()
+        .cursor_pointer()
+        .text_color(if active { hover } else { palette.text_muted })
+        .hover(move |button| button.text_color(hover))
+        .child(Icon::new(icon).small())
+        .tooltip(move |window, cx| {
+            Tooltip::new(name)
+                .action(action.as_ref(), Some(CONTEXT))
+                .build(window, cx)
+        })
 }
 
 fn layout_for(window: &Window) -> Layout {

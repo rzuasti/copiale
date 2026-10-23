@@ -4,6 +4,7 @@ mod capture;
 pub mod chat;
 mod drawer;
 mod fuzzy;
+mod icons;
 mod kinetic;
 pub mod main_window;
 pub mod notifier;
@@ -83,7 +84,7 @@ impl RunningCore {
 /// from other `copiale` processes.
 pub fn run(core: CoreHandle, events: Events, mut requests: UnboundedReceiver<Request>) {
     let core = Rc::new(RunningCore(RefCell::new(Some(core))));
-    let app = gpui_kit::application().with_assets(gpui_kit::assets::Assets);
+    let app = gpui_kit::application().with_assets(icons::Assets);
     // The Dock icon on macOS.
     app.on_reopen(|cx| main_window::show(None, cx));
     app.run(move |cx| {

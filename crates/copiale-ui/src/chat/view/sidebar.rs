@@ -16,12 +16,16 @@ use gpui_kit::{
 };
 
 use crate::chat::layout::Spacing;
-use crate::chat::model::{Connection, title};
+use crate::chat::model::{Connection, Overlay, title};
 use crate::drawer::drawer;
+use crate::icons::IconName;
 use crate::settings::Settings;
 use crate::theme::ActivePalette as _;
 
-use super::{ChatView, FocusSearch, SEARCHING, SearchNext, SearchPrevious, full_size};
+use super::{
+    ChatView, FocusSearch, NewChat, OpenSettings, SEARCHING, SearchNext, SearchPrevious, full_size,
+    icon_button,
+};
 
 /// Height of the strip at the sidebar's top whose hover reveals search.
 const SEARCH_STRIP: Pixels = px(12.);
@@ -314,27 +318,67 @@ impl ChatView {
         cx.notify();
     }
 
+    /// The connection, then the new chat and settings buttons.
     fn render_connection(&self, cx: &mut Context<Self>) -> AnyElement {
         let (dot, color) = self.status_dot(cx);
         let text = self.chat.connection_label(self.chat.clock().now());
         let offline = matches!(self.chat.connection(), Connection::Offline { .. });
+        let overlay = self.chat.overlay();
         h_flex()
-            .id("connection")
-            .gap_2()
-            .px_3()
-            .py_2()
+            .gap_1()
+            .pl_3()
+            .pr_2()
+            .py_1()
             .border_t_1()
             .border_color(cx.palette().border)
-            .font_family(cx.theme().mono_font_family.clone())
-            .text_xs()
-            .text_color(cx.palette().text_muted)
-            .child(div().text_color(color).child(dot))
-            .child(text)
-            .when(offline, |this| {
-                this.cursor_pointer()
-                    .on_click(cx.listener(|view, _, _, _| view.core.send(Command::Reconnect)))
-            })
-            .test_support()
+            .child(
+                h_flex()
+                    .id("connection")
+                    .flex_1()
+                    .min_w_0()
+                    .gap_2()
+                    .font_family(cx.theme().mono_font_family.clone())
+                    .text_xs()
+                    .text_color(cx.palette().text_muted)
+                    .child(div().text_color(color).child(dot))
+                    .child(div().truncate().child(text))
+                    .when(offline, |this| {
+                        this.cursor_pointer().on_click(
+                            cx.listener(|view, _, _, _| view.core.send(Command::Reconnect)),
+                        )
+                    })
+                    .test_support(),
+            )
+            .child(
+                icon_button(
+                    "new-chat-button",
+                    IconName::SquarePen,
+                    "New chat",
+                    &NewChat,
+                    overlay == Some(Overlay::NewChat),
+                    cx,
+                )
+                .on_click(
+                    cx.listener(|view, _, window, cx| view.start_new_chat(&NewChat, window, cx)),
+                )
+                .test_support(),
+            )
+            .child(
+                icon_button(
+                    "settings-button",
+                    IconName::Settings,
+                    "Settings",
+                    &OpenSettings,
+                    overlay == Some(Overlay::Settings),
+                    cx,
+                )
+                .on_click(
+                    cx.listener(|view, _, window, cx| {
+                        view.open_settings(&OpenSettings, window, cx)
+                    }),
+                )
+                .test_support(),
+            )
             .into_any_element()
     }
 

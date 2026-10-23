@@ -16,13 +16,14 @@ use gpui_kit::{
 use crate::chat::emoji::Edit;
 use crate::chat::emoji_grid::used;
 use crate::chat::{CATEGORIES, COLUMNS, EmojiGrid, GridRow, RECENT};
+use crate::icons::IconName;
 use crate::settings::Settings;
 use crate::theme::ActivePalette as _;
 
 use super::overlays::picker_row;
 use super::{
     ChatView, CloseEmojiGrid, CloseEmojiPicker, EMOJI_GRID, EmojiNext, EmojiPrevious, GridDown,
-    GridLeft, GridRight, GridUp, PickEmoji, ToggleEmojiGrid,
+    GridLeft, GridRight, GridUp, PickEmoji, ToggleEmojiGrid, icon_button,
 };
 
 /// An emoji cell's side.
@@ -289,29 +290,22 @@ impl ChatView {
         cx.notify();
     }
 
-    /// The `:)` button opening the picker.
+    /// The button opening the picker.
     pub(super) fn render_emoji_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let palette = cx.palette();
-        let action = palette.action;
-        div()
-            .id("emoji-button")
-            .flex_none()
-            .px_1()
-            .cursor_pointer()
-            .font_family(cx.theme().mono_font_family.clone())
-            .text_color(if self.emoji_grid.is_some() {
-                action
-            } else {
-                palette.text_muted
-            })
-            .hover(move |button| button.text_color(action))
-            // Keeps the composer's selection for the emoji to replace.
-            .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
-            .on_click(cx.listener(|view, _, window, cx| {
-                view.toggle_emoji_grid(&ToggleEmojiGrid, window, cx)
-            }))
-            .child(":)")
-            .test_support()
+        icon_button(
+            "emoji-button",
+            IconName::FaceSlightlySmiling,
+            "Emoji",
+            &ToggleEmojiGrid,
+            self.emoji_grid.is_some(),
+            cx,
+        )
+        // Keeps the composer's selection for the emoji to replace.
+        .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+        .on_click(
+            cx.listener(|view, _, window, cx| view.toggle_emoji_grid(&ToggleEmojiGrid, window, cx)),
+        )
+        .test_support()
     }
 
     /// The picker above the composer: search, the grid and category tabs.

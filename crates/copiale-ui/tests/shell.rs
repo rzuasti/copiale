@@ -1714,6 +1714,23 @@ fn palette_runs_commands(cx: &mut TestAppContext) {
     assert_eq!(overlay(&ui, cx), Some(Overlay::Settings));
 }
 
+#[gpui_kit::test]
+fn sidebar_buttons_open_new_chat_and_settings(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.open_alice(cx);
+    ui.core.take();
+
+    ui.click("new-chat-button", cx);
+    assert_eq!(overlay(&ui, cx), Some(Overlay::NewChat));
+    assert!(matches!(ui.core.take().as_slice(), [Command::LoadContacts]));
+
+    ui.press("escape", cx);
+    ui.click("settings-button", cx);
+    assert_eq!(overlay(&ui, cx), Some(Overlay::Settings));
+    // Online: the status beside it does nothing.
+    assert!(ui.core.take().is_empty());
+}
+
 fn alice_identity(verification: Verification) -> Event {
     Event::Identity(Identity {
         peer: peer(1),
