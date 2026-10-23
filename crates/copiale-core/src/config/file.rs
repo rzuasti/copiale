@@ -14,45 +14,109 @@ use super::{ConfigError, ConfigWarning, Loaded, Setting, edit, parse};
 /// Editors save in several steps; wait for quiet before reloading.
 const DEBOUNCE: Duration = Duration::from_millis(150);
 
-/// The user's `config.toml`.
+/// The user's `config.toml`, over any system-wide defaults.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConfigFile {
     path: PathBuf,
+    /// Files with defaults, each over the last; read, never written or
+    /// watched.
+    defaults: Vec<PathBuf>,
 }
 
 impl ConfigFile {
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+        Self::with_defaults(path, Vec::new())
     }
 
-    /// Platform config dir, e.g. `~/.config/copiale/config.toml` on Linux.
+    /// `defaults`: files read before `path`, each over the last.
+    pub fn with_defaults(path: impl Into<PathBuf>, defaults: Vec<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            defaults,
+        }
+    }
+
+    /// Platform config dir, e.g. `~/.config/copiale/config.toml` on Linux,
+    /// over `copiale/config.toml` in `$XDG_CONFIG_DIRS` (`/etc/xdg`).
     pub fn platform() -> Option<Self> {
-        Some(Self::new(
-            crate::dirs::project_dirs()?
-                .config_dir()
-                .join("config.toml"),
-        ))
+        let path = crate::dirs::project_dirs()?
+            .config_dir()
+            .join("config.toml");
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let defaults = xdg_defaults(std::env::var_os("XDG_CONFIG_DIRS"));
+        #[cfg(not(all(unix, not(target_os = "macos"))))]
+        let defaults = Vec::new();
+        Some(Self::with_defaults(path, defaults))
     }
 
     pub fn path(&self) -> &Path {
         &self.path
     }
 
-    /// Reads the file; a missing file means defaults. Never fails.
+    pub fn defaults(&self) -> &[PathBuf] {
+        &self.defaults
+    }
+
+    /// Whether the file can't be written, e.g. a link into the Nix store.
+    /// A missing file can.
+    pub fn read_only(&self) -> bool {
+        std::fs::metadata(&self.path).is_ok_and(|metadata| metadata.permissions().readonly())
+    }
+
+    /// Reads the file over the defaults; a missing file means defaults.
+    /// Never fails.
     pub fn load(&self) -> Loaded {
         match read(&self.path) {
-            Ok(text) => parse::parse(&text),
-            Err(error) => Loaded {
-                warnings: vec![ConfigWarning {
+            Ok(text) => self.parse(&text),
+            Err(error) => {
+                let mut loaded = self.base();
+                loaded.warnings.push(ConfigWarning {
                     setting: None,
                     message: format!(
                         "can't read {}: {error}; using all defaults",
                         self.path.display()
                     ),
-                }],
-                ..Loaded::default()
-            },
+                });
+                loaded
+            }
         }
+    }
+
+    /// `text` as the file's contents, over the defaults.
+    fn parse(&self, text: &str) -> Loaded {
+        let mut base = self.base();
+        let loaded = parse::parse_over(text, &base.config);
+        base.warnings.extend(loaded.warnings);
+        Loaded {
+            config: loaded.config,
+            warnings: base.warnings,
+        }
+    }
+
+    /// The defaults files, each read over the last; warnings name the file.
+    fn base(&self) -> Loaded {
+        let mut base = Loaded::default();
+        for path in &self.defaults {
+            let in_file = |message: String| format!("{message} (in {})", path.display());
+            let text = match read(path) {
+                Ok(text) => text,
+                Err(error) => {
+                    base.warnings.push(ConfigWarning {
+                        setting: None,
+                        message: in_file(format!("can't read: {error}")),
+                    });
+                    continue;
+                }
+            };
+            let loaded = parse::parse_over(&text, &base.config);
+            base.config = loaded.config;
+            base.warnings
+                .extend(loaded.warnings.into_iter().map(|warning| ConfigWarning {
+                    message: in_file(warning.message),
+                    ..warning
+                }));
+        }
+        base
     }
 
     /// Applies `settings`, keeping comments and unrelated content.
@@ -139,28 +203,33 @@ impl ConfigFile {
                     message => dirty |= message.concerns(&names),
                 }
             }
-            let errors = self.save(&settings, &mut last, |loaded| {
+            let (errors, changed) = self.save(&settings, &mut last, |loaded| {
                 on_event(ConfigEvent::Changed { loaded, saved })
             });
             saved = through;
+            if let Some(loaded) = changed {
+                on_event(ConfigEvent::Changed { loaded, saved });
+            }
             on_event(ConfigEvent::Saved { through, errors });
         }
     }
 
     /// Applies each of `settings`, skipping invalid ones. Reports external
-    /// changes to `last` found first through `on_change`.
+    /// changes to `last` found first through `on_change`. Also returns the
+    /// file as written if it differs from `last` with `settings` applied,
+    /// e.g. as a removed key uncovers a default from another file.
     fn save(
         &self,
         settings: &[Setting],
         last: &mut Loaded,
         on_change: impl FnOnce(Loaded),
-    ) -> Vec<ConfigError> {
+    ) -> (Vec<ConfigError>, Option<Loaded>) {
         let target = self.target();
         let text = match read(&target) {
             Ok(text) => text,
-            Err(error) => return vec![error.into()],
+            Err(error) => return (vec![error.into()], None),
         };
-        let found = parse::parse(&text);
+        let found = self.parse(&text);
         if found != *last {
             *last = found.clone();
             on_change(found);
@@ -168,26 +237,35 @@ impl ConfigFile {
 
         let mut errors = Vec::new();
         let mut updated = text.clone();
+        let mut expected = last.config.clone();
         for setting in settings {
             match edit::apply(&updated, std::slice::from_ref(setting)) {
-                Ok(text) => updated = text,
+                Ok(text) => {
+                    updated = text;
+                    expected.set(setting);
+                }
                 Err(error) => errors.push(error),
             }
         }
+        let mut changed = None;
         if updated != text {
             match write_atomically(&target, updated.as_bytes()) {
-                Ok(()) => *last = parse::parse(&updated),
+                Ok(()) => {
+                    *last = self.parse(&updated);
+                    changed = (last.config != expected).then(|| last.clone());
+                }
                 Err(error) => errors.push(error.into()),
             }
         }
-        errors
+        (errors, changed)
     }
 
-    /// The file, and its target if it is a symlink.
+    /// The file, and its target if it is a symlink. A read-only target,
+    /// e.g. in the Nix store, changes only by relinking the file.
     fn watched(&self) -> Vec<PathBuf> {
         let mut paths = vec![self.path.clone()];
         let target = self.target();
-        if target != self.path {
+        if target != self.path && !self.read_only() {
             paths.push(target);
         }
         paths
@@ -284,6 +362,25 @@ impl Message {
     }
 }
 
+/// `copiale/config.toml` in each of `dirs` (colon-separated, most
+/// important first, default `/etc/xdg`), least important first.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn xdg_defaults(dirs: Option<OsString>) -> Vec<PathBuf> {
+    let dirs = dirs
+        .filter(|dirs| !dirs.is_empty())
+        .unwrap_or_else(|| "/etc/xdg".into());
+    let mut files: Vec<PathBuf> = Vec::new();
+    // Relative paths are invalid.
+    for dir in std::env::split_paths(&dirs).filter(|dir| dir.is_absolute()) {
+        let file = dir.join("copiale").join("config.toml");
+        if !files.contains(&file) {
+            files.push(file);
+        }
+    }
+    files.reverse();
+    files
+}
+
 /// The file's text; empty if missing.
 fn read(path: &Path) -> std::io::Result<String> {
     match std::fs::read_to_string(path) {
@@ -321,4 +418,28 @@ fn write_atomically(path: &Path, contents: &[u8]) -> std::io::Result<()> {
         std::fs::remove_file(&temp).ok();
     }
     written
+}
+
+#[cfg(all(test, unix, not(target_os = "macos")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn xdg_defaults_are_least_important_first() {
+        let files = |dirs: Option<&str>| -> Vec<String> {
+            xdg_defaults(dirs.map(OsString::from))
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect()
+        };
+        assert_eq!(files(None), ["/etc/xdg/copiale/config.toml"]);
+        assert_eq!(files(Some("")), ["/etc/xdg/copiale/config.toml"]);
+        assert_eq!(
+            files(Some("/etc/xdg:relative:/opt/xdg:/etc/xdg")),
+            [
+                "/opt/xdg/copiale/config.toml",
+                "/etc/xdg/copiale/config.toml"
+            ]
+        );
+    }
 }

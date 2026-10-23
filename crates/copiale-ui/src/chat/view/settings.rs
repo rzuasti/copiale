@@ -213,6 +213,13 @@ impl ChatView {
             || "No config directory: not saved".to_owned(),
             |path| path.display().to_string(),
         );
+        let read_only = Settings::read_only(cx).then(|| {
+            div()
+                .id("config-read-only")
+                .flex_none()
+                .child("read-only: changes last until restart")
+                .test_support()
+        });
         v_flex()
             .key_context(SETTINGS)
             .on_action(cx.listener(|view, _: &SettingPrevious, _, cx| view.step_setting(-1, cx)))
@@ -248,6 +255,7 @@ impl ChatView {
                     .font_family(mono)
                     .text_xs()
                     .text_color(muted)
+                    .children(read_only)
                     .child(
                         div()
                             .id("config-path")

@@ -1,0 +1,237 @@
+{
+  "settings": [
+    {
+      "table": "appearance",
+      "key": "theme",
+      "description": "Color theme: `system` follows the system's dark or light appearance; `custom` uses the `[theme]` table.",
+      "type": "choice",
+      "choices": [
+        "system",
+        "copiale-dark",
+        "copiale-light",
+        "catppuccin-mocha",
+        "catppuccin-macchiato",
+        "catppuccin-frappe",
+        "catppuccin-latte",
+        "gruvbox-dark",
+        "gruvbox-light",
+        "nord",
+        "dracula",
+        "solarized-dark",
+        "solarized-light",
+        "tokyo-night",
+        "tokyo-night-storm",
+        "tokyo-night-day",
+        "rose-pine",
+        "rose-pine-moon",
+        "rose-pine-dawn",
+        "everforest-dark",
+        "everforest-light",
+        "kanagawa-wave",
+        "kanagawa-dragon",
+        "kanagawa-lotus",
+        "one-dark",
+        "one-light",
+        "custom"
+      ],
+      "default": "system"
+    },
+    {
+      "table": "typography",
+      "key": "ui_font",
+      "description": "Interface font; unset: the built-in default.",
+      "type": "font"
+    },
+    {
+      "table": "typography",
+      "key": "mono_font",
+      "description": "Monospaced font, for labels and hints; unset: the built-in default.",
+      "type": "font"
+    },
+    {
+      "table": "typography",
+      "key": "body_font",
+      "description": "Message font; unset: the built-in default.",
+      "type": "font"
+    },
+    {
+      "table": "typography",
+      "key": "size",
+      "description": "Base font size in pixels.",
+      "type": "integer",
+      "default": 14,
+      "min": 9,
+      "max": 32
+    },
+    {
+      "table": "typography",
+      "key": "line_height",
+      "description": "Line height of messages, as a multiple of the font size.",
+      "type": "float",
+      "default": 1.4,
+      "min": 1.0,
+      "max": 2.0
+    },
+    {
+      "table": "layout",
+      "key": "density",
+      "description": "Spacing of messages and rows.",
+      "type": "choice",
+      "choices": [
+        "compact",
+        "cozy",
+        "roomy"
+      ],
+      "default": "cozy"
+    },
+    {
+      "table": "layout",
+      "key": "message_style",
+      "description": "How messages are drawn: an IRC-style log, blocks or bubbles.",
+      "type": "choice",
+      "choices": [
+        "log",
+        "blocks",
+        "bubbles"
+      ],
+      "default": "log"
+    },
+    {
+      "table": "layout",
+      "key": "timestamps",
+      "description": "When message times show.",
+      "type": "choice",
+      "choices": [
+        "always",
+        "hover",
+        "never"
+      ],
+      "default": "always"
+    },
+    {
+      "table": "layout",
+      "key": "clock",
+      "description": "Clock format.",
+      "type": "choice",
+      "choices": [
+        "24h",
+        "12h"
+      ],
+      "default": "24h"
+    },
+    {
+      "table": "layout",
+      "key": "avatars",
+      "description": "Avatars in the chat list.",
+      "type": "bool",
+      "default": false
+    },
+    {
+      "table": "composer",
+      "key": "convert_emoticons",
+      "description": "Typed emoticons such as `:)` become emoji.",
+      "type": "bool",
+      "default": true
+    },
+    {
+      "table": "window",
+      "key": "opacity",
+      "description": "Window background opacity; text stays opaque.",
+      "type": "float",
+      "default": 1.0,
+      "min": 0.5,
+      "max": 1.0
+    },
+    {
+      "table": "window",
+      "key": "blur",
+      "description": "Blur behind a translucent background, where the compositor allows.",
+      "type": "bool",
+      "default": false
+    },
+    {
+      "table": "window",
+      "key": "capture_protection",
+      "description": "Hides the window from screenshots and screen shares; Windows and macOS only.",
+      "type": "bool",
+      "default": false
+    },
+    {
+      "table": "notifications",
+      "key": "content",
+      "description": "What notifications show: nothing, the sender's name, or the message too.",
+      "type": "choice",
+      "choices": [
+        "off",
+        "name",
+        "message"
+      ],
+      "default": "name"
+    }
+  ],
+  "theme": {
+    "appearances": [
+      "dark",
+      "light"
+    ],
+    "colors": [
+      {
+        "name": "background",
+        "description": "Conversation pane, dialogs."
+      },
+      {
+        "name": "sidebar",
+        "description": "Chat list."
+      },
+      {
+        "name": "surface",
+        "description": "Hovered rows, controls."
+      },
+      {
+        "name": "border",
+        "description": "Dividers, rules, input outlines."
+      },
+      {
+        "name": "text",
+        "description": "Text."
+      },
+      {
+        "name": "text_secondary",
+        "description": "Your own name."
+      },
+      {
+        "name": "text_muted",
+        "description": "Timestamps, hints, secondary labels."
+      },
+      {
+        "name": "accent",
+        "description": "Unread markers, selected chat, primary buttons, focus."
+      },
+      {
+        "name": "accent_text",
+        "description": "Text on accent, success and danger fills."
+      },
+      {
+        "name": "action",
+        "description": "Things to click: message actions, retry, esc."
+      },
+      {
+        "name": "success",
+        "description": "Online."
+      },
+      {
+        "name": "danger",
+        "description": "Errors, failed messages, offline."
+      },
+      {
+        "name": "link",
+        "description": "Links."
+      },
+      {
+        "name": "selection",
+        "description": "Selected text; translucent, as it is drawn over the text."
+      }
+    ],
+    "nicks": "Sender names, picked per contact; quieter than text, louder than text_muted."
+  }
+}

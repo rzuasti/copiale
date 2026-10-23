@@ -9,6 +9,57 @@ Linux, macOS and Windows.
 Copiale is an independent project and is not affiliated with or endorsed by
 Signal Messenger LLC.
 
+## Install
+
+### Nix
+
+The flake builds Copiale for Linux, with a desktop entry and icon:
+
+```sh
+nix run git+https://codeberg.org/korba/copiale
+```
+
+On NixOS, add the flake as an input and enable the module:
+
+```nix
+{
+  inputs.copiale.url = "git+https://codeberg.org/korba/copiale";
+
+  outputs = {nixpkgs, copiale, ...}: {
+    nixosConfigurations.my-host = nixpkgs.lib.nixosSystem {
+      modules = [
+        copiale.nixosModules.default
+        {
+          programs.copiale = {
+            enable = true;
+            # Optional system-wide defaults; users' settings override them.
+            settings.layout.density = "compact";
+          };
+        }
+      ];
+    };
+  };
+}
+```
+
+With Home Manager, import `copiale.homeModules.default` instead. Its
+`programs.copiale.settings` becomes your `config.toml`, which the settings
+UI then can't save to: changes made there last until Copiale restarts.
+
+`settings` takes every setting in `config.toml` by table and key, such as
+`appearance.theme`, `typography.size` and `window.opacity`, and the colors
+of a custom theme:
+
+```nix
+programs.copiale.settings = {
+  appearance.theme = "custom";
+  # A theme file without its name.
+  theme = builtins.removeAttrs (lib.importTOML ./my-theme.toml) ["name"];
+};
+```
+
+`copiale --check-config` lists any problems in the config in effect.
+
 ## License
 
 Copyright (C) 2026 Ricardo Zuasti

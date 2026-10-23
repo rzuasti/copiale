@@ -210,11 +210,20 @@ macro_rules! settings {
     (@check $v:ident $range:expr) => {
         in_range($v, &$range)
     };
-    ($($(#[$meta:meta])* $variant:ident($type:ty): $table:ident.$key:ident $(in $range:expr)?,)+) => {
+    (@range) => {
+        None
+    };
+    (@range $range:expr) => {
+        Some((
+            json($range.start().to_toml()).expect("a number"),
+            json($range.end().to_toml()).expect("a number"),
+        ))
+    };
+    ($($(#[doc = $doc:literal])+ $variant:ident($type:ty): $table:ident.$key:ident $(in $range:expr)?,)+) => {
         /// One change to `config.toml`, as made by the settings UI.
         #[derive(Clone, Debug, PartialEq)]
         pub enum Setting {
-            $($(#[$meta])* $variant($type),)+
+            $($(#[doc = $doc])+ $variant($type),)+
         }
 
         impl Setting {
@@ -242,6 +251,22 @@ macro_rules! settings {
                     $(Self::$variant(v) => settings!(@check v $($range)?),)+
                 }
             }
+
+            /// Every setting, in declaration order, as described to tools
+            /// outside the app.
+            pub fn info() -> Vec<SettingInfo> {
+                let defaults = Config::default();
+                vec![$(
+                    SettingInfo {
+                        table: stringify!($table),
+                        key: stringify!($key),
+                        description: description(&[$($doc),+]),
+                        kind: <$type as Kind>::info(),
+                        default: json(defaults.$table.$key.to_toml()),
+                        range: settings!(@range $($range)?),
+                    },
+                )+]
+            }
         }
 
         impl Config {
@@ -252,9 +277,10 @@ macro_rules! settings {
                 }
             }
 
-            /// Reads every setting, in declaration order.
-            pub(crate) fn read(reader: &mut Reader) -> Self {
-                let mut config = Self::default();
+            /// Reads every setting, in declaration order; missing or
+            /// invalid ones keep `base`'s value.
+            pub(crate) fn read(reader: &mut Reader, base: &Self) -> Self {
+                let mut config = base.clone();
                 $(
                     config.$table.$key = reader.read(
                         stringify!($table),
@@ -270,29 +296,93 @@ macro_rules! settings {
 }
 
 settings! {
+    /// Color theme: `system` follows the system's dark or light appearance;
+    /// `custom` uses the `[theme]` table.
     Theme(ThemeName): appearance.theme,
-    /// `None` removes the key, restoring the default font.
+    /// Interface font; unset: the built-in default.
     UiFont(Option<String>): typography.ui_font,
+    /// Monospaced font, for labels and hints; unset: the built-in default.
     MonoFont(Option<String>): typography.mono_font,
+    /// Message font; unset: the built-in default.
     BodyFont(Option<String>): typography.body_font,
+    /// Base font size in pixels.
     FontSize(u32): typography.size in Typography::SIZE_RANGE,
+    /// Line height of messages, as a multiple of the font size.
     LineHeight(f64): typography.line_height in Typography::LINE_HEIGHT_RANGE,
+    /// Spacing of messages and rows.
     Density(Density): layout.density,
+    /// How messages are drawn: an IRC-style log, blocks or bubbles.
     MessageStyle(MessageStyle): layout.message_style,
+    /// When message times show.
     Timestamps(TimestampVisibility): layout.timestamps,
+    /// Clock format.
     Clock(TimeFormat): layout.clock,
+    /// Avatars in the chat list.
     Avatars(bool): layout.avatars,
+    /// Typed emoticons such as `:)` become emoji.
     ConvertEmoticons(bool): composer.convert_emoticons,
+    /// Window background opacity; text stays opaque.
     Opacity(f64): window.opacity in WindowConfig::OPACITY_RANGE,
+    /// Blur behind a translucent background, where the compositor allows.
     Blur(bool): window.blur,
+    /// Hides the window from screenshots and screen shares; Windows and
+    /// macOS only.
     CaptureProtection(bool): window.capture_protection,
+    /// What notifications show: nothing, the sender's name, or the message
+    /// too.
     NotificationContent(NotificationContent): notifications.content,
+}
+
+/// A setting as described to tools outside the app, such as the Nix module.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SettingInfo {
+    pub table: &'static str,
+    pub key: &'static str,
+    pub description: String,
+    pub kind: KindInfo,
+    /// `None`: unset.
+    pub default: Option<serde_json::Value>,
+    /// Lowest and highest value, for numbers.
+    pub range: Option<(serde_json::Value, serde_json::Value)>,
+}
+
+/// A setting's type.
+#[derive(Clone, Debug, PartialEq)]
+pub enum KindInfo {
+    Choice(Vec<&'static str>),
+    Bool,
+    Integer,
+    Float,
+    /// A font name.
+    Font,
+}
+
+/// Doc comment lines as one paragraph.
+fn description(lines: &[&str]) -> String {
+    lines
+        .iter()
+        .map(|line| line.trim())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// A TOML value as JSON.
+fn json(value: Option<Value>) -> Option<serde_json::Value> {
+    match value? {
+        Value::String(text) => Some(text.value().as_str().into()),
+        Value::Integer(number) => Some((*number.value()).into()),
+        Value::Float(number) => Some((*number.value()).into()),
+        Value::Boolean(flag) => Some((*flag.value()).into()),
+        _ => None,
+    }
 }
 
 /// How a setting's type is read from and written to TOML.
 pub(crate) trait Kind: Clone {
     /// What a warning says was expected.
     fn expected() -> String;
+
+    fn info() -> KindInfo;
 
     fn from_toml(value: &Value) -> Option<Self>;
 
@@ -314,6 +404,10 @@ impl<T: Choice> Kind for T {
         format!("one of {}", names.join(", "))
     }
 
+    fn info() -> KindInfo {
+        KindInfo::Choice(T::CHOICES.iter().map(|(name, _)| *name).collect())
+    }
+
     fn from_toml(value: &Value) -> Option<Self> {
         value.as_str().and_then(T::from_name)
     }
@@ -332,6 +426,10 @@ impl Kind for bool {
         "true or false".into()
     }
 
+    fn info() -> KindInfo {
+        KindInfo::Bool
+    }
+
     fn from_toml(value: &Value) -> Option<Self> {
         value.as_bool()
     }
@@ -348,6 +446,10 @@ impl Kind for bool {
 impl Kind for u32 {
     fn expected() -> String {
         "a whole number".into()
+    }
+
+    fn info() -> KindInfo {
+        KindInfo::Integer
     }
 
     fn from_toml(value: &Value) -> Option<Self> {
@@ -369,6 +471,10 @@ impl Kind for f64 {
         "a number".into()
     }
 
+    fn info() -> KindInfo {
+        KindInfo::Float
+    }
+
     fn from_toml(value: &Value) -> Option<Self> {
         value
             .as_float()
@@ -388,6 +494,10 @@ impl Kind for f64 {
 impl Kind for Option<String> {
     fn expected() -> String {
         "a font name".into()
+    }
+
+    fn info() -> KindInfo {
+        KindInfo::Font
     }
 
     fn from_toml(value: &Value) -> Option<Self> {
@@ -421,5 +531,48 @@ pub(crate) fn in_range<T: PartialOrd + std::fmt::Display>(
             range.start(),
             range.end()
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn info_describes_every_setting() {
+        let info = Setting::info();
+        let keys: Vec<_> = info
+            .iter()
+            .map(|setting| (setting.table, setting.key))
+            .collect();
+        assert_eq!(keys, Setting::KEYS);
+        assert!(info.iter().all(|setting| !setting.description.is_empty()));
+
+        let size = &info[4];
+        assert_eq!((size.table, size.key), ("typography", "size"));
+        assert_eq!(size.kind, KindInfo::Integer);
+        assert_eq!(size.default, Some(14.into()));
+        assert_eq!(size.range, Some((9.into(), 32.into())));
+
+        let theme = &info[0];
+        assert_eq!(
+            theme.description,
+            "Color theme: `system` follows the system's dark or light appearance; `custom` uses the `[theme]` table."
+        );
+        let KindInfo::Choice(choices) = &theme.kind else {
+            panic!("{:?}", theme.kind);
+        };
+        assert_eq!(choices.first(), Some(&"system"));
+        assert!(!choices.contains(&"dark"), "aliases aren't listed");
+        assert_eq!(theme.default, Some("system".into()));
+
+        let ui_font = &info[1];
+        assert_eq!(
+            (ui_font.kind.clone(), ui_font.default.clone()),
+            (KindInfo::Font, None)
+        );
+        let line_height = &info[5];
+        assert_eq!(line_height.default, Some(1.4.into()));
+        assert_eq!(line_height.range, Some((1.0.into(), 2.0.into())));
     }
 }

@@ -9,6 +9,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use cli::{Cli, USAGE};
+use copiale_core::config::ConfigFile;
 use copiale_core::signal::PresageLinker;
 use copiale_core::storage::{OsKeychain, Storage, StoragePaths};
 use copiale_ui::Request;
@@ -36,9 +37,13 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    if cli == Cli::Help {
-        print!("{USAGE}");
-        return ExitCode::SUCCESS;
+    match cli {
+        Cli::Help => {
+            print!("{USAGE}");
+            return ExitCode::SUCCESS;
+        }
+        Cli::CheckConfig(file) => return check_config(file),
+        _ => {}
     }
 
     let Some(dir) = copiale_core::runtime_dir() else {
@@ -95,6 +100,25 @@ fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// Prints the problems in `file`, or in the platform config and its
+/// defaults; fails if there are any.
+fn check_config(file: Option<std::path::PathBuf>) -> ExitCode {
+    let Some(file) = file.map(ConfigFile::new).or_else(ConfigFile::platform) else {
+        eprintln!("Can't determine the config directory: no home directory");
+        return ExitCode::FAILURE;
+    };
+    let problems = copiale_ui::settings::problems(&file.load());
+    for problem in &problems {
+        eprintln!("{problem}");
+    }
+    if problems.is_empty() {
+        println!("No problems found.");
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
 /// Hands the request to the running instance.
 fn forward(dir: &std::path::Path, cli: Cli) -> ExitCode {
     // Lets the running instance's window take focus on Wayland.
@@ -103,7 +127,7 @@ fn forward(dir: &std::path::Path, cli: Cli) -> ExitCode {
         Cli::Start => Request::Show { activation_token },
         Cli::Toggle => Request::Toggle { activation_token },
         Cli::Quit => Request::Quit,
-        Cli::Help => unreachable!("help exits before"),
+        Cli::Help | Cli::CheckConfig(_) => unreachable!("exits before"),
     };
     match instance::send(dir, &request) {
         Ok(()) => ExitCode::SUCCESS,

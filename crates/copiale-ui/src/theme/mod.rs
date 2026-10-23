@@ -101,7 +101,35 @@ pub enum Appearance {
     Dark,
 }
 
-/// Color tokens; see `themes/dark.toml` for what each one colors.
+/// [`Palette`]'s colors other than `nicks`, with what each colors.
+pub const TOKENS: [(&str, &str); 14] = [
+    ("background", "Conversation pane, dialogs."),
+    ("sidebar", "Chat list."),
+    ("surface", "Hovered rows, controls."),
+    ("border", "Dividers, rules, input outlines."),
+    ("text", "Text."),
+    ("text_secondary", "Your own name."),
+    ("text_muted", "Timestamps, hints, secondary labels."),
+    (
+        "accent",
+        "Unread markers, selected chat, primary buttons, focus.",
+    ),
+    ("accent_text", "Text on accent, success and danger fills."),
+    ("action", "Things to click: message actions, retry, esc."),
+    ("success", "Online."),
+    ("danger", "Errors, failed messages, offline."),
+    ("link", "Links."),
+    (
+        "selection",
+        "Selected text; translucent, as it is drawn over the text.",
+    ),
+];
+
+/// What [`Palette`]'s `nicks` color.
+pub const NICKS: &str =
+    "Sender names, picked per contact; quieter than text, louder than text_muted.";
+
+/// Color tokens; see [`TOKENS`].
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Palette {
@@ -442,6 +470,12 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn tokens_list_every_color() {
+        let names = tokens(&Theme::dark().colors).map(|(name, _)| name);
+        assert_eq!(names, TOKENS.map(|(name, _)| name));
     }
 
     #[test]

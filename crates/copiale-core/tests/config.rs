@@ -129,6 +129,118 @@ fn write_keeps_file_permissions() {
     assert_eq!(mode, 0o600);
 }
 
+/// A user file over two defaults files, `system` under `site`.
+fn layered_file(system: &str, site: &str) -> (tempfile::TempDir, ConfigFile) {
+    let dir = tempfile::tempdir().unwrap();
+    let defaults: Vec<_> = [("system", system), ("site", site)]
+        .into_iter()
+        .map(|(name, text)| {
+            let path = dir.path().join(name).join("config.toml");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, text).unwrap();
+            path
+        })
+        .collect();
+    let file = ConfigFile::with_defaults(dir.path().join("user").join("config.toml"), defaults);
+    (dir, file)
+}
+
+#[test]
+fn defaults_files_apply_under_the_user_file_in_order() {
+    let (_dir, file) = layered_file(
+        "[layout]\ndensity = \"roomy\"\nclock = \"12h\"\navatars = true\n",
+        "[layout]\nclock = \"24h\"\ndensity = \"compact\"\n",
+    );
+    std::fs::create_dir_all(file.path().parent().unwrap()).unwrap();
+    std::fs::write(file.path(), "[layout]\ndensity = \"cozy\"\n").unwrap();
+
+    let loaded = file.load();
+    assert_eq!(loaded.warnings, vec![]);
+    let layout = loaded.config.layout;
+    assert_eq!(layout.density, Density::Cozy);
+    assert_eq!(layout.clock, TimeFormat::H24);
+    assert!(layout.avatars);
+}
+
+#[test]
+fn custom_theme_merges_key_by_key() {
+    let (_dir, file) = layered_file(
+        "[theme]\nappearance = \"dark\"\n[theme.colors]\ntext = \"#eee\"\nlink = \"#00f\"\nnicks = [\"#111\", \"#222\"]\n",
+        "",
+    );
+    std::fs::create_dir_all(file.path().parent().unwrap()).unwrap();
+    std::fs::write(
+        file.path(),
+        "[theme.colors]\nlink = \"#0f0\"\nnicks = [\"#333\"]\n",
+    )
+    .unwrap();
+
+    let theme = file.load().config.custom_theme.unwrap();
+    assert_eq!(
+        theme,
+        toml::from_str(
+            "appearance = \"dark\"\n[colors]\ntext = \"#eee\"\nlink = \"#0f0\"\nnicks = [\"#333\"]\n"
+        )
+        .unwrap()
+    );
+}
+
+#[test]
+fn bad_defaults_warn_naming_the_file_and_fall_back() {
+    let (dir, file) = layered_file("[layout]\ndensity = \"tight\"\nclock = \"12h\"\n", "[");
+    let system = dir.path().join("system").join("config.toml");
+    let site = dir.path().join("site").join("config.toml");
+
+    let loaded = file.load();
+    assert_eq!(loaded.config.layout.density, Density::Cozy);
+    assert_eq!(loaded.config.layout.clock, TimeFormat::H12);
+    let warnings: Vec<_> = loaded.warnings.iter().map(ToString::to_string).collect();
+    assert_eq!(warnings.len(), 2, "{warnings:?}");
+    assert!(warnings[0].starts_with("layout.density: expected one of"));
+    assert!(warnings[0].ends_with(&format!("using cozy (in {})", system.display())));
+    assert!(warnings[1].starts_with("syntax error"));
+    assert!(warnings[1].ends_with(&format!("(in {})", site.display())));
+}
+
+#[test]
+fn missing_defaults_files_are_skipped() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = ConfigFile::with_defaults(
+        dir.path().join("config.toml"),
+        vec![dir.path().join("none").join("config.toml")],
+    );
+    assert_eq!(file.load(), Loaded::default());
+}
+
+#[test]
+fn writes_go_to_the_user_file_only() {
+    let (dir, file) = layered_file("[layout]\navatars = true\n", "");
+
+    file.write(&[Setting::Blur(true)]).unwrap();
+
+    let system = dir.path().join("system").join("config.toml");
+    assert_eq!(
+        std::fs::read_to_string(system).unwrap(),
+        "[layout]\navatars = true\n"
+    );
+    let config = file.load().config;
+    assert!(config.window.blur && config.layout.avatars);
+}
+
+#[cfg(unix)]
+#[test]
+fn read_only_files_are_detected() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let (_dir, file) = config_file();
+    assert!(!file.read_only(), "missing");
+    std::fs::create_dir_all(file.path().parent().unwrap()).unwrap();
+    std::fs::write(file.path(), "").unwrap();
+    assert!(!file.read_only());
+    std::fs::set_permissions(file.path(), std::fs::Permissions::from_mode(0o444)).unwrap();
+    assert!(file.read_only());
+}
+
 /// A watching [`ConfigSync`] that saw the file as it is now.
 fn sync(file: &ConfigFile) -> (ConfigSync, mpsc::Receiver<ConfigEvent>) {
     let (tx, rx) = mpsc::channel();
@@ -254,6 +366,27 @@ fn sync_skips_invalid_settings_only() {
     assert_eq!(through, number);
     assert!(matches!(errors[..], [ConfigError::Invalid { .. }]));
     assert!(file.load().config.layout.avatars);
+}
+
+#[test]
+fn sync_reports_defaults_a_write_uncovers() {
+    let (_dir, file) = layered_file("[typography]\nui_font = \"Inter\"\n", "");
+    std::fs::create_dir_all(file.path().parent().unwrap()).unwrap();
+    std::fs::write(file.path(), "[typography]\nui_font = \"Mine\"\n").unwrap();
+    let (mut sync, rx) = sync(&file);
+
+    let number = sync.write(vec![Setting::UiFont(None)]);
+
+    let (loaded, saved_through) = changed(&rx);
+    assert_eq!(loaded.config.typography.ui_font.as_deref(), Some("Inter"));
+    assert_eq!(saved_through, number);
+    let (through, errors) = saved(&rx);
+    assert_eq!(through, number);
+    assert!(errors.is_empty());
+    // A write the defaults don't affect: no reload.
+    let number = sync.write(vec![Setting::Blur(true)]);
+    assert_eq!(saved(&rx).0, number);
+    assert!(rx.recv_timeout(QUIET).is_err());
 }
 
 #[test]

@@ -5,12 +5,19 @@ use toml_edit::{DocumentMut, Item, Value};
 use super::schema::{CUSTOM_THEME, Kind};
 use super::{Config, ConfigWarning, Loaded, Setting};
 
+#[cfg(test)]
 pub(crate) fn parse(text: &str) -> Loaded {
+    parse_over(text, &Config::default())
+}
+
+/// Reads `text` over `base`: settings it leaves out or gets wrong keep
+/// `base`'s values; its `[theme]` is merged into `base`'s, key by key.
+pub(crate) fn parse_over(text: &str, base: &Config) -> Loaded {
     let doc = match text.parse::<DocumentMut>() {
         Ok(doc) => doc,
         Err(error) => {
             return Loaded {
-                config: Config::default(),
+                config: base.clone(),
                 warnings: vec![ConfigWarning {
                     setting: None,
                     message: format!("syntax error, using all defaults: {error}"),
@@ -24,11 +31,29 @@ pub(crate) fn parse(text: &str) -> Loaded {
         warnings: Vec::new(),
     };
     reader.check_unknown();
-    let mut config = Config::read(&mut reader);
-    config.custom_theme = reader.custom_theme(text);
+    let mut config = Config::read(&mut reader, base);
+    config.custom_theme = match (base.custom_theme.clone(), reader.custom_theme(text)) {
+        (Some(mut base), Some(theme)) => {
+            merge(&mut base, theme);
+            Some(base)
+        }
+        (base, theme) => theme.or(base),
+    };
     Loaded {
         config,
         warnings: reader.warnings,
+    }
+}
+
+/// Merges `over` into `table`: tables key by key, other values replaced.
+fn merge(table: &mut toml::Table, over: toml::Table) {
+    for (key, value) in over {
+        match (table.get_mut(&key), value) {
+            (Some(toml::Value::Table(inner)), toml::Value::Table(over)) => merge(inner, over),
+            (_, value) => {
+                table.insert(key, value);
+            }
+        }
     }
 }
 

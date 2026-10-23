@@ -169,6 +169,8 @@ Scope, UI design, architecture and work items for the first usable release.
   - `copiale`: show the window.
   - `copiale --toggle`: show and focus the composer, or hide if focused.
   - `copiale --quit`.
+- `copiale --check-config [FILE]` lists problems in `FILE`, or in the
+  config in effect, and fails if there are any; runs without an instance.
 - Users bind `--toggle` to a key in their compositor/WM or OS.
 - Notification click opens the window on that chat; on macOS, so does the
   Dock icon.
@@ -209,6 +211,13 @@ Scope, UI design, architecture and work items for the first usable release.
 
 `config.toml` in the platform config dir (`~/.config/copiale/` on Linux) is
 the source of truth (`copiale_core::config`).
+
+- On Linux and BSDs, `copiale/config.toml` in each `$XDG_CONFIG_DIRS` dir
+  (`/etc/xdg`) holds system-wide defaults (the NixOS module's): the user's
+  file overrides them setting by setting, `[theme]` key by key. Read at
+  start and with each reload of the user's file; never written.
+- A read-only file (Home Manager's, a link into the Nix store) isn't
+  written: settings UI changes last until restart, and its footer says so.
 
 - The settings UI edits it with `toml_edit`, keeping comments and order;
   writes are atomic and go through symlinks (dotfile managers).

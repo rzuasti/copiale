@@ -1934,6 +1934,7 @@ fn settings_open_from_the_keyboard_and_close(cx: &mut TestAppContext) {
     ui.press("ctrl-,", cx);
     assert!(ui.shows("settings", cx));
     assert!(ui.shows("config-path", cx));
+    assert!(!ui.shows("config-read-only", cx));
     ui.press("escape", cx);
     assert!(!ui.shows("settings", cx));
     assert!(composer_focused(&ui, cx));
@@ -2136,6 +2137,40 @@ fn quick_setting_changes_end_saved_and_applied(cx: &mut TestAppContext) {
     let saved = file.load().config;
     assert_eq!(saved.typography.size, 30);
     assert!(saved.layout.avatars);
+}
+
+#[cfg(unix)]
+#[gpui_kit::test]
+fn read_only_config_keeps_changes_for_the_session(cx: &mut TestAppContext) {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let ui = Ui::ready(cx);
+    ui.open_alice(cx);
+    let dir = tempfile::tempdir().unwrap();
+    let file = ConfigFile::new(dir.path().join("config.toml"));
+    std::fs::write(file.path(), "[layout]\navatars = true\n").unwrap();
+    std::fs::set_permissions(file.path(), std::fs::Permissions::from_mode(0o444)).unwrap();
+    let (tx, events) = std::sync::mpsc::channel();
+    cx.update(|cx| settings::load_with(file.clone(), move |event| tx.send(event).unwrap(), cx));
+    assert!(cx.update(|cx| Settings::read_only(cx)));
+
+    cx.update(|cx| settings::change(Setting::FontSize(20), cx));
+    cx.update(|cx| settings::change(Setting::FontSize(22), cx));
+    // A reload, as when Nix relinks the file, keeps them.
+    std::fs::set_permissions(file.path(), std::fs::Permissions::from_mode(0o644)).unwrap();
+    std::fs::write(file.path(), "[layout]\navatars = false\n").unwrap();
+    std::fs::set_permissions(file.path(), std::fs::Permissions::from_mode(0o444)).unwrap();
+    let event = events.recv_timeout(Duration::from_secs(5)).unwrap();
+    cx.update(|cx| settings::apply(event, cx));
+
+    assert!(!config(cx).layout.avatars);
+    assert_eq!(config(cx).typography.size, 22);
+    assert_eq!(
+        std::fs::read_to_string(file.path()).unwrap(),
+        "[layout]\navatars = false\n"
+    );
+    open_settings(&ui, "size", cx);
+    assert!(ui.shows("config-read-only", cx));
 }
 
 #[gpui_kit::test]

@@ -1,0 +1,9 @@
+<!-- Placeholder: the tray icon (crates/copiale-ui/src/tray/icon.rs). -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <mask id="opening">
+    <rect width="128" height="128" fill="#fff"/>
+    <rect x="64" y="48.64" width="64" height="30.72" fill="#000"/>
+  </mask>
+  <rect width="128" height="128" rx="28.16" fill="#3d6fd6"/>
+  <circle cx="64" cy="64" r="30.72" fill="none" stroke="#fff" stroke-width="15.36" mask="url(#opening)"/>
+</svg>

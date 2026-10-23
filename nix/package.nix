@@ -4,6 +4,7 @@
   rustPlatform,
   pkg-config,
   patchelf,
+  desktop-file-utils,
   cmake,
   protobuf,
   perl,
@@ -40,6 +41,7 @@ in
     nativeBuildInputs = [
       pkg-config
       patchelf
+      desktop-file-utils
       cmake # libsignal (boring-sys)
       protobuf # libsignal, presage: protoc
       perl # SQLCipher build
@@ -50,6 +52,14 @@ in
 
     # Tests run in the dev shell (`cargo test --workspace`).
     doCheck = false;
+
+    postInstall = ''
+      desktop-file-validate ${../packaging/linux/page.codeberg.korba.Copiale.desktop}
+      install -Dm644 ${../packaging/linux/page.codeberg.korba.Copiale.desktop} \
+        $out/share/applications/page.codeberg.korba.Copiale.desktop
+      install -Dm644 ${../packaging/linux/page.codeberg.korba.Copiale.svg} \
+        $out/share/icons/hicolor/scalable/apps/page.codeberg.korba.Copiale.svg
+    '';
 
     # Let the binary find the libraries GPUI dlopens.
     postFixup = ''

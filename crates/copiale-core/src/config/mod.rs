@@ -14,8 +14,9 @@ mod schema;
 
 pub use file::{ConfigEvent, ConfigFile, ConfigSync};
 pub use schema::{
-    Appearance, Choice, Composer, Config, Density, Layout, MessageStyle, NotificationContent,
-    Notifications, Setting, ThemeName, TimeFormat, TimestampVisibility, Typography, WindowConfig,
+    Appearance, Choice, Composer, Config, Density, KindInfo, Layout, MessageStyle,
+    NotificationContent, Notifications, Setting, SettingInfo, ThemeName, TimeFormat,
+    TimestampVisibility, Typography, WindowConfig,
 };
 
 use std::fmt;

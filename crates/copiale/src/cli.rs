@@ -1,22 +1,28 @@
 //! Command-line arguments.
 
 use std::ffi::OsString;
+use std::path::PathBuf;
 
 pub const USAGE: &str = "\
-Usage: copiale [--toggle | --quit]
+Usage: copiale [--toggle | --quit | --check-config [FILE]]
 
 Starts Copiale, or shows the window if it's already running.
 
-  --toggle  Show the window and focus the composer, or hide it if focused
-  --quit    Quit the running instance
-  --help    Show this help
+  --toggle               Show the window and focus the composer, or hide it
+                         if focused
+  --quit                 Quit the running instance
+  --check-config [FILE]  List problems in FILE, or in the config in effect;
+                         fails if there are any
+  --help                 Show this help
 ";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Cli {
     Start,
     Toggle,
     Quit,
+    /// `None`: the platform config, over its defaults.
+    CheckConfig(Option<PathBuf>),
     Help,
 }
 
@@ -29,9 +35,14 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli, String> {
         [arg] => match arg.to_str() {
             Some("--toggle") => Ok(Cli::Toggle),
             Some("--quit") => Ok(Cli::Quit),
+            Some("--check-config") => Ok(Cli::CheckConfig(None)),
             Some("--help" | "-h") => Ok(Cli::Help),
             _ => Err(arg.to_string_lossy().into_owned()),
         },
+        [flag, file] if flag == "--check-config" => Ok(Cli::CheckConfig(Some(file.into()))),
+        [flag, _, extra, ..] if flag == "--check-config" => {
+            Err(extra.to_string_lossy().into_owned())
+        }
         [_, extra, ..] => Err(extra.to_string_lossy().into_owned()),
     }
 }
@@ -52,5 +63,14 @@ mod tests {
         assert_eq!(parse_strs(&["-h"]), Ok(Cli::Help));
         assert_eq!(parse_strs(&["--show"]), Err("--show".into()));
         assert_eq!(parse_strs(&["--quit", "--toggle"]), Err("--toggle".into()));
+        assert_eq!(parse_strs(&["--check-config"]), Ok(Cli::CheckConfig(None)));
+        assert_eq!(
+            parse_strs(&["--check-config", "my.toml"]),
+            Ok(Cli::CheckConfig(Some("my.toml".into())))
+        );
+        assert_eq!(
+            parse_strs(&["--check-config", "a.toml", "b.toml"]),
+            Err("b.toml".into())
+        );
     }
 }

@@ -1,0 +1,22 @@
+[Desktop Entry]
+Type=Application
+Name=Copiale
+GenericName=Chat
+Comment=A fast, minimalist desktop client for Signal
+Exec=copiale
+Icon=page.codeberg.korba.Copiale
+Terminal=false
+Categories=Network;InstantMessaging;Chat;
+Keywords=Signal;chat;messenger;
+StartupNotify=true
+StartupWMClass=page.codeberg.korba.Copiale
+SingleMainWindow=true
+Actions=toggle;quit;
+
+[Desktop Action toggle]
+Name=Show or Hide
+Exec=copiale --toggle
+
+[Desktop Action quit]
+Name=Quit
+Exec=copiale --quit

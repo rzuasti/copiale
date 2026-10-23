@@ -105,8 +105,11 @@ went unsolved until 2011.
   - Out: calls, voice notes, stickers; accessibility after v1.
 - **Packaging:**
   - Linux:
-    - Nix flake: package plus NixOS module, as a first-class install path.
-      nixpkgs later.
+    - Nix flake: package, NixOS module (settings as system-wide defaults
+      in `/etc/xdg`) and Home Manager module (settings as the user's
+      read-only `config.toml`), as a first-class install path. Their
+      options come from `nix/config-schema.json`, which a test keeps in
+      step with the app. nixpkgs later.
     - Flatpak, AUR.
   - macOS: notarized `.dmg`.
   - Windows: MSIX or winget.
@@ -162,5 +165,5 @@ them (#16), disappearing message timers (#17), new 1:1 chats from contacts
 keyboard navigation (#20), adaptive compact layout (#21), and single
 instance with background running and `--toggle`/`--quit` (#22), and custom
 titlebar and decorations (#23), the settings UI (#24), blocks and bubbles
-message styles (#25), and unlink and wipe (#26) done: M3 complete. Next: M4
-(Nix package #27, macOS and Windows checks #28).
+message styles (#25), and unlink and wipe (#26) done: M3 complete. M4: Nix
+package and modules (#27) done. Next: macOS and Windows checks (#28).

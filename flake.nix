@@ -26,6 +26,23 @@
       default = copiale;
     });
 
+    # `programs.copiale`: the package, and settings as system-wide defaults.
+    nixosModules.default = import ./nix/nixos-module.nix self;
+
+    # `programs.copiale`: the package, and settings as the user's config.
+    homeModules.default = import ./nix/home-module.nix self;
+    homeManagerModules = self.homeModules;
+
+    checks = forEachLinuxSystem (system: {
+      modules = import ./nix/tests.nix {
+        inherit nixpkgs;
+        pkgs = pkgsBySystem.${system};
+        copiale = self.packages.${system}.default;
+        nixosModule = self.nixosModules.default;
+        homeModule = self.homeModules.default;
+      };
+    });
+
     # Development shell to build and test the app locally
     devShells = forEachSystem (system: let
       pkgs = pkgsBySystem.${system};
