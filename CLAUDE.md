@@ -108,8 +108,10 @@ went unsolved until 2011.
     - Nix flake: package, NixOS module (settings as system-wide defaults
       in `/etc/xdg`) and Home Manager module (settings as the user's
       read-only `config.toml`), as a first-class install path. Their
-      options come from `nix/config-schema.json`, which a test keeps in
-      step with the app. nixpkgs later.
+      settings come from `nix/config-schema.json`, which a test keeps in
+      step with the app. `autostart` starts it hidden at login: an XDG
+      autostart entry (NixOS), a systemd user service (Home Manager).
+      nixpkgs later.
     - Flatpak, AUR.
   - macOS: notarized `.dmg`.
   - Windows: MSIX or winget.

@@ -1,5 +1,5 @@
 # Flake checks: the modules write every setting so that the app reads it
-# without problems.
+# without problems, and start it hidden with `autostart`.
 {
   pkgs,
   nixpkgs,
@@ -26,25 +26,27 @@
     }
     (map (setting: {${setting.table}.${setting.key} = changed setting;}) schema.settings);
 
-  nixos = settings:
+  # The modules' config with `programs.copiale` set to `cfg`.
+  nixos = cfg:
     (nixpkgs.lib.nixosSystem {
       modules = [
         nixosModule
         {
           nixpkgs.hostPlatform = pkgs.stdenv.hostPlatform.system;
           system.stateVersion = "26.05";
-          programs.copiale = {
-            enable = true;
-            package = copiale;
-            inherit settings;
-          };
+          programs.copiale =
+            {
+              enable = true;
+              package = copiale;
+            }
+            // cfg;
         }
       ];
     })
     .config;
 
   # Home Manager isn't an input: stubs for the options the module sets.
-  home = settings:
+  home = cfg:
     (lib.evalModules {
       modules = [
         homeModule
@@ -56,27 +58,40 @@
             });
             default = {};
           };
+          options.systemd.user.services = lib.mkOption {
+            type = lib.types.attrsOf lib.types.attrs;
+            default = {};
+          };
           config = {
             _module.args.pkgs = pkgs;
-            programs.copiale = {
-              enable = true;
-              package = copiale;
-              inherit settings;
-            };
+            programs.copiale =
+              {
+                enable = true;
+                package = copiale;
+              }
+              // cfg;
           };
         }
       ];
     })
     .config;
 
-  systemFile = (nixos full).environment.etc."xdg/copiale/config.toml".source;
-  userFile = (home full).xdg.configFile."copiale/config.toml".source;
+  systemFile = (nixos {settings = full;}).environment.etc."xdg/copiale/config.toml".source;
+  userFile = (home {settings = full;}).xdg.configFile."copiale/config.toml".source;
+  autostartFile = (nixos {autostart = true;}).environment.etc."xdg/autostart/page.codeberg.korba.Copiale.desktop".source;
+  service = (home {autostart = true;}).systemd.user.services.copiale;
 in
   # Nothing set: no file, so the settings UI can save.
   assert !((nixos {}).environment.etc ? "xdg/copiale/config.toml");
   assert (home {}).xdg.configFile == {};
-  assert (home full).home.packages == [copiale];
+  assert (home {}).home.packages == [copiale];
+  # No autostart unless asked.
+  assert !((nixos {}).environment.etc ? "xdg/autostart/page.codeberg.korba.Copiale.desktop");
+  assert (home {}).systemd.user.services == {};
+  assert service.Service.ExecStart == "${lib.getExe copiale} --hidden";
+  assert service.Install.WantedBy == ["graphical-session.target"];
     pkgs.runCommand "copiale-nix-modules" {} ''
+      grep -qx 'Exec=${lib.getExe copiale} --hidden' ${autostartFile}
       for file in ${systemFile} ${userFile}; do
         ${lib.getExe copiale} --check-config "$file"
         ${lib.concatMapStringsSep "\n" (setting: ''

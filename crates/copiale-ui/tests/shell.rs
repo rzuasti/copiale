@@ -98,6 +98,13 @@ impl Ui {
     }
 
     fn open_with(options: main_window::Options, cx: &mut TestAppContext) -> Self {
+        let ui = Self::start(options, false, cx);
+        ui.frame(cx);
+        ui
+    }
+
+    /// Starts the UI with the main window open, or hidden if `hidden`.
+    fn start(options: main_window::Options, hidden: bool, cx: &mut TestAppContext) -> Self {
         cx.update(copiale_ui::init);
         let core = Rc::new(Recorder::default());
         let notifications = Rc::new(Notifications::default());
@@ -108,7 +115,11 @@ impl Ui {
             tray::install(tray.clone(), cx);
             let shell = cx.new(|_| Shell::new(sink, notifier));
             main_window::install(shell.clone(), options, cx);
-            main_window::show(None, cx);
+            if hidden {
+                main_window::start_hidden(cx);
+            } else {
+                main_window::show(None, cx);
+            }
             shell
         });
         let ui = Self {
@@ -118,8 +129,7 @@ impl Ui {
             notifications,
             tray,
         };
-        assert!(ui.sync_window(cx));
-        ui.frame(cx);
+        assert_eq!(ui.sync_window(cx), !hidden);
         ui
     }
 
@@ -2774,6 +2784,28 @@ fn hidden_windows_keep_chats_running(cx: &mut TestAppContext) {
         chat.composer().read(cx).value()
     });
     assert_eq!(draft, "half a thought!");
+}
+
+#[gpui_kit::test]
+fn hidden_starts_open_no_window_until_asked(cx: &mut TestAppContext) {
+    let options = main_window::Options {
+        switch_displays: false,
+        follow_window_appearance: true,
+        raise_by_reopening: false,
+    };
+    let ui = Ui::start(options, true, cx);
+    assert!(!ui.tray.0.get().shown);
+
+    ui.event(Event::Ready, cx);
+    ui.event(Event::Conversations(vec![summary(2, "Bob", 0)]), cx);
+    bob_writes(&ui, 20, cx);
+    assert!(
+        !ui.notifications.take().is_empty(),
+        "runs in the background"
+    );
+
+    assert!(request(&ui, toggle(), cx), "shown");
+    assert!(ui.tray.0.get().shown);
 }
 
 #[gpui_kit::test]

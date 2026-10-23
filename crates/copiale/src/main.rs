@@ -96,7 +96,7 @@ fn main() -> ExitCode {
             requests.unbounded_send(request).ok();
         });
     }
-    copiale_ui::run(core, events, received);
+    copiale_ui::run(core, events, received, cli == Cli::Hidden);
     ExitCode::SUCCESS
 }
 
@@ -121,13 +121,16 @@ fn check_config(file: Option<std::path::PathBuf>) -> ExitCode {
 
 /// Hands the request to the running instance.
 fn forward(dir: &std::path::Path, cli: Cli) -> ExitCode {
+    if cli == Cli::Hidden {
+        return ExitCode::SUCCESS;
+    }
     // Lets the running instance's window take focus on Wayland.
     let activation_token = std::env::var("XDG_ACTIVATION_TOKEN").ok();
     let request = match cli {
         Cli::Start => Request::Show { activation_token },
         Cli::Toggle => Request::Toggle { activation_token },
         Cli::Quit => Request::Quit,
-        Cli::Help | Cli::CheckConfig(_) => unreachable!("exits before"),
+        Cli::Hidden | Cli::Help | Cli::CheckConfig(_) => unreachable!("exits before"),
     };
     match instance::send(dir, &request) {
         Ok(()) => ExitCode::SUCCESS,

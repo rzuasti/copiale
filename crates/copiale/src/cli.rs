@@ -4,10 +4,12 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 pub const USAGE: &str = "\
-Usage: copiale [--toggle | --quit | --check-config [FILE]]
+Usage: copiale [--hidden | --toggle | --quit | --check-config [FILE]]
 
 Starts Copiale, or shows the window if it's already running.
 
+  --hidden               Start without showing the window, e.g. at login;
+                         does nothing if already running
   --toggle               Show the window and focus the composer, or hide it
                          if focused
   --quit                 Quit the running instance
@@ -19,6 +21,8 @@ Starts Copiale, or shows the window if it's already running.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Cli {
     Start,
+    /// Start with the window hidden.
+    Hidden,
     Toggle,
     Quit,
     /// `None`: the platform config, over its defaults.
@@ -33,6 +37,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli, String> {
     match args.as_slice() {
         [] => Ok(Cli::Start),
         [arg] => match arg.to_str() {
+            Some("--hidden") => Ok(Cli::Hidden),
             Some("--toggle") => Ok(Cli::Toggle),
             Some("--quit") => Ok(Cli::Quit),
             Some("--check-config") => Ok(Cli::CheckConfig(None)),
@@ -58,6 +63,7 @@ mod tests {
     #[test]
     fn parses_one_flag_at_most() {
         assert_eq!(parse_strs(&[]), Ok(Cli::Start));
+        assert_eq!(parse_strs(&["--hidden"]), Ok(Cli::Hidden));
         assert_eq!(parse_strs(&["--toggle"]), Ok(Cli::Toggle));
         assert_eq!(parse_strs(&["--quit"]), Ok(Cli::Quit));
         assert_eq!(parse_strs(&["-h"]), Ok(Cli::Help));

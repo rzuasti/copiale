@@ -42,7 +42,8 @@ pub struct Options {
     pub raise_by_reopening: bool,
 }
 
-/// Manages `shell`'s window from now on; call [`show`] to open it.
+/// Manages `shell`'s window from now on; call [`show`] to open it, or
+/// [`start_hidden`] to start without it.
 pub fn install(shell: Entity<Shell>, options: Options, cx: &mut App) {
     cx.set_global(MainWindow {
         shell,
@@ -144,6 +145,13 @@ pub fn hide(cx: &mut App) {
     }
 }
 
+/// Leaves the window closed, as if hidden at once.
+pub fn start_hidden(cx: &mut App) {
+    if handle(cx).is_none() {
+        go_headless(cx);
+    }
+}
+
 fn open(cx: &mut App) {
     let main = cx.global::<MainWindow>();
     let shell = main.shell.clone();
@@ -170,14 +178,19 @@ fn closed(cx: &mut App, id: WindowId) {
     if main.window.is_none_or(|handle| handle.window_id() != id) {
         return;
     }
-    let (shell, switch_displays) = (main.shell.clone(), main.switch_displays);
+    let shell = main.shell.clone();
     cx.global_mut::<MainWindow>().window = None;
     tray::update(cx, |tray| tray.shown = false);
     shell.update(cx, |shell, cx| shell.detach(cx));
     if std::mem::take(&mut cx.global_mut::<MainWindow>().reopen) {
         return open(cx);
     }
-    if !switch_displays || !cx.windows().is_empty() {
+    go_headless(cx);
+}
+
+/// Disconnects from the display if `switch_displays` and no window is open.
+fn go_headless(cx: &mut App) {
+    if !cx.global::<MainWindow>().switch_displays || !cx.windows().is_empty() {
         return after_switch(cx);
     }
     let Some(display) = cx.graphical_environment() else {

@@ -60,6 +60,13 @@ programs.copiale.settings = {
 
 `copiale --check-config` lists any problems in the config in effect.
 
+`programs.copiale.autostart = true` starts Copiale hidden at login
+(`copiale --hidden`):
+
+- NixOS: an XDG autostart entry, run by desktops such as GNOME and KDE;
+  Hyprland and sway run it only through a session manager such as UWSM.
+- Home Manager: a systemd user service bound to `graphical-session.target`.
+
 ## License
 
 Copyright (C) 2026 Ricardo Zuasti

@@ -169,6 +169,8 @@ Scope, UI design, architecture and work items for the first usable release.
   - `copiale`: show the window.
   - `copiale --toggle`: show and focus the composer, or hide if focused.
   - `copiale --quit`.
+  - `copiale --hidden`: start without showing the window, as if hidden at
+    once (e.g. at login); does nothing if already running.
 - `copiale --check-config [FILE]` lists problems in `FILE`, or in the
   config in effect, and fails if there are any; runs without an instance.
 - Users bind `--toggle` to a key in their compositor/WM or OS.

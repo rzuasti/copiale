@@ -79,10 +79,15 @@ impl RunningCore {
     }
 }
 
-/// Runs the UI event loop with the main window open; returns on quit, after
-/// shutting down `core`. Closing the window keeps running; `requests` come
-/// from other `copiale` processes.
-pub fn run(core: CoreHandle, events: Events, mut requests: UnboundedReceiver<Request>) {
+/// Runs the UI event loop with the main window open, or hidden if `hidden`;
+/// returns on quit, after shutting down `core`. Closing the window keeps
+/// running; `requests` come from other `copiale` processes.
+pub fn run(
+    core: CoreHandle,
+    events: Events,
+    mut requests: UnboundedReceiver<Request>,
+    hidden: bool,
+) {
     let core = Rc::new(RunningCore(RefCell::new(Some(core))));
     let app = gpui_kit::application().with_assets(icons::Assets);
     // The Dock icon on macOS.
@@ -138,7 +143,11 @@ pub fn run(core: CoreHandle, events: Events, mut requests: UnboundedReceiver<Req
             }
             Err(error) => tracing::warn!(%error, "no tray icon"),
         }
-        main_window::show(None, cx);
+        if hidden {
+            main_window::start_hidden(cx);
+        } else {
+            main_window::show(None, cx);
+        }
         cx.spawn(async move |cx| {
             while let Some(request) = requests.next().await {
                 cx.update(|cx| main_window::handle_request(request, cx));
