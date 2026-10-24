@@ -185,12 +185,11 @@ fn serve(mut requests: UnboundedReceiver<NoticeAction>, clicks: UnboundedSender<
     });
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix, not(target_os = "macos")))]
 mod tests {
     use super::*;
 
     #[test]
-    #[cfg(all(unix, not(target_os = "macos")))]
     fn bodies_are_plain_text() {
         assert_eq!(
             escape("<a href='x'>R&D</a>"),

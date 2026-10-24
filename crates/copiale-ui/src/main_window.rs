@@ -201,10 +201,14 @@ fn go_headless(cx: &mut App) {
 
 /// Connects to `display` again, then opens the window.
 fn reconnect(display: GraphicalEnvironment, activation_token: Option<String>, cx: &mut App) {
+    // Activation tokens are Wayland's.
+    #[cfg(target_os = "linux")]
     let display = GraphicalEnvironment {
         activation_token,
         ..display
     };
+    #[cfg(not(target_os = "linux"))]
+    let _ = activation_token;
     cx.global_mut::<MainWindow>().show_after_switch = Some(None);
     switch(WindowingRequest::Windowed(display), None, cx);
 }
