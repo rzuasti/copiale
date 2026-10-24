@@ -402,7 +402,7 @@ crates/
 - Notifications: `notify-rust` on its own thread: the freedesktop D-Bus
   service (Linux), the notification center (macOS), WinRT toasts
   (Windows). Replacing and closing work on Linux; macOS and Windows wait
-  for their checks (#28).
+  for #80 and #28.
 - Logging (`copiale_core::logging`): `tracing` to stderr only, never to
   disk.
   - `COPIALE_LOG` sets the filter; default `info` for Copiale, `warn` for
@@ -490,4 +490,6 @@ issue numbers match the item numbers below.
 ### M4: Release prep
 
 27. Nix package and NixOS module.
-28. macOS and Windows checks (IME, scaling, transparency, notifications).
+28. Windows checks (IME, scaling, transparency, notifications).
+79. macOS release: app bundle, GitHub CI, local signing and notarization,
+    release command, checks (#80–#85).

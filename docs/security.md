@@ -75,7 +75,7 @@ Shown notifications belong to the OS, outside the encrypted database.
   the user's profile.
 - **Windows**: Action Center keeps them in an unencrypted database
   (`%LOCALAPPDATA%\Microsoft\Windows\Notifications\wpndatabase.db`).
-- **macOS and Windows**: not yet replaced or closed (#28), so read,
+- **macOS and Windows**: not yet replaced or closed (#80, #28), so read,
   deleted and expired messages stay listed until dismissed.
 
 ## Screen capture

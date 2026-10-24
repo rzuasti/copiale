@@ -77,7 +77,7 @@ Expiring messages (deleting them at the deadline) is Copiale's job.
   in #6.
 - **Crypto provider:** `bundled-sqlcipher` links system OpenSSL. Fine with
   Nix; macOS and Windows need OpenSSL available or
-  `bundled-sqlcipher-vendored-openssl` (#28).
+  `bundled-sqlcipher-vendored-openssl` (#81, #28).
 - **Passphrase fallback:** derive the raw key with Argon2id ourselves (#4)
   rather than giving SQLCipher a passphrase; avoids 77 ms of PBKDF2 per
   pooled connection.
