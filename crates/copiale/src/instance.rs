@@ -53,7 +53,8 @@ pub fn claim(dir: &Path) -> io::Result<Claim> {
     }
     // Holding the lock, any socket left behind is stale.
     let options = ListenerOptions::new().name(name(dir)?).try_overwrite(true);
-    #[cfg(unix)]
+    // macOS can't set a socket's mode; the private dir guards it there.
+    #[cfg(all(unix, not(target_os = "macos")))]
     let options = {
         use interprocess::os::unix::local_socket::ListenerOptionsExt as _;
         options.mode(0o600)

@@ -32,4 +32,4 @@ jobs:
       - name: Lint
         run: cargo clippy --keep-going --all-targets --all-features -- -D warnings
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace --no-fail-fast
