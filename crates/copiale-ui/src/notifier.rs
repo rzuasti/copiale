@@ -1,10 +1,9 @@
-//! Desktop notifications through notify-rust: the freedesktop D-Bus service
-//! on Linux and the BSDs, the notification center on macOS, WinRT toasts on
-//! Windows.
+//! Desktop notifications: the freedesktop D-Bus service on Linux and the
+//! BSDs and WinRT toasts on Windows, through notify-rust;
+//! UNUserNotificationCenter on macOS, which needs the app bundle.
 
 use futures::StreamExt as _;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
-use notify_rust::Notification;
 
 use crate::chat::{Notice, NoticeAction, NoticeKey};
 
@@ -43,8 +42,9 @@ impl Notifier for DesktopNotifier {
     }
 }
 
-fn notification(notice: &Notice) -> Notification {
-    let mut notification = Notification::new();
+#[cfg(not(target_os = "macos"))]
+fn notification(notice: &Notice) -> notify_rust::Notification {
+    let mut notification = notify_rust::Notification::new();
     notification
         .appname("Copiale")
         .summary(&notice.title)
@@ -66,6 +66,7 @@ fn notification(notice: &Notice) -> Notification {
 
 /// Message text as plain text: freedesktop servers may read the body as
 /// markup.
+#[cfg(not(target_os = "macos"))]
 fn escape(text: &str) -> String {
     if cfg!(all(unix, not(target_os = "macos"))) {
         text.replace('&', "&amp;")
@@ -163,9 +164,96 @@ fn serve(mut requests: UnboundedReceiver<NoticeAction>, clicks: UnboundedSender<
     });
 }
 
+/// Shows, replaces and closes notifications by key, and reports clicks.
+#[cfg(target_os = "macos")]
+fn serve(mut requests: UnboundedReceiver<NoticeAction>, clicks: UnboundedSender<NoticeKey>) {
+    use std::collections::HashMap;
+
+    use futures::FutureExt as _;
+    use futures::executor::LocalPool;
+    use futures::future::{AbortHandle, abortable};
+    use futures::task::LocalSpawnExt as _;
+    use mac_usernotifications::{
+        InterruptionLevel, Notification, check_bundle, close_delivered, request_auth,
+    };
+
+    // UNUserNotificationCenter crashes without a bundle identifier.
+    if let Err(error) = check_bundle() {
+        tracing::warn!(%error, "notifications need the app bundle");
+        return;
+    }
+    let mut pool = LocalPool::new();
+    let spawner = pool.spawner();
+    pool.run_until(async move {
+        // Asked once, at the first notice.
+        let mut allowed = None;
+        let mut waiters = HashMap::<NoticeKey, AbortHandle>::new();
+        while let Some(action) = requests.next().await {
+            match action {
+                NoticeAction::Show(notice) => {
+                    if allowed.is_none() {
+                        allowed = Some(request_auth().await.unwrap_or_else(|error| {
+                            tracing::warn!(%error, "notification permission failed");
+                            false
+                        }));
+                    }
+                    if allowed != Some(true) {
+                        continue;
+                    }
+                    if let Some(waiter) = waiters.remove(&notice.key) {
+                        waiter.abort();
+                    }
+                    // Same identifier: replaced in place.
+                    let mut notification = Notification::new()
+                        .id(&identifier(notice.key))
+                        .title(&notice.title)
+                        .message(&notice.body);
+                    notification = if notice.quiet {
+                        notification.interruption_level(InterruptionLevel::Passive)
+                    } else {
+                        notification.default_sound()
+                    };
+                    match notification.send().await {
+                        Ok(handle) => {
+                            let clicks = clicks.clone();
+                            let key = notice.key;
+                            let (waiter, abort) = abortable(async move {
+                                if let Ok(response) = handle.response().await
+                                    && response.is_default_action()
+                                {
+                                    clicks.unbounded_send(key).ok();
+                                }
+                            });
+                            if spawner.spawn_local(waiter.map(drop)).is_ok() {
+                                waiters.insert(key, abort);
+                            }
+                        }
+                        Err(error) => tracing::warn!(%error, "showing a notification failed"),
+                    }
+                }
+                NoticeAction::Close(key) => {
+                    if let Some(waiter) = waiters.remove(&key) {
+                        waiter.abort();
+                    }
+                    close_delivered(&identifier(key)).await;
+                }
+            }
+        }
+    });
+}
+
+/// The notification request's identifier for `key`.
+#[cfg(target_os = "macos")]
+fn identifier(key: NoticeKey) -> String {
+    match key {
+        NoticeKey::Chat(conversation) => format!("chat-{}", conversation.get()),
+        NoticeKey::Backlog => "backlog".into(),
+    }
+}
+
 /// Shows notifications and reports clicks; replacing and closing them
-/// await the macOS and Windows checks (#28).
-#[cfg(not(all(unix, not(target_os = "macos"))))]
+/// await the Windows checks (#28).
+#[cfg(not(unix))]
 fn serve(mut requests: UnboundedReceiver<NoticeAction>, clicks: UnboundedSender<NoticeKey>) {
     futures::executor::block_on(async move {
         while let Some(action) = requests.next().await {

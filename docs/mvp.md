@@ -399,10 +399,10 @@ crates/
   (`show`, `toggle`, `quit`, with an optional activation token), answered
   `ok` or `error`.
 - Tray: `tray-icon`, with `ksni` (D-Bus, no GTK) on Linux.
-- Notifications: `notify-rust` on its own thread: the freedesktop D-Bus
-  service (Linux), the notification center (macOS), WinRT toasts
-  (Windows). Replacing and closing work on Linux; macOS and Windows wait
-  for #80 and #28.
+- Notifications, on their own thread: `notify-rust` for the freedesktop
+  D-Bus service (Linux) and WinRT toasts (Windows); `mac-usernotifications`
+  for UNUserNotificationCenter (macOS, bundled app only). Replacing and
+  closing work on Linux and macOS; Windows waits for #28.
 - Logging (`copiale_core::logging`): `tracing` to stderr only, never to
   disk.
   - `COPIALE_LOG` sets the filter; default `info` for Copiale, `warn` for

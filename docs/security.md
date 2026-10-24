@@ -72,11 +72,11 @@ Shown notifications belong to the OS, outside the encrypted database.
   notification once it's read or its message is deleted or disappears;
   some servers keep closed ones in a history of their own.
 - **macOS**: Notification Center keeps them in an unencrypted database in
-  the user's profile.
+  the user's profile. Copiale closes them as on Linux (to be checked, #85).
 - **Windows**: Action Center keeps them in an unencrypted database
   (`%LOCALAPPDATA%\Microsoft\Windows\Notifications\wpndatabase.db`).
-- **macOS and Windows**: not yet replaced or closed (#80, #28), so read,
-  deleted and expired messages stay listed until dismissed.
+  Not yet replaced or closed (#28), so read, deleted and expired
+  messages stay listed until dismissed.
 
 ## Screen capture
 

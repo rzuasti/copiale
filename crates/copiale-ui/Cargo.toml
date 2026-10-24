@@ -12,7 +12,6 @@ chrono.workspace = true
 copiale-core.workspace = true
 futures.workspace = true
 gpui-kit.workspace = true
-notify-rust.workspace = true
 qrcode.workspace = true
 raw-window-handle.workspace = true
 serde.workspace = true
@@ -28,7 +27,11 @@ zxcvbn.workspace = true
 windows-sys = { workspace = true, features = ["Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+mac-usernotifications.workspace = true
 objc2-app-kit.workspace = true
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+notify-rust.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ashpd.workspace = true
