@@ -1,4 +1,4 @@
-# macOS build and tests; runs on the GitHub mirror (#81).
+# macOS build, tests and app bundle; runs on the GitHub mirror (#81).
 name: macOS
 
 on:
@@ -12,7 +12,6 @@ permissions:
 env:
   # Keep in step with rustc from nixpkgs in flake.lock.
   RUST_VERSION: "1.98.1"
-  MACOSX_DEPLOYMENT_TARGET: "14.0"
   CARGO_TERM_COLOR: always
 
 jobs:
@@ -33,3 +32,36 @@ jobs:
         run: cargo clippy --keep-going --all-targets --all-features -- -D warnings
       - name: Test
         run: cargo test --workspace --no-fail-fast
+
+  bundle:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Rust
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal \
+            --target aarch64-apple-darwin --target x86_64-apple-darwin
+          rustup default "$RUST_VERSION"
+      - name: Build tools
+        run: brew install protobuf librsvg
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Bundle
+        run: packaging/macos/bundle.sh
+      - name: Check
+        run: |
+          app=target/macos/Copiale.app
+          binary="$app/Contents/MacOS/copiale"
+          lipo "$binary" -verify_arch arm64 x86_64
+          minimum=$(/usr/libexec/PlistBuddy -c "Print :LSMinimumSystemVersion" "$app/Contents/Info.plist")
+          for arch in arm64 x86_64; do
+            vtool -arch "$arch" -show-build "$binary" | grep -q "minos $minimum"
+          done
+          "$binary" --help >/dev/null
+      # Archived: artifacts lose file modes.
+      - name: Archive
+        run: tar -C target/macos -czf target/macos/Copiale.app.tar.gz Copiale.app
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: Copiale.app
+          path: target/macos/Copiale.app.tar.gz
+          retention-days: 30
