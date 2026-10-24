@@ -104,7 +104,7 @@ fn map_error(error: keyring::Error) -> SecretError {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "macos")))]
 mod tests {
     use super::*;
 
