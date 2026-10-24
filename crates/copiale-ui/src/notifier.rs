@@ -5,7 +5,7 @@
 use futures::StreamExt as _;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 
-use crate::chat::{Notice, NoticeAction, NoticeKey};
+use crate::chat::{NoticeAction, NoticeKey};
 
 /// Where notification actions go: the desktop, or a fake in tests.
 pub trait Notifier {
@@ -43,7 +43,7 @@ impl Notifier for DesktopNotifier {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn notification(notice: &Notice) -> notify_rust::Notification {
+fn notification(notice: &crate::chat::Notice) -> notify_rust::Notification {
     let mut notification = notify_rust::Notification::new();
     notification
         .appname("Copiale")
