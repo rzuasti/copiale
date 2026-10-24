@@ -33,8 +33,13 @@ jobs:
       - name: Test
         run: cargo test --workspace --no-fail-fast
 
+  # Its attested, unsigned app is what a release signs (#83).
   bundle:
     runs-on: macos-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Rust
@@ -60,6 +65,9 @@ jobs:
       # Archived: artifacts lose file modes.
       - name: Archive
         run: tar -C target/macos -czf target/macos/Copiale.app.tar.gz Copiale.app
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: target/macos/Copiale.app.tar.gz
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: Copiale.app
