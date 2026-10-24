@@ -305,6 +305,8 @@ fn main_window_options_set_app_id_and_title(cx: &mut TestAppContext) {
     assert!(titlebar.appears_transparent);
 }
 
+// Only Linux draws its own titlebar.
+#[cfg(target_os = "linux")]
 #[gpui_kit::test]
 fn server_decorations_leave_out_the_titlebar(cx: &mut TestAppContext) {
     let ui = Ui::open(cx);
@@ -647,7 +649,7 @@ fn emoji_picker_inserts_at_the_cursor(cx: &mut TestAppContext) {
     ui.press("left", cx);
 
     // Search, then Enter.
-    ui.press("ctrl-e", cx);
+    ui.press("secondary-e", cx);
     assert!(ui.shows("emoji-grid", cx));
     type_keys(&ui, "thumb", cx);
     ui.press("enter", cx);
@@ -663,10 +665,10 @@ fn emoji_picker_inserts_at_the_cursor(cx: &mut TestAppContext) {
     assert_eq!(composer_text(&ui, cx), "a👍❤️b");
 
     // A click; Esc closes, back to the composer.
-    ui.press("ctrl-e", cx);
+    ui.press("secondary-e", cx);
     ui.click(("emoji-cell", 0u64), cx);
     assert_eq!(composer_text(&ui, cx), "a👍❤️❤️b");
-    ui.press("ctrl-e", cx);
+    ui.press("secondary-e", cx);
     ui.press("escape", cx);
     assert!(!ui.shows("emoji-grid", cx));
     type_keys(&ui, "c", cx);
@@ -866,7 +868,7 @@ fn search_shows_from_the_sidebar_top_until_the_pointer_leaves(cx: &mut TestAppCo
 #[gpui_kit::test]
 fn search_slides_in(cx: &mut TestAppContext) {
     let ui = Ui::ready(cx);
-    ui.press("ctrl-f", cx);
+    ui.press("secondary-f", cx);
     // The box moves down from above the sidebar.
     let mut tops = Vec::new();
     for _ in 0..20 {
@@ -880,11 +882,11 @@ fn search_slides_in(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn ctrl_f_searches_and_escape_dismisses(cx: &mut TestAppContext) {
+fn find_searches_and_escape_dismisses(cx: &mut TestAppContext) {
     let ui = Ui::ready(cx);
     ui.open_alice(cx);
 
-    ui.press("ctrl-f", cx);
+    ui.press("secondary-f", cx);
     assert!(ui.shows("search", cx));
     ui.type_text("bo", cx);
     ui.frame(cx);
@@ -909,6 +911,8 @@ fn ctrl_f_searches_and_escape_dismisses(cx: &mut TestAppContext) {
     assert!(composer_focused);
 }
 
+// macOS scrolls with its own momentum (`kinetic`).
+#[cfg(not(target_os = "macos"))]
 #[gpui_kit::test]
 fn wheel_scrolls_the_log_smoothly(cx: &mut TestAppContext) {
     let ui = Ui::ready(cx);
@@ -1527,7 +1531,7 @@ fn new_chat_picks_a_contact_from_the_keyboard(cx: &mut TestAppContext) {
         cx,
     );
 
-    ui.press("ctrl-n", cx);
+    ui.press("secondary-n", cx);
     assert!(ui.shows("new-chat", cx));
     assert!(matches!(ui.core.take().as_slice(), [Command::LoadContacts]));
     assert!(ui.shows(("contact", 1u64), cx), "both listed");
@@ -1571,12 +1575,12 @@ fn new_chat_reuses_existing_chats_and_closes_on_escape(cx: &mut TestAppContext) 
     let ui = Ui::ready(cx);
     ui.event(Event::Contacts(vec![contact(2, "Bob")]), cx);
 
-    ui.press("ctrl-n", cx);
+    ui.press("secondary-n", cx);
     ui.core.take();
     ui.press("escape", cx);
     assert!(!ui.shows("new-chat", cx));
 
-    ui.press("ctrl-n", cx);
+    ui.press("secondary-n", cx);
     ui.core.take();
     ui.click(("contact", 0u64), cx);
     assert!(!ui.shows("new-chat", cx));
@@ -1660,7 +1664,7 @@ fn palette_switches_to_other_chats(cx: &mut TestAppContext) {
     let ui = Ui::ready(cx);
     ui.open_alice(cx);
 
-    ui.press("ctrl-k", cx);
+    ui.press("secondary-k", cx);
     assert!(ui.shows("palette", cx));
     assert!(ui.shows(("palette-entry", 0u64), cx));
     // Bob is first: the open chat isn't listed.
@@ -1669,7 +1673,7 @@ fn palette_switches_to_other_chats(cx: &mut TestAppContext) {
     assert_eq!(open_id(&ui, cx), Some(ConversationId::new(2)));
     assert!(composer_focused(&ui, cx));
 
-    ui.press("ctrl-k", cx);
+    ui.press("secondary-k", cx);
     ui.type_text("ali", cx);
     ui.frame(cx);
     assert!(!ui.shows(("palette-entry", 1u64), cx), "only Alice matches");
@@ -1682,12 +1686,12 @@ fn palette_toggles_and_closes_on_escape(cx: &mut TestAppContext) {
     let ui = Ui::ready(cx);
     ui.open_alice(cx);
 
-    ui.press("ctrl-k", cx);
-    ui.press("ctrl-k", cx);
+    ui.press("secondary-k", cx);
+    ui.press("secondary-k", cx);
     assert!(!ui.shows("palette", cx));
     assert!(composer_focused(&ui, cx));
 
-    ui.press("ctrl-k", cx);
+    ui.press("secondary-k", cx);
     ui.type_text("zzz", cx);
     ui.frame(cx);
     assert!(!ui.shows(("palette-entry", 0u64), cx));
@@ -1696,7 +1700,7 @@ fn palette_toggles_and_closes_on_escape(cx: &mut TestAppContext) {
     assert!(composer_focused(&ui, cx));
 
     // Reopens empty.
-    ui.press("ctrl-k", cx);
+    ui.press("secondary-k", cx);
     assert!(ui.shows(("palette-entry", 0u64), cx));
 }
 
@@ -1705,7 +1709,7 @@ fn palette_runs_commands(cx: &mut TestAppContext) {
     let ui = Ui::ready(cx);
     ui.open_alice(cx);
 
-    ui.press("ctrl-k", cx);
+    ui.press("secondary-k", cx);
     ui.type_text("new chat", cx);
     ui.frame(cx);
     ui.press("enter", cx);
@@ -1714,7 +1718,7 @@ fn palette_runs_commands(cx: &mut TestAppContext) {
     assert!(matches!(ui.core.take().as_slice(), [Command::LoadContacts]));
 
     // One overlay at a time.
-    ui.press("ctrl-k", cx);
+    ui.press("secondary-k", cx);
     assert!(!ui.shows("new-chat", cx));
     ui.type_text("settings", cx);
     ui.frame(cx);
@@ -1833,7 +1837,7 @@ fn palette_shows_the_safety_number_until_escape(cx: &mut TestAppContext) {
     let ui = Ui::ready(cx);
     ui.open_alice(cx);
 
-    ui.press("ctrl-k", cx);
+    ui.press("secondary-k", cx);
     ui.type_text("safety", cx);
     ui.frame(cx);
     ui.press("enter", cx);
@@ -1855,7 +1859,7 @@ fn palette_theme_overrides_the_system(cx: &mut TestAppContext) {
     let ui = Ui::ready(cx);
     ui.open_alice(cx);
     let pick = |query: &str, cx: &mut TestAppContext| {
-        ui.press("ctrl-k", cx);
+        ui.press("secondary-k", cx);
         ui.type_text(query, cx);
         ui.frame(cx);
         ui.press("enter", cx);
@@ -1941,7 +1945,7 @@ fn settings_open_from_the_keyboard_and_close(cx: &mut TestAppContext) {
     let ui = Ui::ready(cx);
     ui.open_alice(cx);
 
-    ui.press("ctrl-,", cx);
+    ui.press("secondary-,", cx);
     assert!(ui.shows("settings", cx));
     assert!(ui.shows("config-path", cx));
     assert!(!ui.shows("config-read-only", cx));
@@ -1949,7 +1953,7 @@ fn settings_open_from_the_keyboard_and_close(cx: &mut TestAppContext) {
     assert!(!ui.shows("settings", cx));
     assert!(composer_focused(&ui, cx));
 
-    ui.press("ctrl-,", cx);
+    ui.press("secondary-,", cx);
     ui.click("close-settings", cx);
     assert!(!ui.shows("settings", cx));
 }
@@ -1964,7 +1968,7 @@ fn chat_view<T>(ui: &Ui, cx: &mut TestAppContext, f: impl FnOnce(&ChatView) -> T
 
 /// Opens settings filtered to `query`.
 fn open_settings(ui: &Ui, query: &str, cx: &mut TestAppContext) {
-    ui.press("ctrl-,", cx);
+    ui.press("secondary-,", cx);
     ui.type_text(query, cx);
     ui.frame(cx);
 }
@@ -1973,7 +1977,7 @@ fn open_settings(ui: &Ui, query: &str, cx: &mut TestAppContext) {
 fn settings_change_live_from_the_keyboard(cx: &mut TestAppContext) {
     let ui = Ui::ready(cx);
     ui.open_alice(cx);
-    ui.press("ctrl-,", cx);
+    ui.press("secondary-,", cx);
     assert_eq!(
         chat_view(&ui, cx, |view| view.settings_panel().selected()),
         Some(Field::Theme)
@@ -2374,7 +2378,7 @@ fn overlays_keep_the_mouse_from_the_window_underneath(cx: &mut TestAppContext) {
     let ui = Ui::ready(cx);
     ui.click(("conversation", 1u64), cx);
     long_messages(&ui, cx);
-    ui.press("ctrl-,", cx);
+    ui.press("secondary-,", cx);
 
     ui.hover(("row", 60u64), cx);
     ui.frame(cx);
@@ -2472,12 +2476,12 @@ fn quit_from_the_keyboard_and_the_palette(cx: &mut TestAppContext) {
     });
 
     // Anywhere, even before the chats show.
-    ui.press("ctrl-q", cx);
+    ui.press("secondary-q", cx);
     assert_eq!(quits.get(), 1);
 
     ui.event(Event::Ready, cx);
     ui.event(Event::Conversations(vec![summary(1, "Alice", 0)]), cx);
-    ui.press("ctrl-k", cx);
+    ui.press("secondary-k", cx);
     ui.type_text("quit", cx);
     ui.frame(cx);
     ui.press("enter", cx);
@@ -2512,7 +2516,7 @@ fn search_arrows_pick_a_match(cx: &mut TestAppContext) {
     let ui = Ui::ready(cx);
     ui.open_alice(cx);
 
-    ui.press("ctrl-f", cx);
+    ui.press("secondary-f", cx);
     ui.press("down", cx);
     let highlighted = cx.update(|cx| {
         let chat = ui.shell.read(cx).chat().unwrap().read(cx);
@@ -2650,11 +2654,15 @@ fn the_log_keeps_its_place_across_layouts(cx: &mut TestAppContext) {
         "newest message moved: {gaps:?}"
     );
 
-    // Scrolled well up, the top message stays the top one.
-    cx.update_window(ui.window(), |_, window, cx| {
-        window.scroll("log", ScrollDelta::Lines(point(0., 150.)), cx);
-    })
-    .unwrap();
+    // Scrolled well up, the top message stays the top one. Notch by notch:
+    // GPUI's own wheel handling (macOS) stops at the last measured message.
+    for _ in 0..15 {
+        cx.update_window(ui.window(), |_, window, cx| {
+            window.scroll("log", ScrollDelta::Lines(point(0., 10.)), cx);
+        })
+        .unwrap();
+        ui.frame(cx);
+    }
     // Lets the wheel's momentum die out.
     for _ in 0..3 {
         ui.settle(cx);
@@ -2685,7 +2693,7 @@ fn compact_mode_switches_chats_through_the_palette(cx: &mut TestAppContext) {
     ui.open_alice(cx);
     resize(&ui, 500., cx);
 
-    ui.press("ctrl-f", cx);
+    ui.press("secondary-f", cx);
     assert_eq!(overlay(&ui, cx), Some(Overlay::Palette));
     ui.press("enter", cx);
     assert_eq!(open_id(&ui, cx), Some(ConversationId::new(2)));
@@ -2718,7 +2726,7 @@ fn compact_header_shows_unread_chats_and_the_connection(cx: &mut TestAppContext)
 fn going_compact_drops_the_search(cx: &mut TestAppContext) {
     let ui = Ui::ready(cx);
     ui.open_alice(cx);
-    ui.press("ctrl-f", cx);
+    ui.press("secondary-f", cx);
     ui.type_text("bo", cx);
     ui.frame(cx);
 
