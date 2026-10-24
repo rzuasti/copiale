@@ -37,10 +37,14 @@ jobs:
             --source-digest "$GITHUB_SHA" --source-ref refs/heads/main
           tar -xzf unsigned/Copiale.app.tar.gz
           bundled=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" Copiale.app/Contents/Info.plist)
-          if [ "v$bundled" != "$VERSION" ]; then
-            echo "::error::Tag $VERSION, app version $bundled"
-            exit 1
-          fi
+          # Pre-release tags (v1.2.3-rc.1) sign version 1.2.3.
+          case "${VERSION#v}" in
+            "$bundled" | "$bundled"-*) ;;
+            *)
+              echo "::error::Tag $VERSION, app version $bundled"
+              exit 1
+              ;;
+          esac
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: source
