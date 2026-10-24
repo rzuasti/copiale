@@ -1,0 +1,113 @@
+# Signs, notarizes and packages the macOS app for a release tag (#83). The
+# app is the attested one the `main` run built for the tagged commit.
+name: macOS release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  sign:
+    runs-on: macos-latest
+    # Holds the signing secrets; deployable from `v*` tags only.
+    environment: release
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      id-token: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ github.ref_name }}
+    steps:
+      - name: Unsigned app
+        run: |
+          run=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow macos.yml --commit "$GITHUB_SHA" \
+            --event push --status success --limit 1 --json databaseId --jq '.[0].databaseId')
+          if [ -z "$run" ]; then
+            echo "::error::No passing macOS run on main for $GITHUB_SHA"
+            exit 1
+          fi
+          gh run download "$run" --repo "$GITHUB_REPOSITORY" --name Copiale.app --dir unsigned
+          gh attestation verify unsigned/Copiale.app.tar.gz --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/macos.yml" \
+            --source-digest "$GITHUB_SHA" --source-ref refs/heads/main
+          tar -xzf unsigned/Copiale.app.tar.gz
+          bundled=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" Copiale.app/Contents/Info.plist)
+          if [ "v$bundled" != "$VERSION" ]; then
+            echo "::error::Tag $VERSION, app version $bundled"
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: source
+          sparse-checkout: packaging/macos
+      - name: Keychain
+        env:
+          CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          NOTARY_KEY: ${{ secrets.APP_STORE_CONNECT_KEY }}
+        run: |
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          password=$(openssl rand -hex 24)
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          base64 --decode <<<"$CERTIFICATE" >"$RUNNER_TEMP/certificate.p12"
+          security import "$RUNNER_TEMP/certificate.p12" -k "$keychain" -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/certificate.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain" >/dev/null
+          # shellcheck disable=SC2046
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          base64 --decode <<<"$NOTARY_KEY" >"$RUNNER_TEMP/notary.p8"
+          echo "KEYCHAIN=$keychain" >>"$GITHUB_ENV"
+      - name: Sign and notarize the app
+        env:
+          KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+        run: |
+          codesign --force --timestamp --options runtime --keychain "$KEYCHAIN" \
+            --entitlements source/packaging/macos/entitlements.plist \
+            --sign "Developer ID Application" Copiale.app
+          codesign --verify --strict --verbose=2 Copiale.app
+          # Stapled too, so a copy outside the disk image opens offline.
+          ditto -c -k --keepParent Copiale.app Copiale.zip
+          xcrun notarytool submit Copiale.zip --wait --timeout 1h \
+            --key "$RUNNER_TEMP/notary.p8" --key-id "$KEY_ID" --issuer "$ISSUER_ID"
+          xcrun stapler staple Copiale.app
+          spctl --assess --type execute --verbose=2 Copiale.app
+      - name: Disk image
+        env:
+          KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+        run: |
+          dmg="Copiale-${VERSION#v}.dmg"
+          mkdir image
+          mv Copiale.app image/
+          ln -s /Applications image/Applications
+          hdiutil create -volname Copiale -srcfolder image -fs HFS+ -format UDZO "$dmg"
+          codesign --timestamp --keychain "$KEYCHAIN" --sign "Developer ID Application" "$dmg"
+          xcrun notarytool submit "$dmg" --wait --timeout 1h \
+            --key "$RUNNER_TEMP/notary.p8" --key-id "$KEY_ID" --issuer "$ISSUER_ID"
+          xcrun stapler staple "$dmg"
+          spctl --assess --type open --context context:primary-signature --verbose=2 "$dmg"
+          shasum -a 256 "$dmg" >"$dmg.sha256"
+          echo "DMG=$dmg" >>"$GITHUB_ENV"
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ env.DMG }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: Copiale.dmg
+          path: |
+            ${{ env.DMG }}
+            ${{ env.DMG }}.sha256
+          retention-days: 30
+      - name: Clean up
+        if: always()
+        run: |
+          rm -f "$RUNNER_TEMP/notary.p8"
+          if [ -n "${KEYCHAIN:-}" ]; then security delete-keychain "$KEYCHAIN"; fi

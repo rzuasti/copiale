@@ -113,7 +113,11 @@ went unsolved until 2011.
       autostart entry (NixOS), a systemd user service (Home Manager).
       nixpkgs later.
     - Flatpak, AUR.
-  - macOS: notarized `.dmg`.
+  - macOS: notarized universal `.dmg` (macOS 14+), built, signed and
+    notarized by GitHub Actions on the mirror (github.com/rzuasti/copiale):
+    `macos.yml` builds and attests every `main` push, `macos-release.yml`
+    signs that build for a `v*` tag. Signing secrets live only in the
+    mirror's `release` environment (`v*` tags only).
   - Windows: MSIX or winget.
 
 ## Code style
