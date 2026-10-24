@@ -117,7 +117,9 @@ went unsolved until 2011.
     notarized by GitHub Actions on the mirror (github.com/rzuasti/copiale):
     `macos.yml` builds and attests every `main` push, `macos-release.yml`
     signs that build for a `v*` tag. Signing secrets live only in the
-    mirror's `release` environment (`v*` tags only).
+    mirror's `release` environment (`v*` tags only). Releases:
+    `nix run .#release -- <version>` (`docs/release-macos.md`); its
+    changelog section is approved by the user before it's committed.
   - Windows: MSIX or winget.
 
 ## Code style

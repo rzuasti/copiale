@@ -33,14 +33,34 @@
     homeModules.default = import ./nix/home-module.nix self;
     homeManagerModules = self.homeModules;
 
-    checks = forEachLinuxSystem (system: {
+    # `nix run .#release -- <version>`; see docs/release-macos.md.
+    apps = forEachSystem (system: {
+      release = {
+        type = "app";
+        program = nixpkgs.lib.getExe (pkgsBySystem.${system}.callPackage ./nix/release.nix {});
+      };
+    });
+
+    checks = forEachLinuxSystem (system: let
+      pkgs = pkgsBySystem.${system};
+    in {
       modules = import ./nix/tests.nix {
-        inherit nixpkgs;
-        pkgs = pkgsBySystem.${system};
+        inherit nixpkgs pkgs;
         copiale = self.packages.${system}.default;
         nixosModule = self.nixosModules.default;
         homeModule = self.homeModules.default;
       };
+
+      release = let
+        src = nixpkgs.lib.fileset.toSource {
+          root = ./packaging;
+          fileset = nixpkgs.lib.fileset.unions [./packaging/release.sh ./packaging/release.bats];
+        };
+      in
+        pkgs.runCommand "release-tests" {nativeBuildInputs = [pkgs.bats pkgs.git];} ''
+          HOME=$TMPDIR bats ${src}/release.bats
+          touch $out
+        '';
     });
 
     # Development shell to build and test the app locally
