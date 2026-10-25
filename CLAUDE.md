@@ -174,5 +174,5 @@ keyboard navigation (#20), adaptive compact layout (#21), and single
 instance with background running and `--toggle`/`--quit` (#22), and custom
 titlebar and decorations (#23), the settings UI (#24), blocks and bubbles
 message styles (#25), and unlink and wipe (#26) done: M3 complete. M4: Nix
-package and modules (#27) done. Next: macOS release (#79–#85)
-and Windows checks (#28).
+package and modules (#27) done. macOS release: first release v0.1.0
+(#79–#84); left: macOS checks (#85). Next: Windows checks (#28).
