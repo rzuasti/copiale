@@ -96,8 +96,13 @@ release_commit() {
   [ "$(git log -1 --format=%s HEAD)" != "Release v$1" ] || git rev-parse HEAD
 }
 
-# YubiKey SSH keys often fail the first time; fetches retry likewise.
+# YubiKey SSH keys often fail the first time.
 push() { git push "$@" || git push "$@"; }
+
+# Codeberg's main, from its API: no YubiKey touch.
+codeberg_main() {
+  curl --fail --silent --show-error "$CODEBERG_API/branches/main" | jq -r .commit.id
+}
 
 preflight() {
   [ "$(git branch --show-current)" = main ] || die "not on main"
@@ -108,9 +113,7 @@ preflight() {
   command -v rbw >/dev/null || die "rbw not found (it holds the Codeberg token)"
   [ "$(curl --fail --silent "$CODEBERG_API" | jq .has_releases)" = true ] ||
     die "releases are off in the Codeberg repo's settings"
-  say "Fetching from Codeberg"
-  git fetch --quiet --tags origin main || git fetch --quiet --tags origin main
-  git merge-base --is-ancestor origin/main HEAD || die "main is behind Codeberg; pull first"
+  git merge-base --is-ancestor "$(codeberg_main)" HEAD 2>/dev/null || die "main is behind Codeberg; pull first"
 }
 
 # Changelog, version bump and the release commit.
@@ -136,7 +139,7 @@ prepare() {
 }
 
 push_main() {
-  if ! git merge-base --is-ancestor "$1" origin/main; then
+  if ! git merge-base --is-ancestor "$1" "$(codeberg_main)" 2>/dev/null; then
     say "Pushing main to Codeberg"
     push origin "$1:refs/heads/main"
   fi
