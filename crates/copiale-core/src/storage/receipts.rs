@@ -141,7 +141,7 @@ impl Database {
                 changed.push(message(row)?);
             }
         }
-        self.resolve_quotes(&mut changed).await?;
+        self.resolve_all(&mut changed).await?;
         Ok(changed)
     }
 

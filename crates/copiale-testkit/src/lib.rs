@@ -10,8 +10,8 @@ use copiale_core::storage::{Database, SecretError, SecretStore};
 use copiale_core::{
     Ack, BackendError, BlockedList, ChatRef, Clock, Contact, Destination, GroupInfo,
     GroupMasterKey, GroupMembers, IdentityKey, Incoming, Linker, MessageBody, Outgoing,
-    PeerIdentity, RequestResponse, Resendable, RetryRequest, SafetyNumber, ServiceId,
-    SignalBackend, StoredChats, Timestamp,
+    PeerIdentity, RemoteAttachment, RequestResponse, Resendable, RetryRequest, SafetyNumber,
+    ServiceId, SignalBackend, StoredChats, Timestamp,
 };
 use futures::future::LocalBoxFuture;
 use futures::stream::LocalBoxStream;
@@ -97,6 +97,7 @@ pub fn text(body: &str) -> Outgoing {
 #[derive(Clone, Copy, Default)]
 struct Link {
     sends_paused: bool,
+    downloads_paused: bool,
     offline: bool,
     connections_stalled: bool,
 }
@@ -161,6 +162,11 @@ struct State {
     /// Storage Service's chats, if any.
     stored: Option<StoredChats>,
     stored_reads: usize,
+    /// Attachments on the CDN, by pointer.
+    attachments: HashMap<Vec<u8>, Vec<u8>>,
+    /// Attachments downloaded, in order, including failed ones.
+    downloads: Vec<RemoteAttachment>,
+    download_failures: VecDeque<BackendError>,
 }
 
 type DeletedForMe = (Destination, Vec<(Option<ServiceId>, Timestamp)>);
@@ -309,6 +315,30 @@ impl SignalBackend for FakeBackend {
                     content,
                 }
             }))
+        }
+        .boxed_local()
+    }
+
+    /// Gets what [`FakeNetwork::upload`] put there, once downloads aren't
+    /// paused and the network is up; gone otherwise.
+    fn download(
+        &mut self,
+        attachment: RemoteAttachment,
+    ) -> LocalBoxFuture<'static, Result<Vec<u8>, BackendError>> {
+        let (failure, contents) = self.record(|state| {
+            state.downloads.push(attachment.clone());
+            let contents = state.attachments.get(attachment.as_bytes()).cloned();
+            (state.download_failures.pop_front(), contents)
+        });
+        let mut link = self.link.subscribe();
+        async move {
+            link.wait_for(|link| !link.downloads_paused && !link.offline)
+                .await
+                .ok();
+            if let Some(error) = failure {
+                return Err(error);
+            }
+            contents.ok_or_else(|| BackendError::gone("not on the CDN"))
         }
         .boxed_local()
     }
@@ -678,6 +708,36 @@ impl FakeNetwork {
             .unwrap()
             .retry_request_failures
             .push_back(error);
+    }
+
+    /// Puts an attachment on the CDN; returns where it is.
+    pub fn upload(&self, name: &str, contents: &[u8]) -> RemoteAttachment {
+        let remote = RemoteAttachment::new(name.as_bytes().to_vec());
+        self.state
+            .lock()
+            .unwrap()
+            .attachments
+            .insert(name.as_bytes().to_vec(), contents.to_vec());
+        remote
+    }
+
+    /// Attachments downloads asked for so far, oldest first.
+    pub fn downloads(&self) -> Vec<RemoteAttachment> {
+        self.state.lock().unwrap().downloads.clone()
+    }
+
+    /// Makes the next download fail; queues up for repeated calls.
+    pub fn fail_next_download(&self, error: BackendError) {
+        self.state
+            .lock()
+            .unwrap()
+            .download_failures
+            .push_back(error);
+    }
+
+    /// Holds downloads in flight until called with `false`.
+    pub fn pause_downloads(&self, paused: bool) {
+        self.link.send_modify(|link| link.downloads_paused = paused);
     }
 
     /// Holds sends in flight until [`Self::resume_sends`], like a slow

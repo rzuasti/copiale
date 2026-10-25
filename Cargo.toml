@@ -11,6 +11,8 @@ repository = "https://codeberg.org/korba/copiale"
 publish = false
 
 [workspace.dependencies]
+# Encrypts attachment files; same version as libsignal's.
+aes-gcm = { version = "0.11", default-features = false, features = ["aes", "alloc", "zeroize"] }
 # Zeroes its working memory; lanes run in parallel.
 argon2 = { version = "0.6", features = ["parallel", "zeroize"] }
 # Same version and runtime as GPUI's.
@@ -54,6 +56,8 @@ serde = { version = "1", features = ["derive"] }
 # Same registry as async-process uses for SIGCHLD.
 signal-hook = { version = "0.3", default-features = false, features = ["iterator"] }
 serde_json = "1"
+# Checks attachment digests; same version as libsignal-service uses.
+sha2 = "0.11"
 sqlx = { version = "0.9", default-features = false, features = ["sqlite", "migrate", "macros", "runtime-tokio"] }
 tempfile = "3"
 thiserror = "2"

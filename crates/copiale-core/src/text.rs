@@ -1,10 +1,13 @@
 //! Characters that can disguise text: bidi controls and invisible ones,
-//! and the longest message body kept.
+//! and the longest message body and file name kept.
 
 use std::borrow::Cow;
 
 /// Longest message body stored and rendered, in bytes.
 pub const MAX_BODY_BYTES: usize = 64 * 1024;
+
+/// Longest attachment file name stored, in bytes.
+pub const MAX_FILE_NAME_BYTES: usize = 255;
 
 /// Controls, bidi controls, line and paragraph separators, and invisible
 /// characters.
@@ -63,11 +66,20 @@ pub fn clean_name(name: &str) -> Option<String> {
 /// `body` cut to at most [`MAX_BODY_BYTES`] on a character boundary,
 /// ending in "…" if cut.
 pub fn clip_body(body: &str) -> Cow<'_, str> {
-    if body.len() <= MAX_BODY_BYTES {
-        return Cow::Borrowed(body);
+    clip(body, MAX_BODY_BYTES)
+}
+
+/// `name` cut to at most [`MAX_FILE_NAME_BYTES`], as [`clip_body`].
+pub fn clip_file_name(name: &str) -> Cow<'_, str> {
+    clip(name, MAX_FILE_NAME_BYTES)
+}
+
+fn clip(text: &str, max: usize) -> Cow<'_, str> {
+    if text.len() <= max {
+        return Cow::Borrowed(text);
     }
-    let end = body.floor_char_boundary(MAX_BODY_BYTES - '…'.len_utf8());
-    Cow::Owned(format!("{}…", &body[..end]))
+    let end = text.floor_char_boundary(max - '…'.len_utf8());
+    Cow::Owned(format!("{}…", &text[..end]))
 }
 
 #[cfg(test)]
@@ -121,5 +133,14 @@ mod tests {
         assert!(clipped.len() <= MAX_BODY_BYTES);
         assert!(clipped.ends_with("é…"));
         assert!(long.starts_with(clipped.trim_end_matches('…')));
+    }
+
+    #[test]
+    fn long_file_names_are_clipped() {
+        assert!(matches!(clip_file_name("a.txt"), Cow::Borrowed("a.txt")));
+        let long = format!("{}.pdf", "ü".repeat(MAX_FILE_NAME_BYTES));
+        let clipped = clip_file_name(&long);
+        assert!(clipped.len() <= MAX_FILE_NAME_BYTES);
+        assert!(clipped.ends_with("ü…"));
     }
 }

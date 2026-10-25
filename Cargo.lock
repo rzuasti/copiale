@@ -153,6 +153,7 @@ dependencies = [
  "ctr 0.10.1",
  "ctutils",
  "ghash",
+ "zeroize",
 ]
 
 [[package]]
@@ -1331,6 +1332,7 @@ dependencies = [
 name = "copiale-core"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
  "argon2 0.6.0",
  "async-trait",
  "chrono",
@@ -1350,6 +1352,7 @@ dependencies = [
  "reqwest-websocket",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "sqlx",
  "tempfile",
  "thiserror 2.0.21",

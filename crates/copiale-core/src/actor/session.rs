@@ -12,6 +12,7 @@ use futures::{FutureExt as _, StreamExt as _};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::time::Instant;
 
+use super::downloads::{Downloads, Failure, Finished, Job};
 use super::groups::{Groups, Update};
 use super::outbox::{Outbox, Outcome, Sent};
 use super::probe::{Check, Probe};
@@ -23,11 +24,11 @@ use crate::backend::{
 };
 use crate::clock::Clock;
 use crate::model::{
-    Account, AccountSettings, BlockedList, Change, ChatRef, ChatState, Content, ConversationId,
-    Destination, GroupId, GroupMasterKey, GroupRef, GroupUpdate, Identity, IdentityKey,
-    IncomingMessage, Message, MessageBody, MessageChange, MessageId, MessageRef, MessageStatus,
-    Outgoing, Peer, Quote, ReceiptKind, RecentEmoji, RequestResponse, SentMessage, ServiceId,
-    Timestamp, Verification,
+    Account, AccountSettings, Attachment, AttachmentId, AttachmentState, BlockedList, Change,
+    ChatRef, ChatState, Content, ConversationId, Destination, FileContents, GroupId,
+    GroupMasterKey, GroupRef, GroupUpdate, Identity, IdentityKey, IncomingMessage, Message,
+    MessageBody, MessageChange, MessageId, MessageRef, MessageStatus, Outgoing, Peer, Quote,
+    ReceiptKind, RecentEmoji, RequestResponse, SentMessage, ServiceId, Timestamp, Verification,
 };
 use crate::storage::{Database, Removed, StorageError};
 
@@ -59,6 +60,7 @@ struct Session<'a, B> {
     device_name: Option<String>,
     settings: AccountSettings,
     outbox: Outbox,
+    downloads: Downloads,
     probe: Probe,
     groups: Groups,
     /// Retry requests we sent, and answered.
@@ -115,6 +117,7 @@ impl<'a, B: SignalBackend> Session<'a, B> {
             device_name: backend.device_name(),
             settings: AccountSettings::default(),
             outbox: Outbox::new(options.send_timeout),
+            downloads: Downloads::new(db.files()),
             probe: Probe::new(options.probe_interval, options.probe_timeout),
             groups: Groups::new(),
             retries_sent: Limiter::new(RETRY_WINDOW, MAX_RETRY_REQUESTS_PER_DEVICE),
@@ -171,6 +174,14 @@ impl<'a, B: SignalBackend> Session<'a, B> {
             Err(error) => self.database_error(error),
         }
         self.forget_sends().await;
+        match self.db.check_files().await {
+            Ok(interrupted) => {
+                for id in interrupted {
+                    self.download(id).await;
+                }
+            }
+            Err(error) => self.database_error(error),
+        }
         // Contact names title conversations; settings stay off until the
         // phone says otherwise.
         self.contacts_wanted = linked_now || self.contacts_due().await;
@@ -237,6 +248,10 @@ impl<'a, B: SignalBackend> Session<'a, B> {
                 }
                 check = self.probe.next() => self.probe_check(check).await,
                 outcome = self.outbox.finished() => self.send_outcome(outcome).await,
+                finished = self.downloads.finished() => {
+                    self.download_finished(finished).await;
+                    None
+                }
                 () = tokio::time::sleep_until(wait), if self.retry_at.is_some() => None,
                 () = tokio::time::sleep_until(drain_wait), if self.drain_by.is_some() => {
                     self.drain_timed_out().await
@@ -283,6 +298,8 @@ impl<'a, B: SignalBackend> Session<'a, B> {
             Some(Command::RetrySend(id)) => self.retry_send(id).await,
             Some(Command::Edit { id, body }) => self.edit(id, body).await,
             Some(Command::Delete { id, everyone }) => self.delete(id, everyone).await,
+            Some(Command::Download(id)) => self.download(id).await,
+            Some(Command::LoadAttachment(id)) => self.load_attachment(id).await,
             Some(Command::Reconnect) if self.incoming.is_none() && self.connecting.is_none() => {
                 self.retry_at = Some(Instant::now());
             }
@@ -390,6 +407,7 @@ impl<'a, B: SignalBackend> Session<'a, B> {
                 self.emit(Event::Connected);
                 self.probe.start();
                 self.outbox.connected(&mut self.backend);
+                self.downloads.connected(&mut self.backend);
                 let timeout = self.core.options.connect_timeout;
                 if std::mem::take(&mut self.contacts_wanted) {
                     let request = timed(timeout, self.backend.request_contact_sync());
@@ -441,6 +459,7 @@ impl<'a, B: SignalBackend> Session<'a, B> {
         }
         self.probe.stop();
         self.outbox.disconnected();
+        self.downloads.disconnected();
         self.draining = Some(Some(error));
         if self.incoming.is_none() {
             return self.ended().await;
@@ -461,6 +480,7 @@ impl<'a, B: SignalBackend> Session<'a, B> {
         }
         self.probe.stop();
         self.outbox.disconnected();
+        self.downloads.disconnected();
         let error = self.draining.take().flatten();
         if error.as_ref().is_some_and(BackendError::is_unauthorized) {
             self.revoked = true;
@@ -1957,12 +1977,119 @@ impl<'a, B: SignalBackend> Session<'a, B> {
                 let conversation = message.conversation;
                 tracing::debug!(conversation = conversation.get(), "message stored");
                 self.schedule(&message);
+                let message = self.auto_download(message).await;
                 self.emit(Event::MessageAdded(message));
                 // Replies may arrive first.
                 self.quote_changed(conversation, author, sent_at).await;
                 self.send_conversation(conversation).await;
             }
             Ok(None) => tracing::debug!("duplicate message ignored"),
+            Err(error) => self.database_error(error),
+        }
+    }
+
+    /// Starts downloading what `message` downloads without asking, unless
+    /// it's a message request; returns it as it now is.
+    async fn auto_download(&mut self, message: Message) -> Message {
+        let Content::Text { attachments, .. } = &message.content else {
+            return message;
+        };
+        let remote = |attachment: &&Attachment| attachment.state == AttachmentState::Remote;
+        if !attachments.iter().any(|attachment| remote(&attachment))
+            || !self.accepted(message.conversation).await
+        {
+            return message;
+        }
+        let now = Instant::now();
+        let wanted: Vec<AttachmentId> = attachments
+            .iter()
+            .filter(|attachment| self.downloads.auto(attachment, message.sender, now))
+            .filter_map(|attachment| attachment.id)
+            .collect();
+        for id in wanted {
+            self.start_download(id).await;
+        }
+        match self.db.message(message.id).await {
+            Ok(Some(now)) => now,
+            Ok(None) => message,
+            Err(error) => {
+                self.database_error(error);
+                message
+            }
+        }
+    }
+
+    /// Downloads an attachment asked for, reporting its message.
+    async fn download(&mut self, id: AttachmentId) {
+        if let Some(message) = self.start_download(id).await {
+            self.attachment_changed(message).await;
+        }
+    }
+
+    /// Queues a download unless the attachment is here, going or gone;
+    /// returns its message if queued.
+    async fn start_download(&mut self, id: AttachmentId) -> Option<MessageId> {
+        match self.db.start_download(id).await {
+            Ok(Some((message, remote))) => {
+                tracing::debug!(attachment = id.get(), "downloading an attachment");
+                self.downloads.push(Job { id, remote }, &mut self.backend);
+                Some(message)
+            }
+            Ok(None) => None,
+            Err(error) => {
+                self.database_error(error);
+                None
+            }
+        }
+    }
+
+    async fn download_finished(&mut self, finished: Finished) {
+        let Finished { job, result } = finished;
+        let id = job.id;
+        let stored = match result {
+            Ok(file) => self.db.finish_download(id, file).await,
+            Err(Failure::Backend(error)) if error.is_network() => {
+                tracing::debug!(attachment = id.get(), %error, "download cut off");
+                self.downloads.wait(job);
+                return;
+            }
+            Err(Failure::Backend(error)) => {
+                let state = if error.is_gone() {
+                    AttachmentState::Expired
+                } else {
+                    AttachmentState::Failed
+                };
+                tracing::warn!(attachment = id.get(), %error, "download failed");
+                self.db.stop_download(id, state).await
+            }
+            Err(Failure::Storage(error)) => {
+                self.database_error(error.into());
+                self.db.stop_download(id, AttachmentState::Failed).await
+            }
+        };
+        match stored {
+            Ok(Some(message)) => self.attachment_changed(message).await,
+            Ok(None) => tracing::debug!(attachment = id.get(), "downloaded after it was gone"),
+            Err(error) => self.database_error(error),
+        }
+        self.downloads.start(&mut self.backend);
+    }
+
+    async fn load_attachment(&self, id: AttachmentId) {
+        let contents = match self.db.attachment_contents(id).await {
+            Ok(contents) => contents.map(FileContents::new),
+            Err(error) => {
+                self.database_error(error);
+                None
+            }
+        };
+        self.emit(Event::AttachmentLoaded { id, contents });
+    }
+
+    async fn attachment_changed(&self, message: MessageId) {
+        match self.db.message(message).await {
+            Ok(Some(message)) => self.emit(Event::MessageUpdated(message)),
+            Ok(None) => {}
             Err(error) => self.database_error(error),
         }
     }

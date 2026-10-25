@@ -8,10 +8,11 @@ use copiale_core::config::{
     Config, ConfigFile, Density, MessageStyle, NotificationContent, Setting, ThemeName, TimeFormat,
 };
 use copiale_core::{
-    Account, AccountSettings, Attachment, BackendError, ChatState, Command, Contact, Content,
-    ConversationId, ConversationSummary, Direction, Event, Expiry, GroupMasterKey, GroupUpdate,
-    Identity, Member, Message, MessageBody, MessageId, MessageStatus, Peer, Quote, Quoted,
-    RecentEmoji, SafetyNumber, ServiceId, StorageFailure, Timestamp, Unsupported, Verification,
+    Account, AccountSettings, Attachment, AttachmentKind, BackendError, ChatState, Command,
+    Contact, Content, ConversationId, ConversationSummary, Direction, Event, Expiry,
+    GroupMasterKey, GroupUpdate, Identity, Member, Message, MessageBody, MessageId, MessageStatus,
+    Peer, Quote, Quoted, RecentEmoji, SafetyNumber, ServiceId, StorageFailure, Timestamp,
+    Unsupported, Verification,
 };
 use copiale_ui::chat::{
     COMPACT_BELOW, ChatView, Compose, Field, Layout, Notice, NoticeAction, NoticeKey, Overlay,
@@ -1010,12 +1011,15 @@ fn renders_every_kind_of_content(cx: &mut TestAppContext) {
     let contents = [
         Content::Text {
             body: MessageBody::new("caption"),
-            attachments: vec![Attachment::Image, Attachment::File { name: None }],
+            attachments: vec![
+                Attachment::new(AttachmentKind::Image),
+                Attachment::new(AttachmentKind::File),
+            ],
             quote: None,
         },
         Content::Text {
             body: MessageBody::new(""),
-            attachments: vec![Attachment::Voice],
+            attachments: vec![Attachment::new(AttachmentKind::Voice)],
             quote: None,
         },
         Content::Sticker { emoji: None },

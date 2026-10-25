@@ -10,7 +10,8 @@ use tokio::sync::oneshot;
 use crate::model::{
     BlockedList, ChatRef, Destination, GroupId, GroupInfo, GroupMasterKey, GroupMembers,
     IdentityKey, IncomingMessage, MessageChange, MessageRef, Outgoing, ReceiptKind,
-    RequestResponse, SafetyNumber, SentMessage, ServiceId, StoredChat, StoredIdentity, Timestamp,
+    RemoteAttachment, RequestResponse, SafetyNumber, SentMessage, ServiceId, StoredChat,
+    StoredIdentity, Timestamp,
 };
 use crate::storage::Database;
 
@@ -208,6 +209,7 @@ enum ErrorKind {
     UntrustedIdentity,
     /// With how long the server said to wait, if it did.
     RateLimited(Option<Duration>),
+    Gone,
 }
 
 impl BackendError {
@@ -253,8 +255,21 @@ impl BackendError {
         }
     }
 
+    /// What was asked for is no longer on the server, like an attachment
+    /// past its retention.
+    pub fn gone(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            kind: ErrorKind::Gone,
+        }
+    }
+
     pub fn is_network(&self) -> bool {
         self.kind == ErrorKind::Network
+    }
+
+    pub fn is_gone(&self) -> bool {
+        self.kind == ErrorKind::Gone
     }
 
     pub fn is_unauthorized(&self) -> bool {
@@ -309,6 +324,14 @@ pub trait SignalBackend {
         outgoing: Outgoing,
         timestamp: Timestamp,
     ) -> LocalBoxFuture<'static, Result<Resendable, BackendError>>;
+
+    /// Downloads and decrypts an attachment, failing if it's larger than
+    /// [`MAX_ATTACHMENT_SIZE`](crate::MAX_ATTACHMENT_SIZE) or than it says; [`BackendError::is_gone`]
+    /// once Signal's servers dropped it. Doesn't borrow the backend.
+    fn download(
+        &mut self,
+        attachment: RemoteAttachment,
+    ) -> LocalBoxFuture<'static, Result<Vec<u8>, BackendError>>;
 
     /// Asks `sender` to resend a message that couldn't be decrypted
     /// ([`Incoming::Undecryptable`]). Doesn't borrow the backend.

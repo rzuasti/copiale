@@ -260,8 +260,8 @@ fn preview(content: &Content) -> String {
 #[cfg(test)]
 mod tests {
     use copiale_core::{
-        Attachment, ChatState, ConversationSummary, Expiry, GroupId, Member, MessageBody,
-        MessageId, ServiceId, Timestamp,
+        Attachment, AttachmentKind, ChatState, ConversationSummary, Expiry, GroupId, Member,
+        MessageBody, MessageId, ServiceId, Timestamp,
     };
     use uuid::Uuid;
 
@@ -449,7 +449,7 @@ mod tests {
         let image = Message {
             content: Content::Text {
                 body: MessageBody::new(""),
-                attachments: vec![Attachment::Image],
+                attachments: vec![Attachment::new(AttachmentKind::Image)],
                 quote: None,
             },
             ..message(1, 1, "")

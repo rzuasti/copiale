@@ -1,6 +1,6 @@
 //! How content the log can't show reads: placeholder and system lines.
 
-use copiale_core::{Attachment, Content, GroupUpdate, ServiceId, Unsupported};
+use copiale_core::{Attachment, AttachmentKind, Content, GroupUpdate, ServiceId, Unsupported};
 
 use super::text::{isolate, visible};
 
@@ -63,12 +63,8 @@ pub fn quote_line(
     let quoted = if !text.is_empty() {
         text
     } else {
-        match &original.attachment {
-            Some(attachment) => attachment_lines(std::slice::from_ref(attachment))
-                .first()
-                .and_then(|line| line.split(']').next())
-                .map(|label| format!("{label}]"))
-                .unwrap_or_default(),
+        match original.attachment {
+            Some(kind) => format!("[{}]", label(kind).0),
             None => "…".into(),
         }
     };
@@ -79,7 +75,11 @@ pub fn quote_line(
 /// line with their names, hidden characters spelled out.
 fn attachment_lines(attachments: &[Attachment]) -> Vec<String> {
     let mut counts: Vec<((&str, &str), usize)> = Vec::new();
-    for label in attachments.iter().filter_map(label) {
+    let counted = attachments
+        .iter()
+        .filter(|attachment| attachment.kind != AttachmentKind::File)
+        .map(|attachment| label(attachment.kind));
+    for label in counted {
         match counts.iter_mut().find(|(counted, _)| *counted == label) {
             Some((_, count)) => *count += 1,
             None => counts.push((label, 1)),
@@ -93,8 +93,12 @@ fn attachment_lines(attachments: &[Attachment]) -> Vec<String> {
         })
         .collect();
     for attachment in attachments {
-        if let Attachment::File { name } = attachment {
-            match name.as_deref().filter(|name| !name.trim().is_empty()) {
+        if attachment.kind == AttachmentKind::File {
+            match attachment
+                .name
+                .as_deref()
+                .filter(|name| !name.trim().is_empty())
+            {
                 Some(name) => lines.push(format!("[file] {} · {ON_PHONE}", visible(name))),
                 None => lines.push(format!("[file] {ON_PHONE}")),
             }
@@ -103,15 +107,15 @@ fn attachment_lines(attachments: &[Attachment]) -> Vec<String> {
     lines
 }
 
-/// Singular and plural names of a counted kind; `None` for files.
-fn label(attachment: &Attachment) -> Option<(&'static str, &'static str)> {
-    match attachment {
-        Attachment::Image => Some(("image", "images")),
-        Attachment::Gif => Some(("GIF", "GIFs")),
-        Attachment::Video => Some(("video", "videos")),
-        Attachment::Voice => Some(("voice message", "voice messages")),
-        Attachment::Audio => Some(("audio", "audio files")),
-        Attachment::File { .. } => None,
+/// Singular and plural names of a kind.
+fn label(kind: AttachmentKind) -> (&'static str, &'static str) {
+    match kind {
+        AttachmentKind::Image => ("image", "images"),
+        AttachmentKind::Gif => ("GIF", "GIFs"),
+        AttachmentKind::Video => ("video", "videos"),
+        AttachmentKind::Voice => ("voice message", "voice messages"),
+        AttachmentKind::Audio => ("audio", "audio files"),
+        AttachmentKind::File => ("file", "files"),
     }
 }
 
@@ -216,13 +220,14 @@ mod tests {
     #[test]
     fn attachments_are_counted_by_kind_and_files_named() {
         let content = text(vec![
-            Attachment::Image,
-            Attachment::Image,
-            Attachment::Voice,
-            Attachment::File {
+            Attachment::new(AttachmentKind::Image),
+            Attachment::new(AttachmentKind::Image),
+            Attachment::new(AttachmentKind::Voice),
+            Attachment {
                 name: Some("report.pdf".into()),
+                ..Attachment::new(AttachmentKind::File)
             },
-            Attachment::File { name: None },
+            Attachment::new(AttachmentKind::File),
         ]);
         assert_eq!(
             placeholders(&content),
@@ -237,8 +242,9 @@ mod tests {
 
     #[test]
     fn file_names_spell_out_hidden_characters() {
-        let content = text(vec![Attachment::File {
+        let content = text(vec![Attachment {
             name: Some("\u{5d0}\u{202e}fdp.exe".into()),
+            ..Attachment::new(AttachmentKind::File)
         }]);
         assert_eq!(
             placeholders(&content),
@@ -277,9 +283,18 @@ mod tests {
                 Content::Unsupported(Unsupported::Poll),
                 "[poll] open on your phone",
             ),
-            (text(vec![Attachment::Gif]), "[GIF] open on your phone"),
-            (text(vec![Attachment::Video]), "[video] open on your phone"),
-            (text(vec![Attachment::Audio]), "[audio] open on your phone"),
+            (
+                text(vec![Attachment::new(AttachmentKind::Gif)]),
+                "[GIF] open on your phone",
+            ),
+            (
+                text(vec![Attachment::new(AttachmentKind::Video)]),
+                "[video] open on your phone",
+            ),
+            (
+                text(vec![Attachment::new(AttachmentKind::Audio)]),
+                "[audio] open on your phone",
+            ),
         ];
         for (content, expected) in cases {
             assert_eq!(placeholders(&content), [expected]);
@@ -302,7 +317,7 @@ mod tests {
         );
     }
 
-    fn reply(author: Option<ServiceId>, text: &str, attachment: Option<Attachment>) -> Content {
+    fn reply(author: Option<ServiceId>, text: &str, attachment: Option<AttachmentKind>) -> Content {
         Content::Text {
             body: MessageBody::new("yes"),
             attachments: Vec::new(),
@@ -326,7 +341,7 @@ mod tests {
             Some("↳ \u{2068}member2\u{2069}: ship it?")
         );
         assert_eq!(
-            quote_line(&reply(None, "", Some(Attachment::Image)), author).as_deref(),
+            quote_line(&reply(None, "", Some(AttachmentKind::Image)), author).as_deref(),
             Some("↳ \u{2068}you\u{2069}: [image]")
         );
         assert_eq!(

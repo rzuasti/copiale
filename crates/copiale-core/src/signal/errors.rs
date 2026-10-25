@@ -47,6 +47,26 @@ pub(super) fn presage_error<S: std::error::Error>(error: presage::Error<S>) -> B
     }
 }
 
+/// Marks attachments gone from the CDN, and connection failures.
+pub(super) fn cdn_error(error: ServiceError) -> BackendError {
+    // reqwest's errors name the URL, which holds the attachment's CDN key.
+    let ServiceError::Http(http) = &error else {
+        return match is_network(&error) {
+            true => BackendError::network(error.to_string()),
+            false => BackendError::new(error.to_string()),
+        };
+    };
+    match http.status() {
+        // Missing objects are 404 on some CDNs, 403 on others.
+        Some(status) if matches!(status.as_u16(), 403 | 404) => {
+            BackendError::gone(format!("attachment gone from the CDN ({status})"))
+        }
+        Some(status) => BackendError::new(format!("the CDN answered {status}")),
+        None if http.is_timeout() => BackendError::network("the CDN timed out"),
+        None => BackendError::network("the CDN couldn't be reached"),
+    }
+}
+
 /// Marks connection failures.
 pub(super) fn storage_service_error(error: StorageServiceError) -> BackendError {
     match &error {

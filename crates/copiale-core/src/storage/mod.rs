@@ -6,9 +6,11 @@
 //! Key handling is blocking (keychain I/O, key derivation); opening the
 //! database is async.
 
+mod attachments;
 mod changes;
 mod contacts;
 mod database;
+mod files;
 mod identities;
 mod key;
 mod messages;
@@ -25,6 +27,7 @@ use std::path::{Path, PathBuf};
 
 pub(crate) use contacts::synced;
 pub use database::Database;
+pub(crate) use files::{Files, StoredFile};
 pub(crate) use identities::VerifiedKeys;
 pub use key::{DatabaseKey, KdfParams, Passphrase};
 pub(crate) use messages::Removed;
@@ -56,6 +59,11 @@ impl StoragePaths {
 
     fn dir(&self) -> &Path {
         self.database.parent().unwrap_or(Path::new("."))
+    }
+
+    /// Where downloaded attachments are kept, encrypted.
+    pub fn attachments(&self) -> PathBuf {
+        self.dir().join(files::DIR)
     }
 }
 
@@ -189,8 +197,8 @@ impl Storage {
         Ok(key)
     }
 
-    /// Deletes the database, its WAL files, the key file and the keychain
-    /// entry. Blocking. The database must not be open.
+    /// Deletes the database, its WAL files, the key file, attachments and
+    /// the keychain entry. Blocking. The database must not be open.
     pub fn wipe<S: SecretStore + ?Sized>(&self, secrets: &S) -> Result<Wiped, StorageError> {
         // Passphrase databases have no key in the keychain.
         let keychain_key = !self.paths.key_file.exists();
@@ -207,6 +215,12 @@ impl Storage {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error.into()),
             }
+        }
+        // Unreadable without their keys, gone with the database.
+        match std::fs::remove_dir_all(self.paths.attachments()) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
         }
         let wiped = match secrets.delete() {
             Ok(()) => Wiped::All,

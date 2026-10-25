@@ -22,11 +22,12 @@ use presage::model::messages::Received;
 
 use crate::backend::{Incoming, RetryRequest, Undecryptable};
 use crate::model::{
-    self, Attachment, BlockedList, Change, ChatRef, Destination, GroupId, GroupMasterKey, GroupRef,
-    GroupUpdate, IdentityKey, IncomingMessage, MessageBody, MessageChange, MessageRef, PhoneNumber,
-    Quote, ReceiptKind, RequestResponse, SentMessage, ServiceId, Timestamp, Unsupported,
+    self, Attachment, AttachmentKind, AttachmentState, BlockedList, Change, ChatRef, Destination,
+    GroupId, GroupMasterKey, GroupRef, GroupUpdate, IdentityKey, IncomingMessage, MessageBody,
+    MessageChange, MessageRef, PhoneNumber, Quote, ReceiptKind, RemoteAttachment, RequestResponse,
+    SentMessage, ServiceId, Timestamp, Unsupported,
 };
-use crate::text::{clean_name, clip_body};
+use crate::text::{clean_name, clip_body, clip_file_name};
 
 /// What the core cares about so far; everything else is dropped, as are
 /// sync messages from anyone but `me`. Group changes must be signed by
@@ -510,7 +511,12 @@ fn data_content(
         return Some(model::Content::Unsupported(Unsupported::ViewOnce));
     }
     let body = clip_body(message.body.as_deref().unwrap_or_default()).into_owned();
-    let attachments: Vec<_> = message.attachments.iter().map(attachment).collect();
+    let attachments: Vec<_> = message
+        .attachments
+        .iter()
+        .take(model::MAX_ATTACHMENTS)
+        .map(attachment)
+        .collect();
     if !body.is_empty() || !attachments.is_empty() {
         return Some(model::Content::Text {
             body: MessageBody::new(body),
@@ -532,30 +538,56 @@ fn data_content(
     Some(model::Content::Unsupported(unsupported))
 }
 
+/// An attachment as its pointer describes it, to download unless it can't
+/// be: too large, or without its size, key or digest.
 fn attachment(pointer: &AttachmentPointer) -> Attachment {
-    attachment_kind(
-        pointer.content_type.as_deref().unwrap_or(""),
-        pointer.flags.unwrap_or(0),
-        pointer.file_name.as_deref(),
-    )
+    let short = |text: &Option<String>| text.clone().filter(|text| text.len() <= MAX_FIELD_BYTES);
+    let downloadable = pointer.attachment_identifier.is_some()
+        && pointer.key.is_some()
+        && pointer.digest.is_some()
+        && pointer
+            .size
+            .is_some_and(|size| size <= model::MAX_ATTACHMENT_SIZE);
+    Attachment {
+        content_type: short(&pointer.content_type),
+        name: pointer
+            .file_name
+            .as_deref()
+            .map(|name| clip_file_name(name).into_owned()),
+        size: pointer.size,
+        width: pointer.width.filter(|width| *width > 0),
+        height: pointer.height.filter(|height| *height > 0),
+        blurhash: short(&pointer.blur_hash),
+        state: if downloadable {
+            AttachmentState::Remote
+        } else {
+            AttachmentState::Unavailable
+        },
+        remote: downloadable.then(|| RemoteAttachment::new(pointer.encode_to_vec())),
+        ..Attachment::new(attachment_kind(
+            pointer.content_type.as_deref().unwrap_or(""),
+            pointer.flags.unwrap_or(0),
+        ))
+    }
 }
 
-fn attachment_kind(kind: &str, flags: u32, file_name: Option<&str>) -> Attachment {
+/// Longest content type or blurhash kept, in bytes.
+const MAX_FIELD_BYTES: usize = 255;
+
+fn attachment_kind(kind: &str, flags: u32) -> AttachmentKind {
     let has = |flag: attachment_pointer::Flags| flags & flag as u32 != 0;
     if has(attachment_pointer::Flags::Gif) || kind == "image/gif" {
-        Attachment::Gif
+        AttachmentKind::Gif
     } else if kind.starts_with("image/") {
-        Attachment::Image
+        AttachmentKind::Image
     } else if kind.starts_with("video/") {
-        Attachment::Video
+        AttachmentKind::Video
     } else if kind.starts_with("audio/") && has(attachment_pointer::Flags::VoiceMessage) {
-        Attachment::Voice
+        AttachmentKind::Voice
     } else if kind.starts_with("audio/") {
-        Attachment::Audio
+        AttachmentKind::Audio
     } else {
-        Attachment::File {
-            name: file_name.map(Into::into),
-        }
+        AttachmentKind::File
     }
 }
 
@@ -808,6 +840,30 @@ pub(super) mod tests {
         assert_eq!(message.timestamp, Timestamp::from_millis(1_700_000_000_123));
     }
 
+    /// The kinds and names of `content`'s attachments.
+    fn kinds(content: Option<model::Content>) -> Vec<(AttachmentKind, Option<String>)> {
+        let Some(model::Content::Text { attachments, .. }) = content else {
+            panic!("not text");
+        };
+        attachments
+            .into_iter()
+            .map(|attachment| (attachment.kind, attachment.name))
+            .collect()
+    }
+
+    /// A pointer to a downloadable attachment of `size` bytes.
+    fn downloadable(content_type: &str, size: u32) -> AttachmentPointer {
+        AttachmentPointer {
+            attachment_identifier: Some(attachment_pointer::AttachmentIdentifier::CdnKey(
+                "key".into(),
+            )),
+            key: Some(vec![1; 64]),
+            digest: Some(vec![2; 32]),
+            size: Some(size),
+            ..pointer(content_type, 0, Some("cat.jpg"))
+        }
+    }
+
     #[test]
     fn attachments_keep_their_caption() {
         let message = DataMessage {
@@ -824,24 +880,110 @@ pub(super) mod tests {
             ..Default::default()
         };
 
+        let content = data(message);
         assert_eq!(
-            data(message),
-            Some(model::Content::Text {
-                body: MessageBody::new("the graph"),
-                attachments: vec![
-                    Attachment::Image,
-                    Attachment::Gif,
-                    Attachment::Gif,
-                    Attachment::Video,
-                    Attachment::Voice,
-                    Attachment::Audio,
-                    Attachment::File {
-                        name: Some("report.pdf".into())
-                    },
-                ],
-                quote: None,
-            })
+            content.as_ref().and_then(|c| c.body()).unwrap().as_str(),
+            "the graph"
         );
+        assert_eq!(
+            kinds(content),
+            [
+                (AttachmentKind::Image, None),
+                (AttachmentKind::Gif, None),
+                (AttachmentKind::Gif, None),
+                (AttachmentKind::Video, None),
+                (AttachmentKind::Voice, None),
+                (AttachmentKind::Audio, None),
+                (AttachmentKind::File, Some("report.pdf".into())),
+            ]
+        );
+    }
+
+    #[test]
+    fn downloadable_attachments_keep_their_pointer() {
+        let pointer = AttachmentPointer {
+            width: Some(640),
+            height: Some(480),
+            blur_hash: Some("LEHV6nWB2yk8".into()),
+            ..downloadable("image/jpeg", 1000)
+        };
+        let message = DataMessage {
+            attachments: vec![pointer.clone()],
+            ..Default::default()
+        };
+
+        let Some(model::Content::Text { attachments, .. }) = data(message) else {
+            panic!("not text");
+        };
+        let expected = Attachment {
+            content_type: Some("image/jpeg".into()),
+            name: Some("cat.jpg".into()),
+            size: Some(1000),
+            width: Some(640),
+            height: Some(480),
+            blurhash: Some("LEHV6nWB2yk8".into()),
+            state: AttachmentState::Remote,
+            remote: Some(RemoteAttachment::new(pointer.encode_to_vec())),
+            ..Attachment::new(AttachmentKind::Image)
+        };
+        assert_eq!(attachments, [expected]);
+    }
+
+    #[test]
+    fn attachments_too_large_or_incomplete_cant_be_downloaded() {
+        let too_large = downloadable("image/jpeg", model::MAX_ATTACHMENT_SIZE + 1);
+        let unsized_ = AttachmentPointer {
+            size: None,
+            ..downloadable("image/jpeg", 1)
+        };
+        let keyless = AttachmentPointer {
+            key: None,
+            ..downloadable("image/jpeg", 1)
+        };
+        let undigested = AttachmentPointer {
+            digest: None,
+            ..downloadable("image/jpeg", 1)
+        };
+        let nowhere = AttachmentPointer {
+            attachment_identifier: None,
+            ..downloadable("image/jpeg", 1)
+        };
+        for pointer in [too_large, unsized_, keyless, undigested, nowhere] {
+            let message = DataMessage {
+                attachments: vec![pointer],
+                ..Default::default()
+            };
+            let Some(model::Content::Text { attachments, .. }) = data(message) else {
+                panic!("not text");
+            };
+            assert_eq!(attachments[0].state, AttachmentState::Unavailable);
+            assert_eq!(attachments[0].remote, None);
+        }
+    }
+
+    #[test]
+    fn attachments_are_bounded() {
+        use crate::text::MAX_FILE_NAME_BYTES;
+
+        let long = AttachmentPointer {
+            file_name: Some("a".repeat(MAX_FILE_NAME_BYTES * 2)),
+            content_type: Some(format!("image/{}", "x".repeat(300))),
+            blur_hash: Some("b".repeat(300)),
+            ..downloadable("", 1)
+        };
+        let message = DataMessage {
+            attachments: vec![long; model::MAX_ATTACHMENTS + 1],
+            ..Default::default()
+        };
+
+        let Some(model::Content::Text { attachments, .. }) = data(message) else {
+            panic!("not text");
+        };
+        assert_eq!(attachments.len(), model::MAX_ATTACHMENTS);
+        let name = attachments[0].name.as_deref().unwrap();
+        assert!(name.len() <= MAX_FILE_NAME_BYTES && name.ends_with('…'));
+        assert_eq!(attachments[0].content_type, None);
+        assert_eq!(attachments[0].blurhash, None);
     }
 
     #[test]
@@ -869,7 +1011,10 @@ pub(super) mod tests {
             data(message),
             Some(model::Content::Text {
                 body: MessageBody::new(""),
-                attachments: vec![Attachment::Image],
+                attachments: vec![Attachment {
+                    content_type: Some("image/jpeg".into()),
+                    ..Attachment::new(AttachmentKind::Image)
+                }],
                 quote: None,
             })
         );

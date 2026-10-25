@@ -6,6 +6,7 @@
 //! [`Linker`]: crate::backend::Linker
 //! [`SignalBackend`]: crate::backend::SignalBackend
 
+mod attachments;
 mod backend;
 mod errors;
 mod incoming;

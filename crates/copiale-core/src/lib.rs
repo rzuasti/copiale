@@ -29,11 +29,12 @@ pub use backend::{
 pub use clock::{Clock, SystemClock};
 pub use dirs::{create_private_dir, runtime_dir};
 pub use model::{
-    Account, AccountSettings, Attachment, BlockedList, Change, ChatRef, ChatState, Contact,
-    Content, ConversationId, ConversationSummary, Destination, Direction, Expiry, GroupId,
-    GroupInfo, GroupMasterKey, GroupMembers, GroupRef, GroupUpdate, Identity, IdentityKey,
-    IncomingMessage, Member, Message, MessageBody, MessageChange, MessageId, MessagePreview,
+    Account, AccountSettings, Attachment, AttachmentId, AttachmentKind, AttachmentState,
+    BlockedList, Change, ChatRef, ChatState, Contact, Content, ConversationId, ConversationSummary,
+    Destination, Direction, Expiry, FileContents, GroupId, GroupInfo, GroupMasterKey, GroupMembers,
+    GroupRef, GroupUpdate, Identity, IdentityKey, IncomingMessage, MAX_ATTACHMENT_SIZE,
+    MAX_ATTACHMENTS, Member, Message, MessageBody, MessageChange, MessageId, MessagePreview,
     MessageRef, MessageStatus, Outgoing, Peer, PhoneNumber, Quote, Quoted, ReceiptKind,
-    RecentEmoji, RequestResponse, SafetyNumber, SentMessage, ServiceId, StoredChat, StoredIdentity,
-    Timestamp, Unsupported, Verification,
+    RecentEmoji, RemoteAttachment, RequestResponse, SafetyNumber, SentMessage, ServiceId,
+    StoredChat, StoredIdentity, Timestamp, Unsupported, Verification,
 };

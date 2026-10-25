@@ -35,6 +35,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant};
 
+use super::attachments;
 use super::errors::{presage_error, storage_service_error, store_error};
 use super::incoming::{identity_key, incoming, service_id};
 use super::store::AppStore;
@@ -44,8 +45,8 @@ use crate::backend::{
 };
 use crate::model::{
     BlockedList, ChatRef, Destination, GroupInfo, GroupMasterKey, GroupMembers, IdentityKey,
-    Member, MessageBody, Outgoing, Quote, RequestResponse, SafetyNumber, ServiceId, StoredChat,
-    StoredIdentity, Timestamp,
+    Member, MessageBody, Outgoing, Quote, RemoteAttachment, RequestResponse, SafetyNumber,
+    ServiceId, StoredChat, StoredIdentity, Timestamp,
 };
 use crate::storage::{Database, synced};
 use crate::text::clean_name;
@@ -308,6 +309,14 @@ impl SignalBackend for PresageBackend {
             })
         }
         .boxed_local()
+    }
+
+    fn download(
+        &mut self,
+        attachment: RemoteAttachment,
+    ) -> LocalBoxFuture<'static, Result<Vec<u8>, BackendError>> {
+        let servers = self.manager.registration_data().signal_servers;
+        attachments::download(servers, attachment).boxed_local()
     }
 
     fn send_retry_request(

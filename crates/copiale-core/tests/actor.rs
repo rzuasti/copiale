@@ -7,13 +7,15 @@ use std::time::Duration;
 
 use copiale_core::storage::{KdfParams, Passphrase, Storage, StoragePaths};
 use copiale_core::{
-    Account, AccountSettings, BackendError, BlockedList, Change, ChatRef, ChatState, Command,
-    Contact, Content, ConversationId, ConversationSummary, CoreHandle, CoreOptions, Destination,
-    Direction, EDIT_WINDOW, Event, Events, Expiry, GroupId, GroupInfo, GroupRef, GroupUpdate,
-    Identity, Incoming, IncomingMessage, MAX_SENT_EDITS, Member, Message, MessageBody,
-    MessageChange, MessagePreview, MessageRef, MessageStatus, Outgoing, Peer, PhoneNumber, Quote,
-    Quoted, ReceiptKind, RecentEmoji, RequestResponse, RetryRequest, SentMessage, StorageFailure,
-    StoredChat, StoredChats, StoredIdentity, Timestamp, Undecryptable, Verification,
+    Account, AccountSettings, Attachment, AttachmentId, AttachmentKind, AttachmentState,
+    BackendError, BlockedList, Change, ChatRef, ChatState, Command, Contact, Content,
+    ConversationId, ConversationSummary, CoreHandle, CoreOptions, Destination, Direction,
+    EDIT_WINDOW, Event, Events, Expiry, GroupId, GroupInfo, GroupRef, GroupUpdate, Identity,
+    Incoming, IncomingMessage, MAX_SENT_EDITS, Member, Message, MessageBody, MessageChange,
+    MessagePreview, MessageRef, MessageStatus, Outgoing, Peer, PhoneNumber, Quote, Quoted,
+    ReceiptKind, RecentEmoji, RemoteAttachment, RequestResponse, RetryRequest, SentMessage,
+    StorageFailure, StoredChat, StoredChats, StoredIdentity, Timestamp, Undecryptable,
+    Verification,
 };
 use copiale_testkit::{
     DEVICE_NAME, FAKE_LINK_URL, FakeNetwork, FakePhone, ManualClock, MemorySecretStore, OWN_ID,
@@ -1204,6 +1206,223 @@ async fn dropping_handle_stops_core() {
 
     expect(&mut events, Event::Stopped).await;
     assert_eq!(events.recv().await, None);
+}
+
+// Attachments
+
+/// An incoming message from `from` carrying `attachments`.
+fn with_attachments(from: u128, sent_at: u64, attachments: Vec<Attachment>) -> Incoming {
+    Incoming::Message(IncomingMessage {
+        content: Content::Text {
+            body: MessageBody::new(""),
+            attachments,
+            quote: None,
+        },
+        ..incoming_message(from, sent_at)
+    })
+}
+
+fn incoming_message(from: u128, sent_at: u64) -> IncomingMessage {
+    let Incoming::Message(message) = incoming(from, sent_at, "") else {
+        unreachable!();
+    };
+    message
+}
+
+/// An attachment of `kind` on the CDN at `remote`.
+fn on_cdn(kind: AttachmentKind, remote: RemoteAttachment) -> Attachment {
+    Attachment {
+        size: Some(100),
+        state: AttachmentState::Remote,
+        remote: Some(remote),
+        ..Attachment::new(kind)
+    }
+}
+
+fn states(message: &Message) -> Vec<AttachmentState> {
+    match &message.content {
+        Content::Text { attachments, .. } => attachments.iter().map(|a| a.state).collect(),
+        _ => panic!("not text"),
+    }
+}
+
+fn attachment_id(message: &Message, position: usize) -> AttachmentId {
+    match &message.content {
+        Content::Text { attachments, .. } => attachments[position].id.unwrap(),
+        _ => panic!("not text"),
+    }
+}
+
+/// Skips events until a message update whose attachments are in `states`.
+async fn attachments_become(events: &mut Events, states: &[AttachmentState]) -> Message {
+    loop {
+        if let Event::MessageUpdated(message) = next_event(events).await
+            && crate::states(&message) == states
+        {
+            return message;
+        }
+    }
+}
+
+/// Accepts the chat with `peer` by a message sent there from the phone.
+async fn accept_by_phone(running: &mut Running, peer: u128) {
+    running.network.deliver(Incoming::Sent(SentMessage {
+        destination: Destination::Contact(service_id(peer)),
+        timestamp: Timestamp::from_millis(1),
+        content: Content::text("hi"),
+        expire_timer: None,
+    }));
+    message_added(&mut running.events).await;
+    conversation_updated(&mut running.events).await;
+}
+
+#[tokio::test]
+async fn images_download_on_their_own_in_accepted_chats() {
+    let (_dir, mut running) = ready().await;
+    accept_by_phone(&mut running, 1).await;
+    let remote = running.network.upload("cdn-1", b"a cat");
+
+    running.network.deliver(with_attachments(
+        1,
+        100,
+        vec![on_cdn(AttachmentKind::Image, remote.clone())],
+    ));
+
+    let added = message_added(&mut running.events).await;
+    assert_eq!(states(&added), [AttachmentState::Downloading]);
+    let ready = attachments_become(&mut running.events, &[AttachmentState::Ready]).await;
+    assert_eq!(ready.id, added.id);
+    assert_eq!(running.network.downloads(), [remote]);
+    let id = attachment_id(&ready, 0);
+    send(&running, Command::LoadAttachment(id));
+    loop {
+        if let Event::AttachmentLoaded {
+            id: loaded,
+            contents,
+        } = next_event(&mut running.events).await
+        {
+            assert_eq!(loaded, id);
+            assert_eq!(contents.unwrap().as_bytes(), b"a cat");
+            break;
+        }
+    }
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn requests_and_files_download_when_asked() {
+    let (_dir, mut running) = ready().await;
+    let image = running.network.upload("cdn-1", b"a cat");
+    let file = running.network.upload("cdn-2", b"%PDF");
+
+    running.network.deliver(with_attachments(
+        1,
+        100,
+        vec![
+            on_cdn(AttachmentKind::Image, image),
+            on_cdn(AttachmentKind::File, file.clone()),
+        ],
+    ));
+
+    let added = message_added(&mut running.events).await;
+    assert_eq!(states(&added), [AttachmentState::Remote; 2]);
+    send(&running, Command::Download(attachment_id(&added, 1)));
+    attachments_become(
+        &mut running.events,
+        &[AttachmentState::Remote, AttachmentState::Downloading],
+    )
+    .await;
+    attachments_become(
+        &mut running.events,
+        &[AttachmentState::Remote, AttachmentState::Ready],
+    )
+    .await;
+    assert_eq!(running.network.downloads(), [file]);
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn failed_downloads_can_be_retried_and_gone_ones_expire() {
+    let (_dir, mut running) = ready().await;
+    let remote = running.network.upload("cdn-1", b"a cat");
+    let missing = RemoteAttachment::new(b"nowhere".to_vec());
+    running.network.deliver(with_attachments(
+        1,
+        100,
+        vec![
+            on_cdn(AttachmentKind::File, remote),
+            on_cdn(AttachmentKind::File, missing),
+        ],
+    ));
+    let added = message_added(&mut running.events).await;
+    use AttachmentState::{Downloading, Expired, Failed, Ready, Remote};
+
+    running
+        .network
+        .fail_next_download(BackendError::new("server error"));
+    send(&running, Command::Download(attachment_id(&added, 0)));
+    attachments_become(&mut running.events, &[Failed, Remote]).await;
+    send(&running, Command::Download(attachment_id(&added, 0)));
+    attachments_become(&mut running.events, &[Ready, Remote]).await;
+    send(&running, Command::Download(attachment_id(&added, 1)));
+    attachments_become(&mut running.events, &[Ready, Downloading]).await;
+    attachments_become(&mut running.events, &[Ready, Expired]).await;
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn downloads_cut_off_go_again_on_the_next_connection() {
+    let (_dir, mut running) = ready().await;
+    let remote = running.network.upload("cdn-1", b"a cat");
+    running.network.deliver(with_attachments(
+        1,
+        100,
+        vec![on_cdn(AttachmentKind::File, remote.clone())],
+    ));
+    let added = message_added(&mut running.events).await;
+    running
+        .network
+        .fail_next_download(BackendError::network("connection reset"));
+
+    send(&running, Command::Download(attachment_id(&added, 0)));
+    attachments_become(&mut running.events, &[AttachmentState::Downloading]).await;
+    running
+        .network
+        .wait_until(|network| network.downloads().len() == 1)
+        .await;
+    running.network.disconnect();
+
+    attachments_become(&mut running.events, &[AttachmentState::Ready]).await;
+    assert_eq!(running.network.downloads(), [remote.clone(), remote]);
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn downloads_cut_off_by_quitting_resume_at_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = MemorySecretStore::default();
+    let mut running = start(dir.path(), &secrets, true);
+    expect_ready(&mut running.events).await;
+    expect(&mut running.events, Event::Connected).await;
+    let remote = running.network.upload("cdn-1", b"a cat");
+    running.network.deliver(with_attachments(
+        1,
+        100,
+        vec![on_cdn(AttachmentKind::File, remote)],
+    ));
+    let added = message_added(&mut running.events).await;
+    running.network.pause_downloads(true);
+    send(&running, Command::Download(attachment_id(&added, 0)));
+    attachments_become(&mut running.events, &[AttachmentState::Downloading]).await;
+    stop(running).await;
+
+    let mut running = start_with(dir.path(), &secrets, true, fast(), |network| {
+        network.upload("cdn-1", b"a cat");
+    });
+
+    let ready = attachments_become(&mut running.events, &[AttachmentState::Ready]).await;
+    assert_eq!(ready.id, added.id);
+    stop(running).await;
 }
 
 // Linking

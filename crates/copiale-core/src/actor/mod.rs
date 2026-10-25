@@ -1,6 +1,7 @@
 //! The core actor: owns storage and the Signal account on a dedicated
 //! thread, and walks through startup (unlock, then link) before serving.
 
+mod downloads;
 mod groups;
 mod outbox;
 mod probe;
@@ -18,8 +19,8 @@ use tokio::task::LocalSet;
 use crate::backend::{BackendError, Linker};
 use crate::clock::{Clock, SystemClock};
 use crate::model::{
-    Account, Contact, ConversationId, ConversationSummary, Identity, Message, MessageBody,
-    MessageId, RecentEmoji, ServiceId,
+    Account, AttachmentId, Contact, ConversationId, ConversationSummary, FileContents, Identity,
+    Message, MessageBody, MessageId, RecentEmoji, ServiceId,
 };
 use crate::storage::{Passphrase, SecretStore, Storage};
 
@@ -62,6 +63,11 @@ pub enum Command {
     /// sending it ([`Event::MessageUpdated`]), or any just for this account
     /// and its other devices ([`Event::MessageRemoved`]).
     Delete { id: MessageId, everyone: bool },
+    /// Downloads an attachment that's on Signal's servers, or failed to
+    /// download: [`Event::MessageUpdated`] as it starts and as it ends.
+    Download(AttachmentId),
+    /// Answered with [`Event::AttachmentLoaded`].
+    LoadAttachment(AttachmentId),
     /// Sends a failed message again: [`Event::MessageUpdated`] as pending,
     /// then as for [`Command::SendText`].
     RetrySend(MessageId),
@@ -179,6 +185,12 @@ pub enum Event {
     DatabaseError(String),
     /// A stored message changed, e.g. its status.
     MessageUpdated(Message),
+    /// A downloaded attachment's contents; `None` if it isn't here.
+    /// Answers [`Command::LoadAttachment`].
+    AttachmentLoaded {
+        id: AttachmentId,
+        contents: Option<FileContents>,
+    },
     /// A message was deleted for this account only, or disappeared; gone
     /// from storage. [`Event::ConversationUpdated`] follows.
     MessageRemoved {

@@ -8,6 +8,7 @@ use sqlx::sqlite::{SqliteJournalMode, SqlitePool, SqliteSynchronous};
 use sqlx::{ConnectOptions as _, Connection as _};
 
 use super::StorageError;
+use super::files::Files;
 use super::key::DatabaseKey;
 
 /// Tracks Copiale's migrations apart from presage's `_sqlx_migrations`,
@@ -17,10 +18,12 @@ const MIGRATIONS_TABLE: &str = "_copiale_migrations";
 /// SQLite result code for "file is not a database": a wrong SQLCipher key.
 const SQLITE_NOTADB: &str = "26";
 
-/// Open handle to the encrypted database.
+/// Open handle to the encrypted database, and the attachment files beside
+/// it.
 pub struct Database {
     pub(super) presage: SqliteStore,
     pub(super) app: SqlitePool,
+    pub(super) files: Files,
 }
 
 impl Database {
@@ -47,7 +50,12 @@ impl Database {
         match open_app_pool(options).await {
             Ok(app) => {
                 tracing::info!("database opened");
-                Ok(Self { presage, app })
+                let files = Files::beside(path);
+                Ok(Self {
+                    presage,
+                    app,
+                    files,
+                })
             }
             Err(error) => {
                 presage.close().await;
@@ -368,8 +376,13 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let (mut store, pool) = plain(dir.path()).await;
-        let all = migrator().migrations.len();
-        migrate(&pool, Some(all - 1)).await;
+        // Up to, not including, first sight contacts.
+        let before = migrator()
+            .migrations
+            .iter()
+            .position(|migration| migration.version == 20261029120000)
+            .unwrap();
+        migrate(&pool, Some(before)).await;
         let contact = |n: u128, name: &str, profile_key: Vec<u8>, timer: u32| Contact {
             uuid: Uuid::from_u128(n),
             phone_number: None,

@@ -4,10 +4,11 @@ use std::cmp::Reverse;
 use std::time::Duration;
 
 use super::StorageError;
+use super::attachments::keep_attachments;
 use super::database::{Database, database_error};
 use super::messages::{
-    Removed, RemovedRow, author_bytes, content_columns, load_message, millis, removed,
-    removed_columns, timestamp,
+    Removed, RemovedRow, author_bytes, content_columns, content_from, load_message, millis,
+    removed, removed_columns, timestamp,
 };
 use super::retries::placeholder_json;
 use crate::model::{
@@ -113,6 +114,9 @@ impl Database {
             false => None,
         };
         tx.commit().await.map_err(database_error)?;
+        if changed && change.change == Change::Delete {
+            self.remove_deleted_files().await;
+        }
         Ok(message)
     }
 
@@ -139,6 +143,7 @@ impl Database {
             .map_err(database_error)?;
             deleted.extend(row.map(removed).transpose()?);
         }
+        self.remove_deleted_files().await;
         Ok(deleted)
     }
 
@@ -155,6 +160,7 @@ impl Database {
             .execute(&self.app)
             .await
             .map_err(database_error)?;
+        self.remove_deleted_files().await;
         Ok(Some(conversation))
     }
 
@@ -252,7 +258,7 @@ async fn update(
     let window = |window: Duration| i64::try_from(window.as_millis()).unwrap_or(i64::MAX);
     let result = match change {
         Change::Delete => {
-            sqlx::query(
+            let result = sqlx::query(
                 "UPDATE messages SET body = '', content = ?1
                  WHERE id = ?2 AND coalesce(content, '') != ?1
                    AND (?3 IS NULL OR ?3 <= server_at + ?4)",
@@ -262,13 +268,35 @@ async fn update(
             .bind(server_at.map(millis))
             .bind(window(DELETE_WINDOW))
             .execute(&mut *tx)
-            .await
+            .await;
+            if result
+                .as_ref()
+                .is_ok_and(|result| result.rows_affected() > 0)
+            {
+                sqlx::query("DELETE FROM attachments WHERE message_id = ?")
+                    .bind(id.get())
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(database_error)?;
+            }
+            result
         }
         Change::Edit { content, .. } if !matches!(content, Content::Text { .. }) => {
             return Ok(false);
         }
         Change::Edit { content, at } => {
-            let (body, content) = content_columns(content)?;
+            let stored: Option<(String, Option<String>)> =
+                sqlx::query_as("SELECT body, content FROM messages WHERE id = ?")
+                    .bind(id.get())
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(database_error)?;
+            let stored = stored
+                .map(|(body, json)| content_from(body, json))
+                .transpose()?;
+            let mut content = content.clone();
+            keep_attachments(&mut content, stored.as_ref());
+            let (body, content) = content_columns(&content)?;
             // Only text is edited: plain, or kept as JSON.
             sqlx::query(
                 "UPDATE messages SET body = ?1, content = ?2, edited_at = ?3, edits = edits + 1

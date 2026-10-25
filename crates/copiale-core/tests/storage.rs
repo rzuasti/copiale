@@ -180,13 +180,17 @@ async fn corrupt_key_file_is_an_error() {
 }
 
 #[tokio::test]
-async fn wipe_deletes_the_database_and_its_key() {
+async fn wipe_deletes_the_database_its_key_and_attachments() {
     let (_dir, storage) = storage();
     let secrets = MemorySecretStore::default();
     create_with_keychain(&storage, &secrets).await;
+    let attachments = storage.paths().attachments();
+    std::fs::create_dir_all(&attachments).unwrap();
+    std::fs::write(attachments.join("0123abcd"), "encrypted").unwrap();
 
     assert_eq!(storage.wipe(&secrets).unwrap(), Wiped::All);
     assert!(!storage.paths().database.exists());
+    assert!(!attachments.exists());
     assert_eq!(secrets.secret(), None);
 }
 

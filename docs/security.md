@@ -1,8 +1,9 @@
 # Secrets in memory
 
 How Copiale keeps the database key and passphrase from leaking out of
-process memory, and the copies it can't control. Last, what notifications
-leave with the OS, and keeping the window out of screen captures.
+process memory, and the copies it can't control. Then attachments on
+disk, what notifications leave with the OS, and keeping the window out of
+screen captures.
 
 ## Protections
 
@@ -60,6 +61,21 @@ they can also reach swap.
   string, skipping `InputState::value`'s copy.
 - **New passphrase, in zxcvbn**: the strength check copies it and pieces
   of it (lowercased, matched tokens).
+
+## Attachments
+
+Downloaded attachments live outside the database, in `attachments/` next
+to it, private to the user (`copiale_core::storage`).
+
+- **Encrypted**: each file with AES-256-GCM under its own random key,
+  kept in the database; the file's name is authenticated, so files can't
+  be swapped. Once the key is gone, the file can't be read, whatever is
+  left on disk.
+- **Deleted with their message**: disappearing, deleted by its author or
+  for this account, or with its chat; files nothing refers to go at
+  startup. Unlink and wipe deletes the directory.
+- **In memory**: an attachment is whole, in plaintext, while it's
+  downloaded or read; neither zeroed nor locked.
 
 ## Notifications
 

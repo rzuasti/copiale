@@ -1472,7 +1472,8 @@ fn unknown(peer: ServiceId) -> String {
 mod tests {
     use chrono::FixedOffset;
     use copiale_core::{
-        Attachment, Content, Expiry, GroupMasterKey, GroupUpdate, Member, SafetyNumber,
+        Attachment, AttachmentKind, Content, Expiry, GroupMasterKey, GroupUpdate, Member,
+        SafetyNumber,
     };
     use uuid::Uuid;
 
@@ -2038,7 +2039,7 @@ mod tests {
         let image = Message {
             content: Content::Text {
                 body: MessageBody::new("look"),
-                attachments: vec![Attachment::Image],
+                attachments: vec![Attachment::new(AttachmentKind::Image)],
                 quote: None,
             },
             ..from(3, 1, today + 2 * MINUTE)
@@ -2227,7 +2228,7 @@ mod tests {
         let image = Message {
             content: Content::Text {
                 body: MessageBody::new("look"),
-                attachments: vec![Attachment::Image],
+                attachments: vec![Attachment::new(AttachmentKind::Image)],
                 quote: None,
             },
             ..mine(6, recent)

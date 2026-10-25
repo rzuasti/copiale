@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 use super::StorageError;
+use super::attachments::{insert_attachments, resolve_attachments, without_remotes};
 use super::changes::apply_pending;
 use super::contacts::display_name;
 use super::database::{Database, database_error};
@@ -250,7 +251,7 @@ impl Database {
         .await
         .map_err(database_error)?;
         let mut message = row.map(message).transpose()?;
-        self.resolve_quotes(message.as_mut_slice()).await?;
+        self.resolve_all(message.as_mut_slice()).await?;
         Ok(message)
     }
 
@@ -272,7 +273,7 @@ impl Database {
         let Some(mut message) = row.map(message).transpose()? else {
             return Ok(None);
         };
-        resolve_quote(&mut tx, &mut message).await?;
+        resolve(&mut tx, &mut message).await?;
         let destination = load_destination(&mut *tx, message.conversation.get())
             .await?
             .ok_or_else(|| database_error(sqlx::Error::RowNotFound))?;
@@ -424,7 +425,7 @@ impl Database {
             .rev()
             .map(message)
             .collect::<Result<Vec<_>, _>>()?;
-        self.resolve_quotes(&mut messages).await?;
+        self.resolve_all(&mut messages).await?;
         Ok(messages)
     }
 
@@ -456,7 +457,7 @@ impl Database {
             .map(message)
             .collect::<Result<Vec<_>, _>>()?;
         messages.sort_by_key(|message| (message.sent_at, message.id));
-        self.resolve_quotes(&mut messages).await?;
+        self.resolve_all(&mut messages).await?;
         Ok(messages)
     }
 
@@ -488,7 +489,7 @@ impl Database {
             .map(message)
             .collect::<Result<Vec<_>, _>>()?;
         messages.sort_by_key(|message| (message.sent_at, message.id));
-        self.resolve_quotes(&mut messages).await?;
+        self.resolve_all(&mut messages).await?;
         Ok(messages)
     }
 
@@ -508,6 +509,9 @@ impl Database {
             .map(removed)
             .collect::<Result<Vec<_>, _>>()?;
         expired.sort_by_key(|removed| (removed.conversation, removed.id));
+        if !expired.is_empty() {
+            self.remove_deleted_files().await;
+        }
         Ok(expired)
     }
 
@@ -521,14 +525,11 @@ impl Database {
         Ok(at.map(timestamp))
     }
 
-    /// Fills in what `messages` quote.
-    pub(super) async fn resolve_quotes(
-        &self,
-        messages: &mut [Message],
-    ) -> Result<(), StorageError> {
+    /// Fills in what `messages` quote and their attachments' state.
+    pub(super) async fn resolve_all(&self, messages: &mut [Message]) -> Result<(), StorageError> {
         let mut conn = self.app.acquire().await.map_err(database_error)?;
         for message in messages {
-            resolve_quote(&mut conn, message).await?;
+            resolve(&mut conn, message).await?;
         }
         Ok(())
     }
@@ -631,14 +632,23 @@ pub(super) async fn load_message(
     .map_err(database_error)?;
     let mut message = row.map(message).transpose()?;
     if let Some(message) = &mut message {
-        resolve_quote(conn, message).await?;
+        resolve(conn, message).await?;
     }
     Ok(message)
 }
 
+/// Fills in what `message` quotes and its attachments' state.
+pub(super) async fn resolve(
+    conn: &mut sqlx::SqliteConnection,
+    message: &mut Message,
+) -> Result<(), StorageError> {
+    resolve_attachments(conn, message).await?;
+    resolve_quote(conn, message).await
+}
+
 /// Fills in what `message` quotes: the text message by the quote's author
 /// at its sent time in the same conversation, as stored now.
-pub(super) async fn resolve_quote(
+async fn resolve_quote(
     conn: &mut sqlx::SqliteConnection,
     message: &mut Message,
 ) -> Result<(), StorageError> {
@@ -666,7 +676,7 @@ pub(super) async fn resolve_quote(
             body, attachments, ..
         }) => Some(Quoted {
             text: body.as_str().to_string(),
-            attachment: attachments.into_iter().next(),
+            attachment: attachments.first().map(|attachment| attachment.kind),
         }),
         _ => None,
     };
@@ -751,6 +761,7 @@ pub(super) async fn insert_message(
     let Some(id) = id else {
         return Ok(None);
     };
+    insert_attachments(tx, MessageId::new(id), content).await?;
     sqlx::query(
         "UPDATE conversations SET last_activity = max(coalesce(last_activity, 0), ?)
          WHERE id = ?",
@@ -768,13 +779,13 @@ pub(super) async fn insert_message(
         sender: author,
         sent_at,
         received_at,
-        content: content.clone(),
+        content: without_remotes(content),
         edits: 0,
         read,
         status,
         expiry,
     };
-    resolve_quote(tx, &mut message).await?;
+    resolve(tx, &mut message).await?;
     Ok(Some(message))
 }
 
@@ -795,7 +806,7 @@ pub(super) fn content_columns(content: &Content) -> Result<(&str, Option<String>
     }
 }
 
-fn content_from(body: String, json: Option<String>) -> Result<Content, StorageError> {
+pub(super) fn content_from(body: String, json: Option<String>) -> Result<Content, StorageError> {
     match json {
         None => Ok(Content::text(body)),
         Some(json) => serde_json::from_str(&json)
@@ -932,7 +943,7 @@ pub(super) fn timestamp(millis: i64) -> Timestamp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Attachment, GroupUpdate, Unsupported};
+    use crate::model::{Attachment, AttachmentKind, GroupUpdate, Unsupported};
     use crate::storage::DatabaseKey;
     use crate::storage::testing::{at, db, peer, removed_of};
 
@@ -1468,9 +1479,11 @@ mod tests {
             Content::Text {
                 body: MessageBody::new("the graph"),
                 attachments: vec![
-                    Attachment::Image,
-                    Attachment::File {
+                    Attachment::new(AttachmentKind::Image),
+                    Attachment {
                         name: Some("a.pdf".into()),
+                        size: Some(10),
+                        ..Attachment::new(AttachmentKind::File)
                     },
                 ],
                 quote: None,

@@ -1,6 +1,7 @@
 //! Plain data shared between the core and the UI.
 
 use std::fmt;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use presage::libsignal_service::zkgroup::groups;
@@ -151,8 +152,8 @@ impl fmt::Debug for RecentEmoji {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Content {
-    /// Text, possibly empty, with attachments this client can't show yet,
-    /// maybe replying to an earlier message.
+    /// Text, possibly empty, with attachments, maybe replying to an
+    /// earlier message.
     Text {
         body: MessageBody,
         attachments: Vec<Attachment>,
@@ -261,8 +262,9 @@ pub struct Quote {
 pub struct Quoted {
     /// Its text, possibly empty.
     pub text: String,
-    /// Its first attachment, for quotes of attachments without text.
-    pub attachment: Option<Attachment>,
+    /// Its first attachment's kind, for quotes of attachments without
+    /// text.
+    pub attachment: Option<AttachmentKind>,
 }
 
 impl fmt::Debug for Quoted {
@@ -331,11 +333,97 @@ pub enum Change {
     Delete,
 }
 
-/// An attachment, by what the placeholder calls it. `Debug` hides file
-/// names.
+/// Most attachments kept per message, as in Signal.
+pub const MAX_ATTACHMENTS: usize = 32;
+/// Largest attachment downloaded, in bytes, as Signal allows.
+pub const MAX_ATTACHMENT_SIZE: u32 = 100 * 1024 * 1024;
+
+/// A file sent with a message, as its sender describes it, and whether it's
+/// here. `Debug` hides the name and blurhash.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "StoredAttachment")]
+pub struct Attachment {
+    pub kind: AttachmentKind,
+    /// As the sender says; not to be trusted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+    /// The file name, as sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// In bytes, as the sender says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    /// A blurred preview of an image or video.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blurhash: Option<String>,
+    /// `None` until stored, and for attachments that can't be downloaded.
+    #[serde(skip)]
+    pub id: Option<AttachmentId>,
+    #[serde(skip)]
+    pub state: AttachmentState,
+    /// Where to download it from; set only on its way into storage.
+    #[serde(skip)]
+    pub remote: Option<RemoteAttachment>,
+}
+
+impl Attachment {
+    pub fn new(kind: AttachmentKind) -> Self {
+        Self {
+            kind,
+            content_type: None,
+            name: None,
+            size: None,
+            width: None,
+            height: None,
+            blurhash: None,
+            id: None,
+            state: AttachmentState::Unavailable,
+            remote: None,
+        }
+    }
+}
+
+impl fmt::Debug for Attachment {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Attachment")
+            .field("kind", &self.kind)
+            .field("size", &self.size)
+            .field("id", &self.id)
+            .field("state", &self.state)
+            .finish_non_exhaustive()
+    }
+}
+
+/// An [`Attachment`] as stored: from before attachments could be
+/// downloaded, only its kind and a file's name.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StoredAttachment {
+    Current {
+        kind: AttachmentKind,
+        #[serde(default)]
+        content_type: Option<String>,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        size: Option<u32>,
+        #[serde(default)]
+        width: Option<u32>,
+        #[serde(default)]
+        height: Option<u32>,
+        #[serde(default)]
+        blurhash: Option<String>,
+    },
+    Legacy(LegacyAttachment),
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Attachment {
+enum LegacyAttachment {
     Image,
     Video,
     Gif,
@@ -344,16 +432,123 @@ pub enum Attachment {
     File { name: Option<String> },
 }
 
-impl fmt::Debug for Attachment {
+impl From<StoredAttachment> for Attachment {
+    fn from(stored: StoredAttachment) -> Self {
+        match stored {
+            StoredAttachment::Current {
+                kind,
+                content_type,
+                name,
+                size,
+                width,
+                height,
+                blurhash,
+            } => Self {
+                content_type,
+                name,
+                size,
+                width,
+                height,
+                blurhash,
+                ..Self::new(kind)
+            },
+            StoredAttachment::Legacy(legacy) => match legacy {
+                LegacyAttachment::Image => Self::new(AttachmentKind::Image),
+                LegacyAttachment::Video => Self::new(AttachmentKind::Video),
+                LegacyAttachment::Gif => Self::new(AttachmentKind::Gif),
+                LegacyAttachment::Voice => Self::new(AttachmentKind::Voice),
+                LegacyAttachment::Audio => Self::new(AttachmentKind::Audio),
+                LegacyAttachment::File { name } => Self {
+                    name,
+                    ..Self::new(AttachmentKind::File)
+                },
+            },
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttachmentKind {
+    Image,
+    Video,
+    Gif,
+    Voice,
+    Audio,
+    File,
+}
+
+/// Whether an attachment is here.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AttachmentState {
+    /// Can't be downloaded here, e.g. stored before attachments could be,
+    /// or too large: open it on the phone.
+    #[default]
+    Unavailable,
+    /// On Signal's servers; [`Command::Download`](crate::Command::Download)
+    /// gets it.
+    Remote,
+    Downloading,
+    /// Downloaded and stored.
+    Ready,
+    /// The last download failed; it may be tried again.
+    Failed,
+    /// Gone from Signal's servers.
+    Expired,
+}
+
+/// Local ID of a stored attachment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct AttachmentId(i64);
+
+impl AttachmentId {
+    pub fn new(id: i64) -> Self {
+        Self(id)
+    }
+
+    pub fn get(self) -> i64 {
+        self.0
+    }
+}
+
+/// A downloaded attachment's contents. `Debug` shows only their size.
+#[derive(Clone, PartialEq, Eq)]
+pub struct FileContents(Arc<[u8]>);
+
+impl FileContents {
+    pub fn new(contents: Vec<u8>) -> Self {
+        Self(contents.into())
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for FileContents {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Image => "Image",
-            Self::Video => "Video",
-            Self::Gif => "Gif",
-            Self::Voice => "Voice",
-            Self::Audio => "Audio",
-            Self::File { .. } => "File",
-        })
+        write!(f, "FileContents({} bytes)", self.0.len())
+    }
+}
+
+/// Where an attachment is on Signal's servers, with its key, as the
+/// backend encodes it. `Debug` hides it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct RemoteAttachment(Vec<u8>);
+
+impl RemoteAttachment {
+    pub fn new(encoded: Vec<u8>) -> Self {
+        Self(encoded)
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for RemoteAttachment {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("RemoteAttachment")
     }
 }
 

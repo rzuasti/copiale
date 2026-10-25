@@ -64,9 +64,16 @@ went unsolved until 2011.
     edits per message (`storage::changes`), 10 of our own sent.
   - Work others can cause is bounded: bodies clipped to 64 KiB
     (`copiale_core::text`), 100 kept changes per author, 3 group fetches
-    per sender a minute, each member's profile fetched once an hour.
+    per sender a minute, each member's profile fetched once an hour, 50
+    attachments downloaded on their own per sender an hour.
   - Quotes: only which message a reply quotes is stored; its text is shown
     as stored in the same chat, else "original message not found".
+  - Attachments: downloaded copies in `attachments/` beside the database,
+    each AES-256-GCM encrypted under its own key in the database, deleted
+    with their message (`storage::attachments`; `docs/security.md`).
+    Images up to 10 MiB download on their own, never in message requests;
+    others when asked. At most 32 per message and 100 MiB each, enforced
+    while downloading.
   - Message requests: a chat the other side wrote in is a request until
     accepted (here, on the phone, in Storage Service, or by replying);
     requests send no read receipts or typing and notify without name or
