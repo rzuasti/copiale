@@ -96,7 +96,7 @@ release_commit() {
   [ "$(git log -1 --format=%s HEAD)" != "Release v$1" ] || git rev-parse HEAD
 }
 
-# YubiKey SSH keys often fail the first time.
+# YubiKey SSH keys often fail the first time; fetches retry likewise.
 push() { git push "$@" || git push "$@"; }
 
 preflight() {
@@ -109,7 +109,7 @@ preflight() {
   [ "$(curl --fail --silent "$CODEBERG_API" | jq .has_releases)" = true ] ||
     die "releases are off in the Codeberg repo's settings"
   say "Fetching from Codeberg"
-  git fetch --quiet --tags origin main
+  git fetch --quiet --tags origin main || git fetch --quiet --tags origin main
   git merge-base --is-ancestor origin/main HEAD || die "main is behind Codeberg; pull first"
 }
 
