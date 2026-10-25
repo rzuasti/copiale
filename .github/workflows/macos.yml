@@ -1,9 +1,8 @@
-# macOS build, tests and app bundle; runs on the GitHub mirror (#81).
+# macOS build, tests and app bundle; runs on the GitHub mirror (#81), on
+# demand: `gh workflow run macos.yml --ref main`, or the release command.
 name: macOS
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:

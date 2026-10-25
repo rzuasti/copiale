@@ -115,7 +115,7 @@ went unsolved until 2011.
     - Flatpak, AUR.
   - macOS: notarized universal `.dmg` (macOS 14+), built, signed and
     notarized by GitHub Actions on the mirror (github.com/rzuasti/copiale):
-    `macos.yml` builds and attests every `main` push, `macos-release.yml`
+    `macos.yml` builds and attests `main` on demand, `macos-release.yml`
     signs that build for a `v*` tag. Signing secrets live only in the
     mirror's `release` environment (`v*` tags only). Releases:
     `nix run .#release -- <version>` (`docs/release-macos.md`); its

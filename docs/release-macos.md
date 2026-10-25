@@ -22,8 +22,9 @@ once done, so after any failure, fix the cause and run the same command again.
    was approved elsewhere, e.g. with Claude); it becomes the release notes.
 3. **Release commit**: workspace version and `Cargo.lock` bumped, heading
    dated, committed as `Release vX.Y.Z`.
-4. **Push** `main` to Codeberg and GitHub, then follow the `macos.yml` run
-   for the commit (~25 min). A failed run stops here: fix it, or rerun it
+4. **Push** `main` to Codeberg and GitHub, then start the `macos.yml` run
+   for the commit (it only runs on demand) and follow it (~25 min). A failed
+   run stops here: fix it, or rerun it
    (`gh run rerun <id> --failed -R rzuasti/copiale`), then run again.
 5. **Tag** `vX.Y.Z` (annotated) and push it to both remotes. GitHub's
    `macos-release.yml` signs the app built for that commit, and signs and

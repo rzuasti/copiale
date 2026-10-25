@@ -182,3 +182,27 @@ fake_gh() {
   [ "$status" -eq 1 ]
   [[ $output == *"run 42 failed"* ]]
 }
+
+@test "build starts macos.yml once, for GitHub's main only" {
+  sleep() { :; }
+  # Lists run 42 once started; GitHub's main is abc.
+  gh() {
+    case "$1 $2" in
+      "run list")
+        if [[ $* == *length* ]]; then
+          [ -f "$BATS_TEST_TMPDIR/started" ] && echo 1 || echo 0
+        else
+          echo 42
+        fi
+        ;;
+      "api repos/rzuasti/copiale/commits/main") echo abc ;;
+      "workflow run") echo "$*" >>"$BATS_TEST_TMPDIR/started" ;;
+    esac
+  }
+  run build def
+  [ "$status" -eq 1 ]
+  [[ $output == *"GitHub's main isn't def"* ]]
+  build abc
+  build abc
+  [ "$(cat "$BATS_TEST_TMPDIR/started")" = "workflow run macos.yml -R rzuasti/copiale --ref main" ]
+}

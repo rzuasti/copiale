@@ -153,13 +153,27 @@ push_main() {
   esac
 }
 
-# Follows the newest push run of workflow $1 matching the `gh run list`
-# filters after it; prints its ID, fails unless it passes.
+# Starts macos.yml on GitHub's main unless it already ran for commit $1,
+# then follows that run.
+build() {
+  local runs
+  runs=$(gh run list -R "$GITHUB_REPO" --workflow macos.yml --event workflow_dispatch \
+    --branch main --commit "$1" --limit 1 --json databaseId --jq length)
+  if [ "$runs" = 0 ]; then
+    [ "$(gh api "repos/$GITHUB_REPO/commits/main" --jq .sha)" = "$1" ] || die "GitHub's main isn't $1"
+    say "Starting macos.yml"
+    gh workflow run macos.yml -R "$GITHUB_REPO" --ref main
+  fi
+  follow_run macos.yml --event workflow_dispatch --branch main --commit "$1" >/dev/null
+}
+
+# Follows the newest run of workflow $1 matching the `gh run list` filters
+# after it; prints its ID, fails unless it passes.
 follow_run() {
   local workflow=$1 run=""
   shift
   for _ in $(seq 1 30); do
-    run=$(gh run list -R "$GITHUB_REPO" --workflow "$workflow" --event push "$@" \
+    run=$(gh run list -R "$GITHUB_REPO" --workflow "$workflow" "$@" \
       --limit 1 --json databaseId --jq '.[0].databaseId // empty')
     [ -z "$run" ] || break
     sleep 10
@@ -271,9 +285,9 @@ release() {
     commit=$(git rev-parse HEAD)
   fi
   push_main "$commit"
-  follow_run macos.yml --commit "$commit" >/dev/null
+  build "$commit"
   tag "$1" "$commit"
-  run=$(follow_run macos-release.yml --branch "v$1" --commit "$commit")
+  run=$(follow_run macos-release.yml --event push --branch "v$1" --commit "$commit")
   fetch_dmg "$1" "$commit" "$run"
   load_token
   draft_release "$1"

@@ -24,7 +24,7 @@ jobs:
       - name: Unsigned app
         run: |
           run=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow macos.yml --commit "$GITHUB_SHA" \
-            --event push --status success --limit 1 --json databaseId --jq '.[0].databaseId')
+            --event workflow_dispatch --branch main --status success --limit 1 --json databaseId --jq '.[0].databaseId')
           if [ -z "$run" ]; then
             echo "::error::No passing macOS run on main for $GITHUB_SHA"
             exit 1
