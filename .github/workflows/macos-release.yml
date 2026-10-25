@@ -16,9 +16,7 @@ jobs:
     environment: release
     permissions:
       actions: read
-      attestations: write
       contents: read
-      id-token: write
     env:
       GH_TOKEN: ${{ github.token }}
       VERSION: ${{ github.ref_name }}
@@ -53,12 +51,11 @@ jobs:
         env:
           CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
           CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
-          NOTARY_KEY_BASE64: ${{ secrets.APP_STORE_CONNECT_KEY }}
         run: |
           keychain="$RUNNER_TEMP/signing.keychain-db"
           password=$(openssl rand -hex 24)
           security create-keychain -p "$password" "$keychain"
-          # No auto-lock: notarization can outlast any timeout.
+          # No auto-lock while signing.
           security set-keychain-settings "$keychain"
           security unlock-keychain -p "$password" "$keychain"
           base64 --decode <<<"$CERTIFICATE" >"$RUNNER_TEMP/certificate.p12"
@@ -67,36 +64,58 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain" >/dev/null
           # shellcheck disable=SC2046
           security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
-          base64 --decode <<<"$NOTARY_KEY_BASE64" >"$RUNNER_TEMP/notary.p8"
           echo "KEYCHAIN=$keychain" >>"$GITHUB_ENV"
-          echo "NOTARY_KEY=$RUNNER_TEMP/notary.p8" >>"$GITHUB_ENV"
-      - name: Sign and notarize the app
-        env:
-          KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
-          ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+      - name: Sign
         run: |
           codesign --force --timestamp --options runtime --keychain "$KEYCHAIN" \
             --entitlements source/packaging/macos/entitlements.plist \
             --sign "Developer ID Application" Copiale.app
           codesign --verify --strict --verbose=2 Copiale.app
-          # Stapled too, so a copy outside the disk image opens offline.
-          ditto -c -k --keepParent Copiale.app Copiale.zip
-          source/packaging/macos/notarize.sh Copiale.zip
-          xcrun stapler staple Copiale.app
-          spctl --assess --type execute --verbose=2 Copiale.app
-      - name: Disk image
+          dmg="Copiale-${VERSION#v}.dmg"
+          mkdir -p signed image
+          mv Copiale.app image/
+          ln -s /Applications image/Applications
+          hdiutil create -volname Copiale -srcfolder image -fs HFS+ -format UDZO "signed/$dmg"
+          codesign --timestamp --keychain "$KEYCHAIN" --sign "Developer ID Application" "signed/$dmg"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: signed
+          path: signed
+          retention-days: 30
+      - name: Clean up
+        if: always()
+        run: if [ -n "${KEYCHAIN:-}" ]; then security delete-keychain "$KEYCHAIN"; fi
+
+  # Notarizes the disk image, covering the app inside it. Apple can take
+  # hours: on a timeout, rerun this job alone (`gh run rerun <id> --failed`).
+  notarize:
+    needs: sign
+    runs-on: macos-latest
+    environment: release
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+    env:
+      VERSION: ${{ github.ref_name }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: signed
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: source
+          sparse-checkout: packaging/macos
+      - name: Notarize
         env:
+          NOTARY_KEY_BASE64: ${{ secrets.APP_STORE_CONNECT_KEY }}
           KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
           ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
         run: |
           dmg="Copiale-${VERSION#v}.dmg"
-          mkdir image
-          mv Copiale.app image/
-          ln -s /Applications image/Applications
-          hdiutil create -volname Copiale -srcfolder image -fs HFS+ -format UDZO "$dmg"
-          codesign --timestamp --keychain "$KEYCHAIN" --sign "Developer ID Application" "$dmg"
+          export NOTARY_KEY="$RUNNER_TEMP/notary.p8"
+          base64 --decode <<<"$NOTARY_KEY_BASE64" >"$NOTARY_KEY"
           source/packaging/macos/notarize.sh "$dmg"
-          xcrun stapler staple "$dmg"
           spctl --assess --type open --context context:primary-signature --verbose=2 "$dmg"
           shasum -a 256 "$dmg" >"$dmg.sha256"
           echo "DMG=$dmg" >>"$GITHUB_ENV"
@@ -112,6 +131,4 @@ jobs:
           retention-days: 30
       - name: Clean up
         if: always()
-        run: |
-          rm -f "$RUNNER_TEMP/notary.p8"
-          if [ -n "${KEYCHAIN:-}" ]; then security delete-keychain "$KEYCHAIN"; fi
+        run: rm -f "$RUNNER_TEMP/notary.p8"

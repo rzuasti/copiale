@@ -26,9 +26,11 @@ once done, so after any failure, fix the cause and run the same command again.
    for the commit (~25 min). A failed run stops here: fix it, or rerun it
    (`gh run rerun <id> --failed -R rzuasti/copiale`), then run again.
 5. **Tag** `vX.Y.Z` (annotated) and push it to both remotes. GitHub's
-   `macos-release.yml` signs, notarizes and staples the app and `.dmg` built
-   for that commit; the command follows it. Notarization can take an hour or
-   more per submission.
+   `macos-release.yml` signs the app built for that commit, and signs and
+   notarizes its `.dmg`; the command follows it. Apple sometimes sits on a
+   submission for days, so the `notarize` job submits again every 2 hours;
+   if it times out (6h), rerun it (`gh run rerun <id> --failed`) and run
+   again.
 6. **Verify**: the `.dmg` and checksum are downloaded to `target/dist/X.Y.Z/`;
    the checksum and the attestation (`macos-release.yml`, the tag, the
    commit, GitHub-hosted runner) are checked.

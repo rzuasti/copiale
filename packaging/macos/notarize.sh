@@ -1,26 +1,38 @@
 #!/usr/bin/env bash
-# Notarizes FILE (a .zip of the app, or a .dmg) and fails unless Apple
-# accepts it. Needs NOTARY_KEY (path to the .p8), KEY_ID and ISSUER_ID.
+# Notarizes and staples FILE (a .dmg). Needs NOTARY_KEY (path to the .p8),
+# KEY_ID and ISSUER_ID.
 set -euo pipefail
 
 file=$1
 auth=(--key "$NOTARY_KEY" --key-id "$KEY_ID" --issuer "$ISSUER_ID")
+ids=()
+submitted=0
 
-id=$(xcrun notarytool submit "$file" "${auth[@]}" --output-format json | jq -r .id)
-echo "Submitted $file: $id"
-
-# A team's first submissions can take hours; waiting survives network drops.
-for _ in $(seq 1 12); do
-  if xcrun notarytool wait "$id" "${auth[@]}" --timeout 30m; then
-    break
+# Apple sits on some submissions for days: submits again every 2 hours, and
+# staples from any accepted one, earlier runs' too. Network errors only skip
+# a poll.
+while :; do
+  if xcrun stapler staple "$file" >/dev/null 2>&1; then
+    echo "Notarized and stapled $file"
+    exit 0
   fi
-  sleep 30
+  if [ ${#ids[@]} -eq 0 ] || ((SECONDS - submitted >= 7200)); then
+    if id=$(xcrun notarytool submit "$file" "${auth[@]}" --output-format json | jq -er .id); then
+      ids+=("$id")
+      submitted=$SECONDS
+      echo "Submitted $file: $id"
+    fi
+  fi
+  for id in "${ids[@]}"; do
+    status=$(xcrun notarytool info "$id" "${auth[@]}" --output-format json | jq -r .status) || status=
+    case $status in
+      Invalid | Rejected)
+        echo "::error::Notarization $id: $status"
+        xcrun notarytool log "$id" "${auth[@]}" || true
+        exit 1
+        ;;
+    esac
+    echo "$(date -u +%H:%M) $id: ${status:-no answer}"
+  done
+  sleep 120
 done
-
-status=$(xcrun notarytool info "$id" "${auth[@]}" --output-format json | jq -r .status)
-if [ "$status" != Accepted ]; then
-  echo "::error::Notarization of $file: $status"
-  xcrun notarytool log "$id" "${auth[@]}" || true
-  exit 1
-fi
-echo "Notarized $file"
