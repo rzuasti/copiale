@@ -163,8 +163,14 @@ follow_run() {
   done
   [ -n "$run" ] || die "no $workflow run started"
   say "Following $workflow: https://github.com/$GITHUB_REPO/actions/runs/$run"
-  gh run watch "$run" -R "$GITHUB_REPO" --exit-status --compact --interval 60 >&2 ||
-    die "$workflow run $run failed; fix it or rerun it (gh run rerun $run --failed -R $GITHUB_REPO), then run release again"
+  # Watching also stops on network errors; only the run's result counts.
+  until gh run watch "$run" -R "$GITHUB_REPO" --exit-status --compact --interval 60 >&2; do
+    case "$(gh run view "$run" -R "$GITHUB_REPO" --json status,conclusion --jq '"\(.status) \(.conclusion)"' 2>/dev/null)" in
+      "completed success") break ;;
+      completed*) die "$workflow run $run failed; fix it or rerun it (gh run rerun $run --failed -R $GITHUB_REPO), then run release again" ;;
+    esac
+    sleep 30
+  done
   echo "$run"
 }
 

@@ -1,5 +1,7 @@
 # Tests for release.sh's checks, changelog handling and step detection.
 
+bats_require_minimum_version 1.5.0
+
 setup() {
   # shellcheck source=packaging/release.sh
   source "$BATS_TEST_DIRNAME/release.sh"
@@ -141,4 +143,42 @@ commit() { git commit --quiet --allow-empty -m "$1"; }
   run prepare 0.2.0 yes
   [ "$status" -eq 1 ]
   [[ $output == *"older than the workspace's 0.3.0"* ]]
+}
+
+# A `gh` that lists run 42 and whose `run watch` fails while
+# $BATS_TEST_TMPDIR/watch-fails is non-empty; `run view` prints $RUN_STATE.
+fake_gh() {
+  sleep() { :; }
+  gh() {
+    case "$1 $2" in
+      "run list") echo 42 ;;
+      "run watch")
+        local fails
+        fails=$(cat "$BATS_TEST_TMPDIR/watch-fails")
+        [ -z "$fails" ] || {
+          echo "${fails#?}" >"$BATS_TEST_TMPDIR/watch-fails"
+          return 1
+        }
+        ;;
+      "run view") echo "$RUN_STATE" ;;
+    esac
+  }
+}
+
+@test "following a run outlasts network errors" {
+  fake_gh
+  echo xx >"$BATS_TEST_TMPDIR/watch-fails"
+  RUN_STATE="in_progress "
+  run --separate-stderr follow_run macos.yml
+  [ "$status" -eq 0 ]
+  [ "$output" = 42 ]
+}
+
+@test "following a run fails when the run does" {
+  fake_gh
+  echo xxxx >"$BATS_TEST_TMPDIR/watch-fails"
+  RUN_STATE="completed failure"
+  run follow_run macos.yml
+  [ "$status" -eq 1 ]
+  [[ $output == *"run 42 failed"* ]]
 }
