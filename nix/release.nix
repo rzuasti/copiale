@@ -1,12 +1,11 @@
-# `nix run .#release -- <version>`: packaging/release.sh with its tools. rbw
-# comes from the user's system, to match its running agent.
+# `nix run .#release -- <version>`: packaging/release.sh with its tools. gh
+# and rbw come from the user's system, with their credentials and agent.
 {
   writeShellApplication,
   cargo,
   coreutils,
   curl,
   gawk,
-  gh,
   git,
   gnugrep,
   gnused,
@@ -15,7 +14,7 @@
 }:
 writeShellApplication {
   name = "release";
-  runtimeInputs = [cargo coreutils curl gawk gh git gnugrep gnused jq];
+  runtimeInputs = [cargo coreutils curl gawk git gnugrep gnused jq];
   # The workflows' RUST_VERSION must match it.
   runtimeEnv.FLAKE_RUSTC = rustc.version;
   text = builtins.readFile ../packaging/release.sh;

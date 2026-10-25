@@ -103,6 +103,7 @@ preflight() {
   [ "$(git branch --show-current)" = main ] || die "not on main"
   [ -z "$(git status --porcelain -- . ':!CHANGELOG.md')" ] || die "uncommitted changes"
   [ -z "${FLAKE_RUSTC:-}" ] || check_rust_version "$FLAKE_RUSTC"
+  command -v gh >/dev/null || die "gh not found"
   gh auth status --hostname github.com >/dev/null 2>&1 || die "gh isn't logged in: gh auth login"
   command -v rbw >/dev/null || die "rbw not found (it holds the Codeberg token)"
   [ "$(curl --fail --silent "$CODEBERG_API" | jq .has_releases)" = true ] ||
