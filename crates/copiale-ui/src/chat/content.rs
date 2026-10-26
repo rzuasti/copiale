@@ -177,6 +177,8 @@ pub fn system_lines(
 
 fn group_line(update: &GroupUpdate, actor: &str, name: impl Fn(ServiceId) -> String) -> String {
     match update {
+        GroupUpdate::Created => format!("{actor} created the group"),
+        GroupUpdate::Ended => format!("{actor} ended the group"),
         GroupUpdate::Title(title) => format!("{actor} renamed the group to “{}”", isolate(title)),
         GroupUpdate::Description => format!("{actor} changed the group description"),
         GroupUpdate::Avatar => format!("{actor} changed the group picture"),
@@ -405,6 +407,8 @@ mod tests {
     #[test]
     fn group_updates_read_as_system_lines() {
         let content = Content::GroupChanged(vec![
+            GroupUpdate::Created,
+            GroupUpdate::Ended,
             GroupUpdate::Title("Dev team".into()),
             GroupUpdate::Added(id(2)),
             GroupUpdate::Removed(id(3)),
@@ -429,6 +433,8 @@ mod tests {
         assert_eq!(
             plain(system_lines(&content, "alice", named)),
             [
+                "alice created the group",
+                "alice ended the group",
                 "alice renamed the group to “Dev team”",
                 "alice added member2",
                 "alice removed member3",

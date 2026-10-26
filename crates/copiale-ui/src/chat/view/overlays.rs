@@ -1,8 +1,9 @@
-//! The new chat picker, the palette, safety numbers, and the link and
-//! unlink confirmations.
+//! The new chat and new group pickers, the palette, safety numbers, and
+//! the link and unlink confirmations.
 
 use std::ops::Range;
 
+use copiale_core::text::MAX_GROUP_TITLE;
 use copiale_core::{Command, ServiceId, Verification};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
@@ -17,13 +18,15 @@ use gpui_kit::{
 
 use crate::Quit;
 use crate::chat::model::Overlay;
+use crate::chat::new_group::GroupStep;
 use crate::chat::palette::PaletteAction;
 use crate::chat::text::{isolate, link_host};
 use crate::theme::ActivePalette as _;
 
 use super::{
-    CONFIRM_UNLINK, Cancel, ChatView, ConfirmSafetyNumber, LINK, NewChat, OpenLink, OpenSettings,
-    PICKING, PickNext, PickPrevious, SAFETY_NUMBER, key_hint,
+    CONFIRM_UNLINK, Cancel, ChatView, ConfirmSafetyNumber, GROUP_MEMBERS, LINK, NewChat,
+    NewGroupChat, OpenLink, OpenSettings, PICKING, PickNext, PickPrevious, SAFETY_NUMBER,
+    ToggleMember, key_hint,
 };
 
 impl ChatView {
@@ -42,6 +45,7 @@ impl ChatView {
             }
             InputEvent::PressEnter { .. } => match self.chat.overlay() {
                 Some(Overlay::NewChat) => self.choose_new_chat(None, window, cx),
+                Some(Overlay::NewGroup) => self.name_group(window, cx),
                 Some(Overlay::Palette) => self.choose_palette(None, window, cx),
                 _ => {}
             },
@@ -69,8 +73,90 @@ impl ChatView {
         self.send(command);
         match self.chat.take_requested_open() {
             Some(id) => self.open(id, window, cx),
+            None if self.chat.new_group().is_some() => self.ready_group_step(window, cx),
             None if !self.chat.new_chat_open() => window.focus(&self.focus, cx),
             None => {}
+        }
+        cx.notify();
+    }
+
+    /// Focuses the new group picker's step: the query, empty, or the name.
+    pub(super) fn ready_group_step(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(group) = self.chat.new_group() else {
+            return;
+        };
+        match group.step() {
+            GroupStep::Members => Self::ready_query(&self.inputs().group_members, window, cx),
+            GroupStep::Name => {
+                let name = group.name().to_owned();
+                self.inputs().group_name.update(cx, |input, cx| {
+                    input.set_value(name, window, cx);
+                    input.focus(window, cx);
+                });
+            }
+        }
+    }
+
+    fn toggle_member(&mut self, _: &ToggleMember, window: &mut Window, cx: &mut Context<Self>) {
+        self.pick_member(None, window, cx);
+    }
+
+    /// Adds or removes candidate `ix`, or the highlighted one; a query
+    /// typed to find them clears.
+    fn pick_member(&mut self, ix: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.chat.toggle_group_member(ix) {
+            let input = self.inputs().group_members.clone();
+            if !input.read(cx).value().is_empty() {
+                input.update(cx, |input, cx| input.set_value("", window, cx));
+                self.chat.set_picker_query("");
+            }
+            Self::focus_input(&input, window, cx);
+        }
+        cx.notify();
+    }
+
+    fn unpick_member(&mut self, id: ServiceId, window: &mut Window, cx: &mut Context<Self>) {
+        self.chat.remove_group_member(id);
+        Self::focus_input(&self.inputs().group_members, window, cx);
+        cx.notify();
+    }
+
+    /// On to the name, once members are picked.
+    fn name_group(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.chat.new_group_next() {
+            self.ready_group_step(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Name changes, and Enter creating the group.
+    pub(super) fn on_group_name_event(
+        &mut self,
+        input: &Entity<InputState>,
+        event: &InputEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            InputEvent::Change => {
+                self.chat.set_group_name(&input.read(cx).value());
+                cx.notify();
+            }
+            InputEvent::PressEnter { .. } => {
+                let command = self.chat.create_group();
+                self.send(command);
+                cx.notify();
+            }
+            _ => {}
+        }
+    }
+
+    /// Back to the members, from the name.
+    fn group_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.chat.new_group_back() {
+            self.ready_group_step(window, cx);
+        } else if !self.chat.new_group().is_some_and(|group| group.creating()) {
+            self.close_overlay(window, cx);
         }
         cx.notify();
     }
@@ -91,6 +177,7 @@ impl ChatView {
                 self.answer_request(Command::DeleteRequest(id), window, cx)
             }
             PaletteAction::NewChat => self.start_new_chat(&NewChat, window, cx),
+            PaletteAction::NewGroup => self.start_new_group(&NewGroupChat, window, cx),
             PaletteAction::Settings => self.open_settings(&OpenSettings, window, cx),
             PaletteAction::Theme => self.pick_theme(window, cx),
             PaletteAction::Quit => window.dispatch_action(Quit.boxed_clone(), cx),
@@ -107,7 +194,8 @@ impl ChatView {
             return Some(self.render_viewer(window, cx));
         }
         let (id, card) = match self.chat.overlay()? {
-            Overlay::NewChat => ("new-chat", self.render_new_chat(cx)),
+            Overlay::NewChat => ("new-chat", self.render_new_chat(window, cx)),
+            Overlay::NewGroup => ("new-group", self.render_new_group(cx)),
             Overlay::Palette => ("palette", self.render_palette(window, cx)),
             Overlay::Settings => ("settings", self.render_settings(window, cx)),
             Overlay::SafetyNumber(_) => ("safety-number", self.render_safety_number(cx)),
@@ -163,14 +251,9 @@ impl ChatView {
         cx: &mut Context<Self>,
     ) -> gpui_kit::Div {
         let palette = cx.palette();
-        let empty = rows.is_empty().then(|| {
-            div()
-                .px_3()
-                .py_2()
-                .text_sm()
-                .text_color(palette.text_muted)
-                .child(empty)
-        });
+        let empty = rows
+            .is_empty()
+            .then(|| muted_line(empty, palette.text_muted));
         v_flex()
             .key_context(PICKING)
             .on_action(cx.listener(Self::pick_previous))
@@ -186,17 +269,36 @@ impl ChatView {
             .child(v_flex().p_1().children(rows).children(empty))
     }
 
-    fn render_new_chat(&self, cx: &mut Context<Self>) -> gpui_kit::Div {
+    fn render_new_chat(&self, window: &Window, cx: &mut Context<Self>) -> gpui_kit::Div {
         let palette = cx.palette();
         let muted = palette.text_muted;
         let mono = cx.theme().mono_font_family.clone();
         let selected = self.chat.picker_selected();
-        let rows: Vec<_> = self
-            .chat
-            .new_chat_candidates()
-            .into_iter()
-            .enumerate()
-            .map(|(ix, candidate)| {
+        let new_group = picker_row(
+            "new-group-entry",
+            selected == Some(0),
+            Some("+"),
+            StyledText::new("New group…"),
+            key_hint(&NewGroupChat, window),
+            muted,
+            mono.clone(),
+        )
+        .on_click(cx.listener(|view, _, window, cx| view.choose_new_chat(Some(0), window, cx)))
+        .into_any_element();
+        let candidates = self.chat.new_chat_candidates();
+        let empty = candidates.is_empty().then(|| {
+            let text = if self.chat.has_contacts() {
+                "No matches"
+            } else {
+                "No contacts yet; they sync from your phone"
+            };
+            muted_line(text, muted).into_any_element()
+        });
+        let rows: Vec<_> = std::iter::once(new_group)
+            .chain(empty)
+            .chain(candidates.into_iter().enumerate().map(|(ix, candidate)| {
+                // After the new group entry.
+                let entry = ix + 1;
                 let details = candidate
                     .detail
                     .map(|phone| SharedString::from(phone.to_owned()))
@@ -204,7 +306,7 @@ impl ChatView {
                     .chain(candidate.existing.then(|| "chat".into()));
                 picker_row(
                     ("contact", ix as u64),
-                    selected == Some(ix),
+                    selected == Some(entry),
                     None,
                     StyledText::new(candidate.label)
                         .with_highlights(match_highlights(candidate.highlights, cx)),
@@ -213,8 +315,76 @@ impl ChatView {
                     mono.clone(),
                 )
                 .on_click(cx.listener(move |view, _, window, cx| {
-                    view.choose_new_chat(Some(ix), window, cx)
+                    view.choose_new_chat(Some(entry), window, cx)
                 }))
+                .into_any_element()
+            }))
+            .collect();
+        self.picker(&self.inputs().new_chat, rows, "", cx)
+    }
+
+    fn render_new_group(&self, cx: &mut Context<Self>) -> gpui_kit::Div {
+        match self.chat.new_group().map(|group| group.step()) {
+            Some(GroupStep::Name) => self.render_group_name(cx),
+            _ => self.render_group_members(cx),
+        }
+    }
+
+    /// Picked members as chips over the query, then contacts to pick.
+    fn render_group_members(&self, cx: &mut Context<Self>) -> gpui_kit::Div {
+        let palette = cx.palette();
+        let muted = palette.text_muted;
+        let mono = cx.theme().mono_font_family.clone();
+        let selected = self.chat.picker_selected();
+        let members = self
+            .chat
+            .new_group()
+            .map(|group| group.members().to_vec())
+            .unwrap_or_default();
+        let chips = (!members.is_empty()).then(|| {
+            h_flex()
+                .id("group-chips")
+                .flex_wrap()
+                .gap_1()
+                .px_2()
+                .pt_2()
+                .children(members.iter().map(|&id| {
+                    let label = isolate(&self.chat.contact_label(id));
+                    Button::new(("group-chip", id.uuid().as_u128() as u64))
+                        .xsmall()
+                        .outline()
+                        .label(format!("{label} ×"))
+                        .on_click(cx.listener(move |view, _, window, cx| {
+                            view.unpick_member(id, window, cx)
+                        }))
+                }))
+                .test_support()
+        });
+        let rows: Vec<_> = self
+            .chat
+            .new_group_candidates()
+            .into_iter()
+            .enumerate()
+            .map(|(ix, candidate)| {
+                let picked = members.contains(&candidate.contact.id);
+                let details = candidate
+                    .detail
+                    .map(|phone| SharedString::from(phone.to_owned()))
+                    .into_iter()
+                    .chain(candidate.contact.invite_only.then(|| "invite".into()));
+                picker_row(
+                    ("member", ix as u64),
+                    selected == Some(ix),
+                    Some(if picked { "[x]" } else { "[ ]" }),
+                    StyledText::new(candidate.label)
+                        .with_highlights(match_highlights(candidate.highlights, cx)),
+                    details,
+                    muted,
+                    mono.clone(),
+                )
+                .on_click(
+                    cx.listener(move |view, _, window, cx| view.pick_member(Some(ix), window, cx)),
+                )
                 .into_any_element()
             })
             .collect();
@@ -223,7 +393,86 @@ impl ChatView {
         } else {
             "No contacts yet; they sync from your phone"
         };
-        self.picker(&self.inputs().new_chat, rows, empty, cx)
+        let title = match members.len() {
+            0 => "New group".to_owned(),
+            count => format!("New group · {count} picked"),
+        };
+        v_flex()
+            .key_context(GROUP_MEMBERS)
+            .on_action(cx.listener(Self::toggle_member))
+            .child(card_header(title, muted, mono.clone()))
+            .children(chips)
+            .child(self.picker(&self.inputs().group_members, rows, empty, cx))
+            .child(hint_line(
+                "space pick · enter next · esc close",
+                muted,
+                mono,
+            ))
+    }
+
+    /// The name, who joins, and how creating went.
+    fn render_group_name(&self, cx: &mut Context<Self>) -> gpui_kit::Div {
+        let palette = cx.palette();
+        let muted = palette.text_muted;
+        let mono = cx.theme().mono_font_family.clone();
+        let Some(group) = self.chat.new_group() else {
+            return v_flex();
+        };
+        let label = |id: ServiceId| isolate(&self.chat.contact_label(id));
+        let added: Vec<_> = group
+            .members()
+            .iter()
+            .filter(|id| !self.chat.invite_only(**id))
+            .map(|id| label(*id))
+            .collect();
+        let invited: Vec<_> = group
+            .members()
+            .iter()
+            .filter(|id| self.chat.invite_only(**id))
+            .map(|id| label(*id))
+            .collect();
+        let status = if group.creating() {
+            Some(muted_line("Creating…", muted))
+        } else if let Some(error) = group.error() {
+            Some(muted_line(
+                format!("Couldn't create it: {error}"),
+                palette.danger,
+            ))
+        } else if !group.name().trim().is_empty() && !group.name_valid() {
+            Some(muted_line(
+                format!("Names have at most {MAX_GROUP_TITLE} characters"),
+                palette.danger,
+            ))
+        } else {
+            None
+        };
+        v_flex()
+            .on_action(cx.listener(|view, _: &Escape, window, cx| view.group_back(window, cx)))
+            .child(card_header("New group".into(), muted, mono.clone()))
+            .child(
+                div()
+                    .p_2()
+                    .border_b_1()
+                    .border_color(palette.border)
+                    .child(Input::new(&self.inputs().group_name).small()),
+            )
+            .child(
+                v_flex()
+                    .id("group-joining")
+                    .px_3()
+                    .py_2()
+                    .gap_1()
+                    .text_sm()
+                    .children((!added.is_empty()).then(|| div().child(added.join(", "))))
+                    .children((!invited.is_empty()).then(|| {
+                        div()
+                            .text_color(muted)
+                            .child(format!("Invited: {}", invited.join(", ")))
+                    }))
+                    .children(status)
+                    .test_support(),
+            )
+            .child(hint_line("enter create · esc back", muted, mono))
     }
 
     fn render_palette(&self, window: &Window, cx: &mut Context<Self>) -> gpui_kit::Div {
@@ -245,6 +494,7 @@ impl ChatView {
                         | PaletteAction::Unblock(_)
                         | PaletteAction::DeleteRequest(_) => (">", None),
                         PaletteAction::NewChat => (">", key_hint(&NewChat, window)),
+                        PaletteAction::NewGroup => (">", key_hint(&NewGroupChat, window)),
                         PaletteAction::Settings => (">", key_hint(&OpenSettings, window)),
                         PaletteAction::Theme => (">", None),
                         PaletteAction::Quit => (">", key_hint(&Quit, window)),
@@ -506,6 +756,40 @@ impl ChatView {
         self.core.send(Command::Unlink);
         self.close_overlay(window, cx);
     }
+}
+
+/// A small muted line, e.g. what a picker shows without entries.
+fn muted_line(text: impl Into<SharedString>, color: Hsla) -> gpui_kit::Div {
+    div()
+        .px_3()
+        .py_2()
+        .text_sm()
+        .text_color(color)
+        .child(text.into())
+}
+
+/// A card's title, in the corner.
+fn card_header(title: String, muted: Hsla, mono: SharedString) -> gpui_kit::Div {
+    div()
+        .px_3()
+        .pt_2()
+        .font_family(mono)
+        .text_xs()
+        .text_color(muted)
+        .child(title)
+}
+
+/// The keys a card takes, under it.
+fn hint_line(text: &'static str, muted: Hsla, mono: SharedString) -> gpui_kit::Div {
+    div()
+        .px_3()
+        .py_1()
+        .border_t_1()
+        .border_color(muted.opacity(0.2))
+        .font_family(mono)
+        .text_xs()
+        .text_color(muted)
+        .child(text)
 }
 
 /// A picker entry: an optional glyph, the label, then muted details.

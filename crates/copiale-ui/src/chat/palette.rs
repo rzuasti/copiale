@@ -23,6 +23,7 @@ pub enum PaletteAction {
     /// Deletes a message request or blocked chat.
     DeleteRequest(ConversationId),
     NewChat,
+    NewGroup,
     Settings,
     /// Opens the theme picker.
     Theme,
@@ -30,8 +31,9 @@ pub enum PaletteAction {
 }
 
 /// Commands, in the order they list after chats.
-const COMMANDS: [(PaletteAction, &str); 4] = [
+const COMMANDS: [(PaletteAction, &str); 5] = [
     (PaletteAction::NewChat, "New chat"),
+    (PaletteAction::NewGroup, "New group"),
     (PaletteAction::Settings, "Settings"),
     (PaletteAction::Theme, "Theme…"),
     (PaletteAction::Quit, "Quit"),
@@ -108,7 +110,16 @@ mod tests {
         assert_eq!(
             labels(&entries),
             [
-                "Alice", "Bob", "C", "D", "E", "New chat", "Settings", "Theme…", "Quit",
+                "Alice",
+                "Bob",
+                "C",
+                "D",
+                "E",
+                "New chat",
+                "New group",
+                "Settings",
+                "Theme…",
+                "Quit",
             ]
         );
         assert_eq!(

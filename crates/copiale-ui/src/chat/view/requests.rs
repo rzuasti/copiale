@@ -1,8 +1,9 @@
-//! The banner standing in for the composer in a message request or blocked
-//! chat, and answering it.
+//! The banner standing in for the composer in a message request, blocked
+//! chat or ended group, and answering it.
 
 use copiale_core::Command;
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, Context, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
     StatefulInteractiveElement as _, Styled as _, TestSupportExt as _, Window, div,
@@ -53,7 +54,9 @@ impl ChatView {
     /// once accepted.
     pub(super) fn render_request_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let banner = self.chat.request_banner()?;
-        let answers: &[(&str, &str, &str)] = if banner.blocked {
+        let answers: &[(&str, &str, &str)] = if banner.ended {
+            &[]
+        } else if banner.blocked {
             &[
                 ("unblock", "u", "unblock"),
                 ("delete-request", "d", "delete"),
@@ -84,24 +87,29 @@ impl ChatView {
             .id("request-banner")
             .key_context(REQUEST)
             .track_focus(&self.request_focus)
-            .on_action(cx.listener(Self::accept_request))
-            .on_action(cx.listener(Self::unblock_chat))
-            .on_action(cx.listener(Self::block_chat))
-            .on_action(cx.listener(Self::delete_request))
+            .when(!banner.ended, |banner| {
+                banner
+                    .on_action(cx.listener(Self::accept_request))
+                    .on_action(cx.listener(Self::unblock_chat))
+                    .on_action(cx.listener(Self::block_chat))
+                    .on_action(cx.listener(Self::delete_request))
+            })
             .gap_1()
             .py_1()
             .font_family(cx.theme().mono_font_family.clone())
             .text_sm()
             .child(
                 div()
-                    .text_color(if banner.blocked {
+                    .text_color(if banner.blocked || banner.ended {
                         cx.palette().text_muted
                     } else {
                         cx.palette().danger
                     })
                     .child(SharedString::from(banner.text)),
             )
-            .child(h_flex().gap_4().children(buttons))
+            .when(!answers.is_empty(), |banner| {
+                banner.child(h_flex().gap_4().children(buttons))
+            })
             .test_support();
         Some(element.into_any_element())
     }

@@ -18,8 +18,9 @@ use copiale_core::{
     Verification,
 };
 use copiale_testkit::{
-    DEVICE_NAME, FAKE_LINK_URL, FakeNetwork, FakePhone, ManualClock, MemorySecretStore, OWN_ID,
-    SentText, fake_backend, fake_linker, group_key, identity_key, safety_number, service_id, text,
+    DEVICE_NAME, FAKE_LINK_URL, FIRST_CREATED_GROUP, FakeNetwork, FakePhone, ManualClock,
+    MemorySecretStore, OWN_ID, SentText, fake_backend, fake_linker, group_key, identity_key,
+    safety_number, service_id, text,
 };
 use futures::FutureExt as _;
 use tempfile::TempDir;
@@ -425,6 +426,7 @@ fn contact(n: u128, name: Option<&str>, phone: Option<&str>) -> Contact {
         id: service_id(n),
         name: name.map(Into::into),
         phone: phone.map(PhoneNumber::new),
+        invite_only: false,
     }
 }
 
@@ -2340,6 +2342,112 @@ async fn receive_in_group(
     (message, summary)
 }
 
+fn create_group(running: &Running, title: &str, members: &[u128]) {
+    send(
+        running,
+        Command::CreateGroup {
+            title: title.into(),
+            members: members.iter().copied().map(service_id).collect(),
+        },
+    );
+}
+
+/// Skips connection events on the way.
+async fn group_not_created(events: &mut Events) -> BackendError {
+    loop {
+        match next_event(events).await {
+            Event::GroupNotCreated(error) => break error,
+            Event::Disconnected { .. } | Event::Connected => {}
+            other => panic!("expected GroupNotCreated, got {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn created_group_is_stored_accepted_with_a_line() {
+    let (_dir, mut running) = ready().await;
+    running.network.set_invite_only(service_id(3));
+    running.network.set_profile_name(service_id(1), "Alice");
+
+    create_group(&running, " Trip\u{202e} ", &[3, 1, OWN_ID, 1]);
+
+    let line = message_added(&mut running.events).await;
+    let summary = conversation_updated(&mut running.events).await;
+    expect(&mut running.events, Event::GroupCreated(summary.id)).await;
+    let (created, title, members) = running.network.created_groups().remove(0);
+    assert_eq!(created.key, group_key(FIRST_CREATED_GROUP));
+    assert_eq!(title, "Trip");
+    assert_eq!(members, [service_id(1), service_id(3)]);
+    assert_eq!(line.conversation, summary.id);
+    assert_eq!(line.sender, None);
+    assert_eq!(line.sent_at, created.sent_at);
+    assert_eq!(
+        line.content,
+        Content::GroupChanged(vec![
+            GroupUpdate::Created,
+            GroupUpdate::Invited(service_id(3)),
+        ])
+    );
+    assert_eq!(summary.peer, Peer::Group(created.key.id()));
+    assert_eq!(summary.state, ChatState::Accepted);
+    assert_eq!(summary.title.as_deref(), Some("Trip"));
+    assert_eq!(summary.members, [member(1, None)]);
+    // Then members' names.
+    let named = conversation_updated(&mut running.events).await;
+    assert_eq!(named.members, [member(1, None)]);
+    let named = conversation_updated(&mut running.events).await;
+    assert_eq!(named.members, [member(1, Some("Alice"))]);
+
+    let group = GroupRef {
+        key: created.key,
+        revision: 0,
+    };
+    let (_, summary) = receive_in_group(&mut running, group, 1, 100).await;
+    assert_eq!(summary.state, ChatState::Accepted);
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn groups_need_a_name_and_another_member() {
+    let (_dir, mut running) = ready().await;
+
+    create_group(&running, " \u{200b} ", &[1]);
+    group_not_created(&mut running.events).await;
+    create_group(&running, &"a".repeat(33), &[1]);
+    group_not_created(&mut running.events).await;
+    create_group(&running, "Trip", &[OWN_ID]);
+    group_not_created(&mut running.events).await;
+
+    assert!(running.network.created_groups().is_empty());
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn failed_group_creation_stores_nothing() {
+    let (_dir, mut running) = ready().await;
+    running
+        .network
+        .fail_next_group_creation(BackendError::new("rejected"));
+
+    create_group(&running, "Trip", &[1]);
+    assert_eq!(
+        group_not_created(&mut running.events).await,
+        BackendError::new("rejected")
+    );
+    running.network.go_offline();
+    create_group(&running, "Trip", &[1]);
+    assert!(group_not_created(&mut running.events).await.is_network());
+
+    send(&running, Command::LoadConversations);
+    loop {
+        if let Event::Conversations(conversations) = next_event(&mut running.events).await {
+            assert!(conversations.is_empty());
+            break;
+        }
+    }
+    stop(running).await;
+}
+
 #[tokio::test]
 async fn group_message_fetches_the_group_and_member_names() {
     let (_dir, mut running) = ready().await;
@@ -2632,6 +2740,113 @@ async fn group_changes_are_shown_once() {
         message_added(&mut running.events).await.content,
         Content::GroupChanged(_)
     ));
+    stop(running).await;
+}
+
+fn group_change(revision: u32, update: GroupUpdate) -> Incoming {
+    Incoming::Message(IncomingMessage {
+        sender: service_id(1),
+        group: Some(group_ref(1, revision)),
+        timestamp: Timestamp::from_millis(100 + u64::from(revision)),
+        server_at: Timestamp::from_millis(100 + u64::from(revision)),
+        content: Content::GroupChanged(vec![update]),
+        expire_timer: None,
+    })
+}
+
+#[tokio::test]
+async fn ended_groups_take_nothing_more() {
+    let (_dir, mut running) = ready_with(true, true).await;
+    running.network.set_group(group_key(1), named_dev_group(3));
+    let (message, summary) = receive_in_group(&mut running, group_ref(1, 3), 1, 100).await;
+    assert!(!summary.ended);
+    flush(&mut running).await;
+
+    running.network.set_group(group_key(1), named_dev_group(4));
+    running.network.deliver(group_change(4, GroupUpdate::Ended));
+    let line = message_added(&mut running.events).await;
+    assert_eq!(
+        line.content,
+        Content::GroupChanged(vec![GroupUpdate::Ended])
+    );
+    assert!(conversation_updated(&mut running.events).await.ended);
+    flush(&mut running).await;
+
+    send_text(&running, summary.id, "anyone?");
+    send(
+        &running,
+        Command::Typing {
+            conversation: summary.id,
+            typing: true,
+        },
+    );
+    send(
+        &running,
+        Command::Delete {
+            id: message.id,
+            everyone: true,
+        },
+    );
+    let events = flush(&mut running).await;
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::MessageAdded(_) | Event::MessageUpdated(_))),
+        "{events:?}"
+    );
+    assert!(running.network.sent().is_empty());
+    assert!(running.network.typing().is_empty());
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn groups_ended_unseen_are_found_once_connected() {
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = MemorySecretStore::default();
+    let mut running = start(dir.path(), &secrets, true);
+    expect_ready(&mut running.events).await;
+    expect(&mut running.events, Event::Connected).await;
+    let mut chats = Vec::new();
+    for n in [1, 2] {
+        running.network.set_group(group_key(n), named_dev_group(3));
+        running
+            .network
+            .deliver(group_incoming(group_ref(n, 3), 1, 100, "hi"));
+        loop {
+            if let Event::MessageAdded(message) = next_event(&mut running.events).await {
+                break chats.push(message.conversation);
+            }
+        }
+    }
+    let ended = chats[0];
+    stop(running).await;
+
+    // Group 1 was ended meanwhile; group 2 wasn't.
+    let start_again = || {
+        start_with(dir.path(), &secrets, true, fast(), |network| {
+            network.set_server_group(group_key(1), named_dev_group(3));
+            network.set_server_group(group_key(2), named_dev_group(3));
+            network.end_group(group_key(1));
+        })
+    };
+    let mut running = start_again();
+    expect_ready(&mut running.events).await;
+    let summary = loop {
+        match next_event(&mut running.events).await {
+            Event::ConversationUpdated(summary) if summary.ended => break summary,
+            _ => {}
+        }
+    };
+    assert_eq!(summary.id, ended);
+    until(&running, |network| network.group_fetches() == 2).await;
+    sync(&mut running).await;
+    stop(running).await;
+
+    let mut running = start_again();
+    expect_ready(&mut running.events).await;
+    expect(&mut running.events, Event::Connected).await;
+    sync(&mut running).await;
+    assert_eq!(running.network.group_fetches(), 0, "both known");
     stop(running).await;
 }
 

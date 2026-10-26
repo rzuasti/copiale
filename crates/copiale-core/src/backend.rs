@@ -129,6 +129,16 @@ pub struct StoredChats {
     pub identities: Vec<StoredIdentity>,
 }
 
+/// A group this account created ([`SignalBackend::create_group`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CreatedGroup {
+    pub key: GroupMasterKey,
+    /// When the message telling the members went out.
+    pub sent_at: Timestamp,
+    /// Members invited rather than added: their profile key is unknown.
+    pub invited: Vec<ServiceId>,
+}
+
 /// A message that couldn't be decrypted.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Undecryptable {
@@ -399,11 +409,21 @@ pub trait SignalBackend {
     ) -> LocalBoxFuture<'static, Result<Option<GroupMembers>, BackendError>>;
 
     /// Fetches the group's state from the server, for [`Self::group`] and
-    /// [`Self::group_members`]. Doesn't borrow the backend.
+    /// [`Self::group_members`]; returns whether the group was ended.
+    /// Doesn't borrow the backend.
     fn refresh_group(
         &mut self,
         key: GroupMasterKey,
-    ) -> LocalBoxFuture<'static, Result<(), BackendError>>;
+    ) -> LocalBoxFuture<'static, Result<bool, BackendError>>;
+
+    /// Creates a group named `title` with this account as admin and tells
+    /// `members`; the group is then known to [`Self::group`]. Doesn't borrow
+    /// the backend.
+    fn create_group(
+        &mut self,
+        title: String,
+        members: Vec<ServiceId>,
+    ) -> LocalBoxFuture<'static, Result<CreatedGroup, BackendError>>;
 
     /// Checks the open connection with a round trip to the server. The core
     /// times it out.

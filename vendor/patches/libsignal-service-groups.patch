@@ -1,0 +1,733 @@
+From 9df4f5fdfd012222caf0b96434c61d734befaa5f Mon Sep 17 00:00:00 2001
+From: barafael
+Subject: [PATCH] feat(groups): create and change groups
+
+Creates groups and changes them through /v2/groups (title,
+description, timer, members and roles, avatar), and joins through
+invite links or join requests. Expiring profile key credentials are
+fetched for members' presentations.
+
+Upstream PR: whisperfish/libsignal-service-rs#473, at 9df4f5f.
+---
+diff --git a/src/groups_v2/invite_link.rs b/src/groups_v2/invite_link.rs
+new file mode 100644
+index 0000000..bddffd2
+--- /dev/null
++++ b/src/groups_v2/invite_link.rs
+@@ -0,0 +1,80 @@
++use base64::prelude::*;
++use prost::Message;
++
++use crate::proto;
++
++/// What a `https://signal.group/#…` link carries. Whoever has the link can join the
++/// group, or ask to, as its invite-link access allows.
++#[derive(Clone, PartialEq, Eq, derive_more::Debug)]
++pub struct GroupInviteLink {
++    #[debug(ignore)]
++    pub master_key: [u8; 32],
++    #[debug(ignore)]
++    pub password: Vec<u8>,
++}
++
++impl GroupInviteLink {
++    pub const PREFIX: &'static str = "https://signal.group/#";
++
++    /// As Signal-Android's `GroupLinkPassword.createNew()`.
++    pub fn new_password<R: rand::Rng + rand::CryptoRng>(
++        rng: &mut R,
++    ) -> Vec<u8> {
++        let mut password = vec![0; 16];
++        rng.fill_bytes(&mut password);
++        password
++    }
++
++    /// Accepts the `https://` and `sgnl://` forms.
++    pub fn parse(url: &str) -> Option<Self> {
++        let url = url.trim();
++        let encoded = url
++            .strip_prefix(Self::PREFIX)
++            .or_else(|| url.strip_prefix("sgnl://signal.group/#"))?
++            .trim_end_matches('=');
++        let bytes = BASE64_URL_SAFE_NO_PAD.decode(encoded).ok()?;
++        let link = proto::GroupInviteLink::decode(bytes.as_slice()).ok()?;
++        let proto::group_invite_link::Contents::ContentsV1(contents) =
++            link.contents?;
++        Some(Self {
++            master_key: contents.group_master_key.try_into().ok()?,
++            password: contents.invite_link_password,
++        })
++    }
++
++    pub fn to_url(&self) -> String {
++        let link = proto::GroupInviteLink {
++            contents: Some(proto::group_invite_link::Contents::ContentsV1(
++                proto::group_invite_link::GroupInviteLinkContentsV1 {
++                    group_master_key: self.master_key.to_vec(),
++                    invite_link_password: self.password.clone(),
++                },
++            )),
++        };
++        format!(
++            "{}{}",
++            Self::PREFIX,
++            BASE64_URL_SAFE_NO_PAD.encode(link.encode_to_vec())
++        )
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn round_trip() {
++        let link = GroupInviteLink {
++            master_key: [7; 32],
++            password: GroupInviteLink::new_password(&mut rand::rng()),
++        };
++        let url = link.to_url();
++        assert!(url.starts_with("https://signal.group/#"));
++        assert_eq!(GroupInviteLink::parse(&url), Some(link.clone()));
++        let sgnl = url.replacen("https://", "sgnl://", 1);
++        assert_eq!(GroupInviteLink::parse(&sgnl), Some(link));
++        assert_eq!(GroupInviteLink::parse("https://signal.org/#abc"), None);
++        assert_eq!(GroupInviteLink::parse("https://signal.group/#!!"), None);
++    }
++}
+diff --git a/src/groups_v2/manager.rs b/src/groups_v2/manager.rs
+index ff54620..37fca94 100644
+--- a/src/groups_v2/manager.rs
++++ b/src/groups_v2/manager.rs
+@@ -3,8 +3,9 @@ use std::{collections::HashMap, convert::TryInto};
+ use crate::{
+     configuration::Endpoint,
+     groups_v2::{
+-        model::{Group, GroupChanges},
++        model::{Group, GroupChanges, GroupJoinInfo},
+         operations::{GroupDecodingError, GroupOperations},
++        GroupInviteLink,
+     },
+     prelude::{PushService, ServiceError},
+     proto::GroupContextV2,
+@@ -264,6 +265,120 @@ impl<C: CredentialsCache> GroupsManager<C> {
+         self.identified_push_service.get_group(authorization).await
+     }
+ 
++    pub async fn create_group<R: Rng + CryptoRng>(
++        &mut self,
++        csprng: &mut R,
++        master_key_bytes: &[u8],
++        group: crate::proto::Group,
++    ) -> Result<crate::proto::GroupResponse, ServiceError> {
++        let group_secret_params = secret_params(master_key_bytes)?;
++        let authorization = self
++            .get_authorization_for_today(csprng, group_secret_params)
++            .await?;
++        self.identified_push_service
++            .put_group(authorization, group)
++            .await
++    }
++
++    /// Returns the server-signed change, to send on to the members.
++    pub async fn modify_group<R: Rng + CryptoRng>(
++        &mut self,
++        csprng: &mut R,
++        master_key_bytes: &[u8],
++        actions: crate::proto::group_change::Actions,
++    ) -> Result<crate::proto::GroupChange, ServiceError> {
++        self.patch_group(csprng, master_key_bytes, actions, None)
++            .await
++    }
++
++    /// For a non-member: joining or asking to join through the link, or
++    /// withdrawing that request. Returns the server-signed change.
++    pub async fn modify_group_from_invite_link<R: Rng + CryptoRng>(
++        &mut self,
++        csprng: &mut R,
++        link: &GroupInviteLink,
++        actions: crate::proto::group_change::Actions,
++    ) -> Result<crate::proto::GroupChange, ServiceError> {
++        self.patch_group(
++            csprng,
++            &link.master_key,
++            actions,
++            Some(&link.password),
++        )
++        .await
++    }
++
++    async fn patch_group<R: Rng + CryptoRng>(
++        &mut self,
++        csprng: &mut R,
++        master_key_bytes: &[u8],
++        actions: crate::proto::group_change::Actions,
++        invite_link_password: Option<&[u8]>,
++    ) -> Result<crate::proto::GroupChange, ServiceError> {
++        let group_secret_params = secret_params(master_key_bytes)?;
++        let authorization = self
++            .get_authorization_for_today(csprng, group_secret_params)
++            .await?;
++        self.identified_push_service
++            .patch_group(authorization, actions, invite_link_password)
++            .await?
++            .group_change
++            .ok_or(ServiceError::GroupsV2Error)
++    }
++
++    /// What the link's holder may see of the group before joining.
++    pub async fn group_join_info<R: Rng + CryptoRng>(
++        &mut self,
++        csprng: &mut R,
++        link: &GroupInviteLink,
++    ) -> Result<GroupJoinInfo, ServiceError> {
++        let group_secret_params = secret_params(&link.master_key)?;
++        let authorization = self
++            .get_authorization_for_today(csprng, group_secret_params)
++            .await?;
++        let info = self
++            .identified_push_service
++            .get_group_join_info(authorization, &link.password)
++            .await?;
++        Ok(GroupOperations::new(group_secret_params)
++            .decrypt_group_join_info(info)?)
++    }
++
++    pub fn server_public_params(&self) -> &ServerPublicParams {
++        &self.server_public_params
++    }
++
++    /// Encrypts and uploads a group avatar; returns the key for
++    /// `GroupOperations::build_modify_avatar_action`.
++    pub async fn upload_avatar<R: Rng + CryptoRng>(
++        &mut self,
++        csprng: &mut R,
++        master_key_bytes: &[u8],
++        avatar: &[u8],
++    ) -> Result<String, ServiceError> {
++        let group_secret_params = secret_params(master_key_bytes)?;
++        let ciphertext = GroupOperations::new(group_secret_params)
++            .encrypt_avatar(avatar, csprng);
++        let authorization = self
++            .get_authorization_for_today(csprng, group_secret_params)
++            .await?;
++        let form = self
++            .identified_push_service
++            .get_group_avatar_upload_form(authorization)
++            .await?;
++        let key = form.key.clone();
++        // Group avatars live at the CDN's root; the key carries the path.
++        self.identified_push_service
++            .upload_to_cdn0(
++                "",
++                form.into(),
++                "file".into(),
++                std::io::Cursor::new(ciphertext),
++            )
++            .await?;
++        Ok(key)
++    }
++
+     #[tracing::instrument(
+         skip(self, group_secret_params),
+         fields(path = %path[..4.min(path.len())]),
+@@ -305,6 +420,17 @@ impl<C: CredentialsCache> GroupsManager<C> {
+     }
+ }
+ 
++fn secret_params(
++    master_key_bytes: &[u8],
++) -> Result<GroupSecretParams, ServiceError> {
++    let master_key = GroupMasterKey::new(
++        master_key_bytes
++            .try_into()
++            .map_err(|_| ServiceError::GroupsV2Error)?,
++    );
++    Ok(GroupSecretParams::derive_from_master_key(master_key))
++}
++
+ pub fn decrypt_group(
+     master_key_bytes: &[u8],
+     encrypted_group: crate::proto::Group,
+diff --git a/src/groups_v2/mod.rs b/src/groups_v2/mod.rs
+index f1685a8..d883b0a 100644
+--- a/src/groups_v2/mod.rs
++++ b/src/groups_v2/mod.rs
+@@ -1,15 +1,18 @@
+ //! Everything needed to support [Signal Groups v2](https://signal.org/blog/new-groups/)
++mod invite_link;
+ mod manager;
+ mod model;
+ mod operations;
+ pub mod utils;
+ 
++pub use invite_link::GroupInviteLink;
+ pub use manager::{
+     decrypt_group, CredentialsCache, CredentialsCacheError, GroupsManager,
+     InMemoryCredentialsCache,
+ };
+ pub use model::{
+     AccessControl, AccessRequired, Group, GroupChange, GroupChanges,
+-    GroupMemberCandidate, Member, PendingMember, RequestingMember, Role, Timer,
++    GroupJoinInfo, GroupMemberCandidate, Member, PendingMember,
++    RequestingMember, Role, Timer,
+ };
+ pub use operations::{GroupDecodingError, GroupOperations};
+diff --git a/src/groups_v2/model.rs b/src/groups_v2/model.rs
+index e99e77c..3ded3df 100644
+--- a/src/groups_v2/model.rs
++++ b/src/groups_v2/model.rs
+@@ -162,6 +162,19 @@ pub struct Group {
+     pub terminated: bool,
+ }
+ 
++/// What a group shows to someone holding its invite link.
++#[derive(Debug, Clone, PartialEq)]
++pub struct GroupJoinInfo {
++    pub title: String,
++    pub description_text: Option<String>,
++    pub avatar: String,
++    pub member_count: u32,
++    pub add_from_invite_link: AccessRequired,
++    pub version: u32,
++    /// The caller has asked to join and awaits an administrator.
++    pub pending_admin_approval: bool,
++}
++
+ #[derive(Debug, Clone)]
+ pub struct GroupChanges {
+     pub group_id: GroupV2Id,
+diff --git a/src/groups_v2/operations.rs b/src/groups_v2/operations.rs
+index 8cf0cc8..748cbeb 100644
+--- a/src/groups_v2/operations.rs
++++ b/src/groups_v2/operations.rs
+@@ -24,8 +24,9 @@ use crate::{
+ 
+ use super::{
+     model::{
+-        AccessControl, BannedMember, GroupMemberCandidate, Member,
+-        PendingMember, PromotedMember, RequestingMember,
++        AccessControl, AccessRequired, BannedMember, GroupJoinInfo,
++        GroupMemberCandidate, Member, PendingMember, PromotedMember,
++        RequestingMember,
+     },
+     Group, GroupChange, GroupChanges,
+ };
+@@ -403,6 +404,17 @@ impl GroupOperations {
+         )
+     }
+ 
++    pub fn encrypt_avatar<R: rand::Rng + rand::CryptoRng>(
++        &self,
++        avatar: &[u8],
++        rng: &mut R,
++    ) -> Vec<u8> {
++        self.encrypt_blob_content(
++            group_attribute_blob::Content::Avatar(avatar.to_vec()),
++            rng,
++        )
++    }
++
+     fn decrypt_title(&self, ciphertext: &[u8]) -> String {
+         use group_attribute_blob::Content;
+         match self.decrypt_blob(ciphertext).content {
+@@ -509,6 +521,21 @@ impl GroupOperations {
+         })
+     }
+ 
++    pub fn decrypt_group_join_info(
++        &self,
++        info: proto::GroupJoinInfo,
++    ) -> Result<GroupJoinInfo, GroupDecodingError> {
++        Ok(GroupJoinInfo {
++            title: self.decrypt_title(&info.title),
++            description_text: self.decrypt_description_text(&info.description),
++            avatar: info.avatar,
++            member_count: info.member_count,
++            add_from_invite_link: info.add_from_invite_link.try_into()?,
++            version: info.version,
++            pending_admin_approval: info.pending_admin_approval,
++        })
++    }
++
+     pub fn decrypt_group_change(
+         &self,
+         group_change: proto::GroupChange,
+@@ -816,6 +843,67 @@ impl GroupOperations {
+         })
+     }
+ 
++    pub fn build_modify_title_action<R: rand::Rng + rand::CryptoRng>(
++        &self,
++        title: &str,
++        rng: &mut R,
++    ) -> proto::group_change::actions::ModifyTitleAction {
++        proto::group_change::actions::ModifyTitleAction {
++            title: self.encrypt_title(title, rng),
++        }
++    }
++
++    /// An empty description clears it.
++    pub fn build_modify_description_action<R: rand::Rng + rand::CryptoRng>(
++        &self,
++        description: &str,
++        rng: &mut R,
++    ) -> proto::group_change::actions::ModifyDescriptionAction {
++        proto::group_change::actions::ModifyDescriptionAction {
++            description: self.encrypt_description(Some(description), rng),
++        }
++    }
++
++    /// `key` names the uploaded avatar (see `GroupsManager::upload_avatar`);
++    /// empty clears it.
++    pub fn build_modify_avatar_action(
++        &self,
++        key: String,
++    ) -> proto::group_change::actions::ModifyAvatarAction {
++        proto::group_change::actions::ModifyAvatarAction { avatar: key }
++    }
++
++    /// 0 turns it off.
++    pub fn build_modify_disappearing_messages_timer_action<
++        R: rand::Rng + rand::CryptoRng,
++    >(
++        &self,
++        seconds: u32,
++        rng: &mut R,
++    ) -> proto::group_change::actions::ModifyDisappearingMessageTimerAction
++    {
++        proto::group_change::actions::ModifyDisappearingMessageTimerAction {
++            timer: self.encrypt_disappearing_messages_timer(
++                Some(&Timer { duration: seconds }),
++                rng,
++            ),
++        }
++    }
++
++    pub fn build_modify_member_role_action(
++        &self,
++        aci: Aci,
++        role: super::model::Role,
++    ) -> Result<
++        proto::group_change::actions::ModifyMemberRoleAction,
++        GroupDecodingError,
++    > {
++        Ok(proto::group_change::actions::ModifyMemberRoleAction {
++            user_id: self.encrypt_aci(aci)?,
++            role: role.into(),
++        })
++    }
++
+     /// Build a DeleteMemberAction for a GroupChange
+     pub fn build_remove_member_action(
+         &self,
+@@ -850,6 +938,94 @@ impl GroupOperations {
+         )
+     }
+ 
++    /// `Unsatisfiable` turns the invite link off, `Any` lets it add members,
++    /// `Administrator` makes them ask first.
++    pub fn build_modify_invite_link_access_action(
++        &self,
++        access: AccessRequired,
++    ) -> proto::group_change::actions::ModifyAddFromInviteLinkAccessControlAction
++    {
++        proto::group_change::actions::ModifyAddFromInviteLinkAccessControlAction {
++            add_from_invite_link_access: access.into(),
++        }
++    }
++
++    /// A new password makes the links given out so far useless.
++    /// See `GroupInviteLink::new_password`.
++    pub fn build_modify_invite_link_password_action(
++        &self,
++        password: Vec<u8>,
++    ) -> proto::group_change::actions::ModifyInviteLinkPasswordAction {
++        proto::group_change::actions::ModifyInviteLinkPasswordAction {
++            invite_link_password: password,
++        }
++    }
++
++    /// Joins through the invite link, where its access is `Any`.
++    pub fn build_join_from_invite_link_action(
++        &self,
++        credential: &ExpiringProfileKeyCredential,
++        server_public_params: &ServerPublicParams,
++    ) -> proto::group_change::actions::AddMemberAction {
++        let mut action = self.build_add_member_action_with_credential(
++            credential,
++            super::model::Role::Default,
++            server_public_params,
++        );
++        action.join_from_invite_link = true;
++        action
++    }
++
++    /// Asks to join through the invite link, where its access is
++    /// `Administrator`.
++    pub fn build_request_to_join_action(
++        &self,
++        credential: &ExpiringProfileKeyCredential,
++        server_public_params: &ServerPublicParams,
++    ) -> proto::group_change::actions::AddMemberPendingAdminApprovalAction {
++        let presentation =
++            self.create_member_presentation(server_public_params, credential);
++        proto::group_change::actions::AddMemberPendingAdminApprovalAction {
++            added: Some(proto::MemberPendingAdminApproval {
++                user_id: vec![],
++                profile_key: vec![],
++                presentation,
++                timestamp: 0,
++            }),
++        }
++    }
++
++    pub fn build_promote_requesting_member_action(
++        &self,
++        aci: Aci,
++        role: super::model::Role,
++    ) -> Result<
++        proto::group_change::actions::PromoteMemberPendingAdminApprovalAction,
++        GroupDecodingError,
++    > {
++        Ok(
++            proto::group_change::actions::PromoteMemberPendingAdminApprovalAction {
++                user_id: self.encrypt_aci(aci)?,
++                role: role.into(),
++            },
++        )
++    }
++
++    /// Turns a request to join down, or withdraws one's own.
++    pub fn build_remove_requesting_member_action(
++        &self,
++        aci: Aci,
++    ) -> Result<
++        proto::group_change::actions::DeleteMemberPendingAdminApprovalAction,
++        GroupDecodingError,
++    > {
++        Ok(
++            proto::group_change::actions::DeleteMemberPendingAdminApprovalAction {
++                deleted_user_id: self.encrypt_aci(aci)?,
++            },
++        )
++    }
++
+     /// Create a presentation from a credential for adding a member to a group.
+     ///
+     /// This creates a ZK proof (ExpiringProfileKeyCredentialPresentation) that the
+diff --git a/src/push_service/cdn.rs b/src/push_service/cdn.rs
+index cc76c29..7c04063 100644
+--- a/src/push_service/cdn.rs
++++ b/src/push_service/cdn.rs
+@@ -33,6 +33,22 @@ pub struct AttachmentV2UploadAttributes {
+     signature: String,
+ }
+ 
++impl From<crate::proto::AvatarUploadAttributes>
++    for AttachmentV2UploadAttributes
++{
++    fn from(form: crate::proto::AvatarUploadAttributes) -> Self {
++        Self {
++            key: form.key,
++            credential: form.credential,
++            acl: form.acl,
++            algorithm: form.algorithm,
++            date: form.date,
++            policy: form.policy,
++            signature: form.signature,
++        }
++    }
++}
++
+ #[derive(Debug, Deserialize)]
+ #[serde(rename_all = "camelCase")]
+ pub struct AttachmentUploadForm {
+diff --git a/src/push_service/mod.rs b/src/push_service/mod.rs
+index b3d9984..f52ede2 100644
+--- a/src/push_service/mod.rs
++++ b/src/push_service/mod.rs
+@@ -1,3 +1,4 @@
++use base64::prelude::*;
+ use std::{sync::LazyLock, time::Duration};
+ 
+ use crate::{
+@@ -189,6 +190,59 @@ impl PushService {
+         Ok(ws)
+     }
+ 
++    /// v2: under v1 the server answers with an empty body.
++    pub(crate) async fn put_group(
++        &mut self,
++        credentials: HttpAuth,
++        group: crate::proto::Group,
++    ) -> Result<crate::proto::GroupResponse, ServiceError> {
++        use protobuf::ProtobufRequestBuilderExt;
++        self.request(
++            Method::PUT,
++            Endpoint::storage("/v2/groups/"),
++            HttpAuthOverride::Identified(credentials),
++        )?
++        .protobuf(group)
++        .map_err(|_| ServiceError::GroupsV2Error)?
++        .send()
++        .await?
++        .service_error_for_status()
++        .await?
++        .protobuf()
++        .await
++    }
++
++    /// The invite link's password lets a non-member in, or ask in. v2: under
++    /// v1 the server answers with the bare `GroupChange`.
++    pub(crate) async fn patch_group(
++        &mut self,
++        credentials: HttpAuth,
++        actions: crate::proto::group_change::Actions,
++        invite_link_password: Option<&[u8]>,
++    ) -> Result<crate::proto::GroupChangeResponse, ServiceError> {
++        use protobuf::ProtobufRequestBuilderExt;
++        let path = match invite_link_password {
++            Some(password) => format!(
++                "/v2/groups/?inviteLinkPassword={}",
++                BASE64_URL_SAFE_NO_PAD.encode(password)
++            ),
++            None => "/v2/groups/".into(),
++        };
++        self.request(
++            Method::PATCH,
++            Endpoint::storage(path),
++            HttpAuthOverride::Identified(credentials),
++        )?
++        .protobuf(actions)
++        .map_err(|_| ServiceError::GroupsV2Error)?
++        .send()
++        .await?
++        .service_error_for_status()
++        .await?
++        .protobuf()
++        .await
++    }
++
+     pub(crate) async fn get_group(
+         &mut self,
+         credentials: HttpAuth,
+@@ -205,6 +259,44 @@ impl PushService {
+         .protobuf()
+         .await
+     }
++
++    pub(crate) async fn get_group_join_info(
++        &mut self,
++        credentials: HttpAuth,
++        invite_link_password: &[u8],
++    ) -> Result<crate::proto::GroupJoinInfo, ServiceError> {
++        self.request(
++            Method::GET,
++            Endpoint::storage(format!(
++                "/v1/groups/join/{}",
++                BASE64_URL_SAFE_NO_PAD.encode(invite_link_password)
++            )),
++            HttpAuthOverride::Identified(credentials),
++        )?
++        .send()
++        .await?
++        .service_error_for_status()
++        .await?
++        .protobuf()
++        .await
++    }
++
++    pub(crate) async fn get_group_avatar_upload_form(
++        &mut self,
++        credentials: HttpAuth,
++    ) -> Result<crate::proto::AvatarUploadAttributes, ServiceError> {
++        self.request(
++            Method::GET,
++            Endpoint::storage("/v1/groups/avatar/form"),
++            HttpAuthOverride::Identified(credentials),
++        )?
++        .send()
++        .await?
++        .service_error_for_status()
++        .await?
++        .protobuf()
++        .await
++    }
+ }
+ 
+ pub(crate) mod protobuf {
+diff --git a/src/websocket/profile.rs b/src/websocket/profile.rs
+index a04d4a5..1a48913 100644
+--- a/src/websocket/profile.rs
++++ b/src/websocket/profile.rs
+@@ -114,6 +114,69 @@ impl SignalWebSocket<websocket::Identified> {
+             .await
+     }
+ 
++    /// Needed to add someone to a group.
++    pub async fn retrieve_expiring_profile_key_credential<
++        R: rand::Rng + rand::CryptoRng,
++    >(
++        &mut self,
++        csprng: &mut R,
++        address: Aci,
++        profile_key: zkgroup::profiles::ProfileKey,
++        server_public_params: &zkgroup::ServerPublicParams,
++    ) -> Result<zkgroup::profiles::ExpiringProfileKeyCredential, ServiceError>
++    {
++        #[derive(Deserialize)]
++        struct CredentialProfile {
++            #[serde(default, with = "serde_optional_base64")]
++            credential: Option<Vec<u8>>,
++        }
++        let mut randomness = [0u8; 32];
++        csprng.fill_bytes(&mut randomness);
++        let context = server_public_params
++            .create_profile_key_credential_request_context(
++                randomness,
++                address,
++                profile_key,
++            );
++        let request = hex::encode(bincode::serialize(&context.get_request())?);
++        let version =
++            bincode::serialize(&profile_key.get_profile_key_version(address))?;
++        let version = std::str::from_utf8(&version)
++            .expect("hex encoded profile key version");
++        let path = format!(
++            "/v1/profile/{}/{}/{}?credentialType=expiringProfileKey",
++            address.service_id_string(),
++            version,
++            request
++        );
++        let profile: CredentialProfile = self
++            .http_request(Method::GET, path)?
++            .send()
++            .await?
++            .service_error_for_status()
++            .await?
++            .json()
++            .await?;
++        let response =
++            profile.credential.ok_or(ServiceError::InvalidFrame {
++                reason: "no profile key credential in the profile",
++            })?;
++        let response: zkgroup::profiles::ExpiringProfileKeyCredentialResponse =
++            zkgroup::deserialize(&response)?;
++        let now = std::time::SystemTime::now()
++            .duration_since(std::time::UNIX_EPOCH)
++            .expect("after 1970")
++            .as_secs();
++        Ok(
++            server_public_params.receive_expiring_profile_key_credential(
++                &context,
++                &response,
++                // Not truncated to the day: zkgroup refuses expiry more than 7 days ahead.
++                zkgroup::Timestamp::from_epoch_seconds(now),
++            )?,
++        )
++    }
++
+     /// Writes a profile and returns the avatar URL, if one was provided.
+     ///
+     /// The name, about and emoji fields are encrypted with an [`ProfileCipher`][struct@crate::profile_cipher::ProfileCipher].

@@ -9,13 +9,15 @@ use copiale_core::{
     Attachment, AttachmentId, AttachmentSource, BackendError, ChatState, Command, Contact, Content,
     ConversationId, ConversationSummary, DELETE_WINDOW, Direction, EDIT_WINDOW, Event, Identity,
     MAX_ATTACHMENT_SIZE, MAX_ATTACHMENTS, MAX_SENT_EDITS, Message, MessageBody, MessageId,
-    MessageStatus, NewAttachment, Peer, ServiceId, TYPING_TIMEOUT, Timestamp, Verification,
+    MessageStatus, NewAttachment, Peer, PhoneNumber, ServiceId, TYPING_TIMEOUT, Timestamp,
+    Verification,
 };
 use url::Url;
 
 use super::content::{placeholders, quote_line, system_lines};
 use super::media::{self, downloadable, saveable, viewable};
 use super::new_chat::{Candidate, candidates};
+use super::new_group::{GroupStep, NewGroup};
 use super::palette::{self, Entry, PaletteAction};
 use super::text::{isolate, link_target, visible};
 use super::time::{LocalClock, countdown, countdown_changes_in};
@@ -127,12 +129,16 @@ pub struct RequestBanner {
     pub text: String,
     /// Offers unblocking, rather than accepting and blocking.
     pub blocked: bool,
+    /// The group was ended: nothing to answer.
+    pub ended: bool,
 }
 
 /// What covers the window, taking the keyboard.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Overlay {
+    /// Its first entry starts a new group.
     NewChat,
+    NewGroup,
     Palette,
     Settings,
     /// An account's safety number.
@@ -217,6 +223,9 @@ pub struct Chat {
     picker: Picker,
     /// Chosen in the picker; opens once its conversation exists.
     pending_peer: Option<ServiceId>,
+    /// The new group picker's members and name, kept while creating even if
+    /// the picker closes.
+    new_group: NewGroup,
     /// A conversation for the view to open.
     requested_open: Option<ConversationId>,
     /// The last failure to read or write local data, until dismissed: what
@@ -336,6 +345,7 @@ impl Chat {
             overlay: None,
             picker: Picker::default(),
             pending_peer: None,
+            new_group: NewGroup::default(),
             requested_open: None,
             storage_error: None,
             identities: HashMap::new(),
@@ -595,8 +605,24 @@ impl Chat {
             }
             Event::Contacts(contacts) => {
                 self.contacts = contacts.clone();
-                if self.new_chat_open() {
-                    self.picker.selected = 0;
+                if matches!(self.overlay, Some(Overlay::NewChat | Overlay::NewGroup)) {
+                    self.picker.selected = self.first_entry();
+                }
+            }
+            Event::GroupCreated(id) => {
+                if self.new_group.finished(None) {
+                    if self.overlay == Some(Overlay::NewGroup) {
+                        self.overlay = None;
+                    }
+                    self.new_group = NewGroup::default();
+                    self.requested_open = Some(*id);
+                }
+            }
+            Event::GroupNotCreated(error) => {
+                if self.new_group.finished(Some(error.to_string()))
+                    && self.overlay != Some(Overlay::NewGroup)
+                {
+                    self.storage_error = Some(format!("Creating the group failed: {error}"));
                 }
             }
             Event::Messages {
@@ -831,6 +857,17 @@ impl Chat {
     /// Opens the new chat picker; refreshes contacts.
     pub fn start_new_chat(&mut self) -> Command {
         self.open_overlay(Overlay::NewChat);
+        self.picker.selected = self.first_entry();
+        Command::LoadContacts
+    }
+
+    /// Opens the new group picker, empty, unless a group is being
+    /// created; refreshes contacts.
+    pub fn start_new_group(&mut self) -> Command {
+        if !self.new_group.creating() {
+            self.new_group = NewGroup::default();
+        }
+        self.open_overlay(Overlay::NewGroup);
         Command::LoadContacts
     }
 
@@ -843,13 +880,25 @@ impl Chat {
         self.overlay == Some(Overlay::NewChat)
     }
 
+    /// The new group picker's state, while open.
+    pub fn new_group(&self) -> Option<&NewGroup> {
+        (self.overlay == Some(Overlay::NewGroup)).then_some(&self.new_group)
+    }
+
     /// Sets the open picker's query, highlighting the best match.
     pub fn set_picker_query(&mut self, query: &str) {
         self.picker.query = query.into();
-        self.picker.selected = 0;
+        self.picker.selected = self.first_entry();
     }
 
-    /// Contacts matching the picker's query, best first.
+    /// The open picker's best match: the new chat picker's first contact
+    /// if any, after the new group entry.
+    fn first_entry(&self) -> usize {
+        usize::from(self.new_chat_open() && !self.new_chat_candidates().is_empty())
+    }
+
+    /// Contacts matching the picker's query, best first. They follow the new
+    /// group entry, so contact `ix` is entry `ix + 1`.
     pub fn new_chat_candidates(&self) -> Vec<Candidate<'_>> {
         if !self.new_chat_open() {
             return Vec::new();
@@ -859,16 +908,31 @@ impl Chat {
         })
     }
 
+    /// Contacts matching the new group picker's query, best first.
+    pub fn new_group_candidates(&self) -> Vec<Candidate<'_>> {
+        match self.new_group() {
+            Some(group) if group.step() == GroupStep::Members => {
+                candidates(&self.contacts, &self.picker.query, |_| false)
+            }
+            _ => Vec::new(),
+        }
+    }
+
     /// The open picker's highlighted entry.
     pub fn picker_selected(&self) -> Option<usize> {
-        matches!(self.overlay, Some(Overlay::NewChat | Overlay::Palette))
-            .then_some(self.picker.selected)
+        let picking = match self.overlay {
+            Some(Overlay::NewChat | Overlay::Palette) => true,
+            Some(Overlay::NewGroup) => self.new_group.step() == GroupStep::Members,
+            _ => false,
+        };
+        picking.then_some(self.picker.selected)
     }
 
     /// Moves the open picker's highlight, stopping at the ends.
     pub fn picker_step(&mut self, step: isize) {
         let count = match self.overlay {
-            Some(Overlay::NewChat) => self.new_chat_candidates().len(),
+            Some(Overlay::NewChat) => self.new_chat_candidates().len() + 1,
+            Some(Overlay::NewGroup) => self.new_group_candidates().len(),
             Some(Overlay::Palette) => self.palette_entries().len(),
             _ => return,
         };
@@ -876,15 +940,19 @@ impl Chat {
         self.picker.selected = self.picker.selected.saturating_add_signed(step).min(last);
     }
 
-    /// Picks candidate `ix`, or the highlighted one, and closes the
-    /// picker: its chat opens through [`Self::take_requested_open`], once
-    /// the core has created it if new.
+    /// Picks entry `ix`, or the highlighted one. The first opens the new
+    /// group picker; the others close the picker, and their chat opens
+    /// through [`Self::take_requested_open`], once the core has created it
+    /// if new.
     pub fn choose_new_chat(&mut self, ix: Option<usize>) -> Option<Command> {
         if !self.new_chat_open() {
             return None;
         }
         let ix = ix.or(self.picker_selected())?;
-        let peer = self.new_chat_candidates().get(ix)?.contact.id;
+        let Some(contact) = ix.checked_sub(1) else {
+            return Some(self.start_new_group());
+        };
+        let peer = self.new_chat_candidates().get(contact)?.contact.id;
         self.overlay = None;
         match self.chat_with(peer) {
             Some(id) => {
@@ -896,6 +964,77 @@ impl Chat {
                 Some(Command::OpenConversation(peer))
             }
         }
+    }
+
+    /// Adds candidate `ix`, or the highlighted one, to the new group, or
+    /// takes them out; `false` if there is none.
+    pub fn toggle_group_member(&mut self, ix: Option<usize>) -> bool {
+        let Some(ix) = ix.or(self.picker_selected()) else {
+            return false;
+        };
+        let Some(id) = self
+            .new_group_candidates()
+            .get(ix)
+            .map(|candidate| candidate.contact.id)
+        else {
+            return false;
+        };
+        self.new_group.toggle(id);
+        true
+    }
+
+    pub fn remove_group_member(&mut self, id: ServiceId) {
+        if self.new_group().is_some() {
+            self.new_group.remove(id);
+        }
+    }
+
+    /// Goes on to naming the new group, once someone is picked.
+    pub fn new_group_next(&mut self) -> bool {
+        self.new_group().is_some() && self.new_group.next()
+    }
+
+    /// Goes back to picking members; `false` if already there, or the
+    /// picker isn't open.
+    pub fn new_group_back(&mut self) -> bool {
+        let back = self.new_group().is_some() && self.new_group.back();
+        if back {
+            self.picker = Picker::default();
+        }
+        back
+    }
+
+    pub fn set_group_name(&mut self, name: &str) {
+        if self.new_group().is_some() {
+            self.new_group.set_name(name);
+        }
+    }
+
+    /// Creates the new group once named: it opens once created, else the
+    /// picker shows why not.
+    pub fn create_group(&mut self) -> Option<Command> {
+        self.new_group()?;
+        self.new_group.create()
+    }
+
+    /// A picked member's name, else number.
+    pub fn contact_label(&self, id: ServiceId) -> String {
+        self.contacts
+            .iter()
+            .find(|contact| contact.id == id)
+            .and_then(|contact| {
+                let phone = contact.phone.as_ref().map(PhoneNumber::as_str);
+                contact.name.as_deref().or(phone).map(str::to_owned)
+            })
+            .unwrap_or_else(|| self.peer_name(id))
+    }
+
+    /// Whether `id` would be invited rather than added: their profile key
+    /// is unknown.
+    pub fn invite_only(&self, id: ServiceId) -> bool {
+        self.contacts
+            .iter()
+            .any(|contact| contact.id == id && contact.invite_only)
     }
 
     /// Opens the palette, or closes it if open.
@@ -951,9 +1090,17 @@ impl Chat {
         }
     }
 
-    /// Why the open chat has no composer, while it's a request or blocked.
+    /// Why the open chat has no composer, while it's a request, blocked or
+    /// an ended group.
     pub fn request_banner(&self) -> Option<RequestBanner> {
         let summary = self.open_conversation()?;
+        if summary.ended {
+            return Some(RequestBanner {
+                text: "This group was ended. No one can send messages.".into(),
+                blocked: false,
+                ended: true,
+            });
+        }
         let group = matches!(summary.peer, Peer::Group(_));
         let name = isolate(&title(summary));
         let text = match (summary.state, group) {
@@ -974,6 +1121,7 @@ impl Chat {
         Some(RequestBanner {
             text,
             blocked: summary.state == ChatState::Blocked,
+            ended: false,
         })
     }
 
@@ -1777,6 +1925,7 @@ mod tests {
             state: ChatState::Accepted,
             title: title.map(Into::into),
             members: Vec::new(),
+            ended: false,
             last_activity: Some(Timestamp::from_millis(activity)),
             unread,
             last_message: None,
@@ -2696,6 +2845,7 @@ mod tests {
             id: peer(n),
             name: name.map(Into::into),
             phone: phone.map(copiale_core::PhoneNumber::new),
+            invite_only: false,
         }
     }
 
@@ -2744,19 +2894,21 @@ mod tests {
 
         chat.set_picker_query("zz");
         assert!(chat.new_chat_candidates().is_empty());
-        assert!(chat.choose_new_chat(None).is_none());
+        assert_eq!(chat.picker_selected(), Some(0), "the new group entry");
     }
 
     #[test]
     fn the_picker_highlight_moves_within_the_list() {
         let mut chat = picking();
-        assert_eq!(chat.picker_selected(), Some(0));
+        assert_eq!(chat.picker_selected(), Some(1), "the first contact");
+        chat.picker_step(-1);
+        assert_eq!(chat.picker_selected(), Some(0), "the new group entry");
         chat.picker_step(-1);
         assert_eq!(chat.picker_selected(), Some(0));
         chat.picker_step(5);
-        assert_eq!(chat.picker_selected(), Some(2));
+        assert_eq!(chat.picker_selected(), Some(3));
         chat.set_picker_query("b");
-        assert_eq!(chat.picker_selected(), Some(0), "a new query starts over");
+        assert_eq!(chat.picker_selected(), Some(1), "a new query starts over");
         chat.close_overlay();
         assert!(!chat.new_chat_open());
         assert_eq!(chat.picker_selected(), None);
@@ -2765,7 +2917,7 @@ mod tests {
     #[test]
     fn choosing_an_existing_chat_opens_it() {
         let mut chat = picking();
-        assert!(chat.choose_new_chat(Some(0)).is_none());
+        assert!(chat.choose_new_chat(Some(1)).is_none());
         assert!(!chat.new_chat_open());
         assert_eq!(chat.take_requested_open(), Some(ConversationId::new(1)));
         assert_eq!(chat.take_requested_open(), None);
@@ -2940,6 +3092,136 @@ mod tests {
         chat.picker_step(3);
         assert_eq!(chat.picker_selected(), Some(0), "stops at the end");
         assert_eq!(chat.choose_palette(None), Some(PaletteAction::Quit));
+    }
+
+    /// The new group picker, from the new chat picker; Bob (3) is
+    /// invite-only.
+    fn grouping() -> Chat {
+        let mut chat = picking();
+        chat.apply(
+            &Event::Contacts(vec![
+                contact(1, Some("Alice"), Some("+14155550123")),
+                Contact {
+                    invite_only: true,
+                    ..contact(3, Some("Bob Builder"), None)
+                },
+                contact(4, None, Some("+14155550100")),
+            ]),
+            true,
+        );
+        assert!(matches!(
+            chat.choose_new_chat(Some(0)),
+            Some(Command::LoadContacts)
+        ));
+        assert_eq!(chat.overlay(), Some(Overlay::NewGroup));
+        chat
+    }
+
+    fn group_labels(chat: &Chat) -> Vec<String> {
+        chat.new_group_candidates()
+            .into_iter()
+            .map(|candidate| candidate.label)
+            .collect()
+    }
+
+    #[test]
+    fn the_new_group_picker_picks_members_then_a_name() {
+        let mut chat = grouping();
+        assert_eq!(
+            group_labels(&chat),
+            ["Alice", "Bob Builder", "+14155550100"]
+        );
+        assert_eq!(chat.picker_selected(), Some(0));
+        assert!(!chat.new_group_next(), "nobody picked");
+
+        chat.set_picker_query("bb");
+        assert!(chat.toggle_group_member(None));
+        chat.set_picker_query("");
+        assert!(chat.toggle_group_member(Some(0)));
+        assert!(chat.toggle_group_member(Some(2)));
+        assert!(chat.toggle_group_member(Some(2)), "unpicked");
+        assert!(!chat.toggle_group_member(Some(3)));
+        assert_eq!(chat.new_group().unwrap().members(), [peer(3), peer(1)]);
+        assert!(chat.invite_only(peer(3)));
+        assert!(!chat.invite_only(peer(1)));
+        assert_eq!(chat.contact_label(peer(4)), "+14155550100");
+        chat.remove_group_member(peer(1));
+        chat.toggle_group_member(Some(0));
+
+        assert!(chat.new_group_next());
+        assert_eq!(chat.new_group().unwrap().step(), GroupStep::Name);
+        assert_eq!(chat.picker_selected(), None);
+        assert!(chat.new_group_candidates().is_empty());
+        assert!(chat.create_group().is_none(), "no name yet");
+        chat.set_group_name("Trip");
+        assert!(chat.new_group_back());
+        assert_eq!(chat.new_group().unwrap().name(), "Trip", "kept");
+        assert!(!chat.new_group_back());
+        chat.new_group_next();
+        assert!(matches!(
+            chat.create_group(),
+            Some(Command::CreateGroup { title, members })
+                if title == "Trip" && members == [peer(3), peer(1)]
+        ));
+        assert!(chat.create_group().is_none(), "once");
+    }
+
+    #[test]
+    fn a_created_group_opens() {
+        let mut chat = grouping();
+        chat.toggle_group_member(Some(0));
+        chat.new_group_next();
+        chat.set_group_name("Trip");
+        chat.create_group();
+
+        chat.apply(
+            &Event::GroupNotCreated(BackendError::network("offline")),
+            true,
+        );
+        let group = chat.new_group().unwrap();
+        assert_eq!(group.error(), Some("offline"));
+        assert!(!group.creating());
+        assert!(chat.create_group().is_some());
+
+        let id = ConversationId::new(9);
+        chat.apply(&Event::GroupCreated(id), true);
+        assert_eq!(chat.overlay(), None);
+        assert_eq!(chat.take_requested_open(), Some(id));
+        chat.start_new_group();
+        assert!(
+            chat.new_group().unwrap().members().is_empty(),
+            "starts over"
+        );
+        chat.apply(&Event::GroupCreated(ConversationId::new(10)), true);
+        assert_eq!(chat.take_requested_open(), None, "not ours");
+    }
+
+    #[test]
+    fn a_group_created_after_closing_the_picker_still_opens() {
+        let mut chat = grouping();
+        chat.toggle_group_member(Some(0));
+        chat.new_group_next();
+        chat.set_group_name("Trip");
+        chat.create_group();
+        chat.close_overlay();
+
+        chat.start_new_group();
+        assert!(chat.new_group().unwrap().creating(), "kept while creating");
+        chat.close_overlay();
+        chat.apply(
+            &Event::GroupNotCreated(BackendError::network("offline")),
+            true,
+        );
+        assert!(chat.storage_error().unwrap().contains("offline"));
+        chat.start_new_group();
+        chat.toggle_group_member(Some(0));
+        chat.new_group_next();
+        chat.set_group_name("Trip");
+        chat.create_group();
+        chat.close_overlay();
+        let id = ConversationId::new(9);
+        chat.apply(&Event::GroupCreated(id), true);
+        assert_eq!(chat.take_requested_open(), Some(id));
     }
 
     #[test]
@@ -3198,6 +3480,28 @@ mod tests {
                  its members."
                     .into()
             )
+        );
+    }
+
+    #[test]
+    fn ended_groups_explain_why_nothing_can_be_sent() {
+        let mut chat = chat();
+        let group = ConversationSummary {
+            peer: Peer::Group(GroupMasterKey::new([5; 32]).id()),
+            state: ChatState::Request,
+            ended: true,
+            ..summary(5, NOW, 0, Some("Dev"))
+        };
+        chat.apply(&Event::Conversations(vec![group]), true);
+        chat.open(ConversationId::new(5));
+
+        assert_eq!(
+            chat.request_banner(),
+            Some(RequestBanner {
+                text: "This group was ended. No one can send messages.".into(),
+                blocked: false,
+                ended: true,
+            })
         );
     }
 

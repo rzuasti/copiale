@@ -270,6 +270,7 @@ fn summary(id: i64, name: &str, unread: u32) -> ConversationSummary {
         state: ChatState::Accepted,
         title: Some(name.into()),
         members: Vec::new(),
+        ended: false,
         last_activity: Some(Timestamp::from_millis(1_000 - id as u64)),
         unread,
         last_message: None,
@@ -1626,6 +1627,7 @@ fn contact(id: i64, name: &str) -> Contact {
         id: peer(id),
         name: Some(name.into()),
         phone: None,
+        invite_only: false,
     }
 }
 
@@ -1651,7 +1653,7 @@ fn new_chat_picks_a_contact_from_the_keyboard(cx: &mut TestAppContext) {
         let chat = ui.shell.read(cx).chat().unwrap().read(cx).chat();
         chat.picker_selected()
     });
-    assert_eq!(selected, Some(1));
+    assert_eq!(selected, Some(2), "after the new group entry");
 
     ui.type_text("cd", cx);
     ui.frame(cx);
@@ -1679,6 +1681,88 @@ fn new_chat_picks_a_contact_from_the_keyboard(cx: &mut TestAppContext) {
         })
         .unwrap();
     assert!(composer_focused);
+}
+
+#[gpui_kit::test]
+fn new_group_picks_members_and_a_name_from_the_keyboard(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.event(
+        Event::Contacts(vec![contact(1, "Alice"), contact(3, "Carol Danvers")]),
+        cx,
+    );
+
+    ui.press("secondary-n", cx);
+    ui.core.take();
+    ui.press("up", cx);
+    ui.press("enter", cx);
+    assert_eq!(overlay(&ui, cx), Some(Overlay::NewGroup));
+    assert!(matches!(ui.core.take().as_slice(), [Command::LoadContacts]));
+
+    ui.press("space", cx);
+    ui.type_text("cd", cx);
+    ui.frame(cx);
+    assert!(!ui.shows(("member", 1u64), cx), "only Carol matches");
+    ui.press("space", cx);
+    ui.frame(cx);
+    assert!(ui.shows(("member", 1u64), cx), "the query cleared");
+    let members = cx.update(|cx| {
+        let chat = ui.shell.read(cx).chat().unwrap().read(cx).chat();
+        chat.new_group().unwrap().members().to_vec()
+    });
+    assert_eq!(members, [peer(1), peer(3)]);
+
+    ui.press("enter", cx);
+    assert!(ui.shows("group-joining", cx));
+    ui.type_text("Trip", cx);
+    ui.press("escape", cx);
+    assert!(ui.shows(("member", 0u64), cx), "back to the members");
+    ui.press("enter", cx);
+    ui.press("enter", cx);
+    assert!(matches!(
+        ui.core.take().as_slice(),
+        [Command::CreateGroup { title, members }]
+            if title == "Trip" && *members == [peer(1), peer(3)]
+    ));
+
+    // The core created it; it opens, ready to type in.
+    ui.event(Event::ConversationUpdated(summary(9, "Trip", 0)), cx);
+    ui.event(Event::GroupCreated(ConversationId::new(9)), cx);
+    assert_eq!(overlay(&ui, cx), None);
+    assert_eq!(open_id(&ui, cx), Some(ConversationId::new(9)));
+    let composer_focused = cx
+        .update_window(ui.window(), |_, window, cx| {
+            let chat = ui.shell.read(cx).chat().unwrap().read(cx);
+            chat.composer().focus_handle(cx).is_focused(window)
+        })
+        .unwrap();
+    assert!(composer_focused);
+}
+
+#[gpui_kit::test]
+fn new_group_opens_from_its_shortcut_and_shows_failures(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.event(Event::Contacts(vec![contact(1, "Alice")]), cx);
+
+    ui.press("secondary-shift-n", cx);
+    assert!(ui.shows("new-group", cx));
+    ui.click(("member", 0u64), cx);
+    assert!(ui.shows(("group-chip", 1u64), cx));
+    ui.press("enter", cx);
+    ui.type_text("Trip", cx);
+    ui.press("enter", cx);
+    ui.core.take();
+    ui.event(Event::GroupNotCreated(BackendError::network("offline")), cx);
+    assert_eq!(overlay(&ui, cx), Some(Overlay::NewGroup));
+    let error = cx.update(|cx| {
+        let chat = ui.shell.read(cx).chat().unwrap().read(cx).chat();
+        chat.new_group().unwrap().error().map(str::to_owned)
+    });
+    assert_eq!(error.as_deref(), Some("offline"));
+    ui.press("enter", cx);
+    assert!(matches!(
+        ui.core.take().as_slice(),
+        [Command::CreateGroup { .. }]
+    ));
 }
 
 #[gpui_kit::test]
@@ -1889,6 +1973,31 @@ fn requests_are_answered_from_the_banner(cx: &mut TestAppContext) {
 
     assert!(!ui.shows("request-banner", cx));
     assert!(composer_focused(&ui, cx));
+}
+
+#[gpui_kit::test]
+fn ended_groups_show_a_banner_without_answers(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.event(alice_in(ChatState::Request), cx);
+    ui.open_alice(cx);
+    let Event::ConversationUpdated(summary) = alice_in(ChatState::Request) else {
+        unreachable!();
+    };
+    ui.event(
+        Event::ConversationUpdated(ConversationSummary {
+            ended: true,
+            ..summary
+        }),
+        cx,
+    );
+    ui.frame(cx);
+
+    assert!(ui.shows("request-banner", cx));
+    assert!(!ui.shows("accept-request", cx));
+    assert!(!composer_focused(&ui, cx));
+    ui.press("a", cx);
+    ui.press("d", cx);
+    assert!(ui.core.take().is_empty(), "nothing to answer");
 }
 
 #[gpui_kit::test]

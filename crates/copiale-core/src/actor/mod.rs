@@ -98,6 +98,17 @@ pub enum Command {
     /// Finds or creates the 1:1 conversation with an account; answered with
     /// [`Event::ConversationUpdated`].
     OpenConversation(ServiceId),
+    /// Creates a group with this account as admin, and 1 to
+    /// [`MAX_GROUP_MEMBERS`] others; those whose profile key is unknown are
+    /// invited. The title is cleaned and at most [`MAX_GROUP_TITLE`]
+    /// graphemes. Needs the server: [`Event::GroupCreated`] or
+    /// [`Event::GroupNotCreated`]. One at a time; ignored while one runs.
+    ///
+    /// [`MAX_GROUP_TITLE`]: crate::text::MAX_GROUP_TITLE
+    CreateGroup {
+        title: String,
+        members: Vec<ServiceId>,
+    },
     /// Answered with [`Event::Conversations`].
     LoadConversations,
     /// Answered with [`Event::Contacts`].
@@ -197,6 +208,13 @@ pub enum Event {
     Contacts(Vec<Contact>),
     /// Answers [`Command::LoadRecentEmoji`].
     RecentEmoji(RecentEmoji),
+    /// [`Command::CreateGroup`] made this conversation, accepted, after
+    /// [`Event::MessageAdded`] for the line saying so and
+    /// [`Event::ConversationUpdated`].
+    GroupCreated(ConversationId),
+    /// [`Command::CreateGroup`] failed. Past a timeout, the group may exist
+    /// anyway.
+    GroupNotCreated(BackendError),
     /// A page of messages, oldest first. Answers [`Command::LoadMessages`].
     Messages {
         conversation: ConversationId,
@@ -292,6 +310,10 @@ pub const MAX_RECENT_EMOJI: usize = 32;
 /// How long after sending our message it may be deleted for everyone.
 pub const DELETE_WINDOW: Duration = Duration::from_secs(24 * 3600);
 
+/// Most members a new group may have besides this account; Signal's
+/// limit is 1001 with it.
+pub const MAX_GROUP_MEMBERS: usize = 1000;
+
 /// How long a typing indicator lasts without being renewed.
 pub const TYPING_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -358,6 +380,8 @@ pub struct CoreOptions {
     /// How long an outgoing message may wait for a connection before it
     /// fails.
     pub send_timeout: Duration,
+    /// How long creating a group may take.
+    pub group_timeout: Duration,
     /// How long losing the connection, or stopping, waits for what was
     /// already received to be stored; whatever is left after it is lost.
     pub drain_timeout: Duration,
@@ -379,6 +403,7 @@ impl Default for CoreOptions {
             probe_interval: Duration::from_secs(20),
             probe_timeout: Duration::from_secs(10),
             send_timeout: Duration::from_secs(600),
+            group_timeout: Duration::from_secs(120),
             drain_timeout: Duration::from_secs(10),
             unlink_timeout: Duration::from_secs(10),
             video_helper: None,

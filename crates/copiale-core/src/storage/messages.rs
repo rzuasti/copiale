@@ -25,7 +25,7 @@ use crate::text::clean_name;
 /// string literals, which sqlx requires.
 macro_rules! summary_query {
     () => {
-        "SELECT c.id, c.peer, c.group_id, c.group_title, c.last_activity,
+        "SELECT c.id, c.peer, c.group_id, c.group_title, c.group_ended, c.last_activity,
                 (SELECT count(*) FROM messages u WHERE u.conversation_id = c.id AND u.read = 0)
                     AS unread,
                 m.outgoing, m.body, m.content,
@@ -67,6 +67,7 @@ struct SummaryRow {
     peer: Option<Vec<u8>>,
     group_id: Option<Vec<u8>>,
     group_title: Option<String>,
+    group_ended: bool,
     last_activity: Option<i64>,
     unread: i64,
     /// The last message's; `None` without one.
@@ -315,6 +316,62 @@ impl Database {
         .await
         .map_err(database_error)?;
         Ok(revision.map(|revision| revision.and_then(|r| u32::try_from(r).ok())))
+    }
+
+    /// Marks a known group ended; returns its conversation, or `None` if
+    /// there is no such group or it was already.
+    pub(crate) async fn set_group_ended(
+        &self,
+        key: GroupMasterKey,
+    ) -> Result<Option<ConversationId>, StorageError> {
+        let id: Option<i64> = sqlx::query_scalar(
+            "UPDATE conversations SET group_ended = 1, group_end_checked = 1
+             WHERE group_master_key = ? AND group_ended = 0 RETURNING id",
+        )
+        .bind(key.as_bytes().as_slice())
+        .fetch_optional(&self.app)
+        .await
+        .map_err(database_error)?;
+        Ok(id.map(ConversationId::new))
+    }
+
+    /// Notes the group was fetched, so whether it was ended is known.
+    pub(crate) async fn set_group_end_checked(
+        &self,
+        key: GroupMasterKey,
+    ) -> Result<(), StorageError> {
+        sqlx::query("UPDATE conversations SET group_end_checked = 1 WHERE group_master_key = ?")
+            .bind(key.as_bytes().as_slice())
+            .execute(&self.app)
+            .await
+            .map_err(database_error)?;
+        Ok(())
+    }
+
+    /// Groups not fetched since ends were tracked, so maybe ended unseen.
+    pub(crate) async fn groups_unchecked(&self) -> Result<Vec<GroupMasterKey>, StorageError> {
+        let keys: Vec<Vec<u8>> = sqlx::query_scalar(
+            "SELECT group_master_key FROM conversations
+             WHERE group_master_key IS NOT NULL AND group_end_checked = 0 AND group_ended = 0",
+        )
+        .fetch_all(&self.app)
+        .await
+        .map_err(database_error)?;
+        keys.iter().map(|key| master_key(key)).collect()
+    }
+
+    /// Whether `conversation` is a group that was ended.
+    pub(crate) async fn is_ended(
+        &self,
+        conversation: ConversationId,
+    ) -> Result<bool, StorageError> {
+        let ended: Option<bool> =
+            sqlx::query_scalar("SELECT group_ended FROM conversations WHERE id = ?")
+                .bind(conversation.get())
+                .fetch_optional(&self.app)
+                .await
+                .map_err(database_error)?;
+        Ok(ended.unwrap_or(false))
     }
 
     /// All groups' master keys.
@@ -621,6 +678,7 @@ fn summary(row: SummaryRow, members: Vec<Member>) -> Result<ConversationSummary,
         state,
         title,
         members,
+        ended: row.group_ended,
         last_activity: row.last_activity.map(timestamp),
         unread: u32::try_from(row.unread).unwrap_or(u32::MAX),
         last_message,
@@ -1355,6 +1413,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn groups_end_once_and_are_checked_once() {
+        let (_dir, db) = db().await;
+        let first = add_to_group(&db, group(1), Some(1), 100).await.unwrap();
+        add_to_group(&db, group(2), Some(1), 100).await.unwrap();
+        add_to_group(&db, group(3), Some(1), 100).await.unwrap();
+        assert_eq!(db.groups_unchecked().await.unwrap().len(), 3);
+
+        assert_eq!(
+            db.set_group_ended(group(1).key).await.unwrap(),
+            Some(first.conversation)
+        );
+        assert_eq!(db.set_group_ended(group(1).key).await.unwrap(), None);
+        assert_eq!(db.set_group_ended(group(9).key).await.unwrap(), None);
+        db.set_group_end_checked(group(2).key).await.unwrap();
+
+        assert_eq!(db.groups_unchecked().await.unwrap(), [group(3).key]);
+        assert!(db.is_ended(first.conversation).await.unwrap());
+        let summary = db.conversation(first.conversation).await.unwrap().unwrap();
+        assert!(summary.ended);
+        let conversations = db.conversations().await.unwrap();
+        assert_eq!(conversations.iter().filter(|c| c.ended).count(), 1);
+        db.close().await;
+    }
+
+    #[tokio::test]
     async fn group_state_is_stored() {
         let (_dir, db) = db().await;
         let key = group(1).key;
@@ -1766,6 +1849,7 @@ mod tests {
             state: ChatState::Accepted,
             title: Some("Alice Secret".into()),
             members: Vec::new(),
+            ended: false,
             last_activity: None,
             unread: 0,
             last_message: None,

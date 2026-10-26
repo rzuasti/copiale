@@ -37,6 +37,18 @@ each one once its patches are merged and the pin is updated.
     acknowledged as soon as read off the websocket, so quitting or crashing
     before storing one lost it; `MessagePipe::stream_unacknowledged` yields
     each with an `Acknowledgement` to send once handled. Not upstream yet.
+  - `patches/libsignal-service-groups.patch`, by barafael. Creates and
+    changes groups (`GroupsManager::create_group`), with the expiring
+    profile key credentials members' presentations need, to start new
+    groups. Upstream PR, as is:
+    [whisperfish/libsignal-service-rs#473](https://github.com/whisperfish/libsignal-service-rs/pull/473)
+    at `9df4f5f`.
+  - `patches/libsignal-service-syncable.patch`, by lightclient. Group
+    typing indicators logged "could not create sync message from a group
+    message" on every send; content without a sync transcript skips it.
+    Upstream PR, three hunks applied by hand:
+    [whisperfish/libsignal-service-rs#391](https://github.com/whisperfish/libsignal-service-rs/pull/391)
+    at `0ffcbfa`.
 - **Used via:** `[patch."https://github.com/whisperfish/libsignal-service-rs"]`
   in the root `Cargo.toml`.
 
@@ -87,6 +99,16 @@ libsignal-service git hash back to `nix/package.nix`.
     `Acknowledgement`, to send once the client stored it; messages handled
     in presage are acknowledged there. `DuplicatedMessage` (decrypted
     before, not acknowledged) is skipped quietly. Not upstream yet.
+  - `patches/presage-groups.patch`, by barafael, on top of
+    libsignal-service's. `Manager::create_group` creates a group and
+    tells its members (`change_group`, `join_group` and the rest come
+    along). Upstream PR, with its imports rebased:
+    [whisperfish/presage#448](https://github.com/whisperfish/presage/pull/448)
+    at `c02e4f6`.
+  - `patches/presage-refresh-group-ended.patch`, on top of the others.
+    `Manager::refresh_group` returns the group it fetched, to learn whether
+    an admin ended it, which presage's store doesn't keep. Not upstream
+    yet; belongs in presage#468.
 - **Used via:** `[patch."https://github.com/whisperfish/presage"]` in the
   root `Cargo.toml`.
 

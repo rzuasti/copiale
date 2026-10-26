@@ -1,8 +1,10 @@
 //! Characters that can disguise text: bidi controls and invisible ones,
-//! the longest message body and file name kept, and safe names to save
-//! files as.
+//! the longest message body, file name and group title kept, and safe
+//! names to save files as.
 
 use std::borrow::Cow;
+
+use unicode_segmentation::UnicodeSegmentation as _;
 
 /// Longest message body stored and rendered, in bytes.
 pub const MAX_BODY_BYTES: usize = 64 * 1024;
@@ -65,6 +67,15 @@ pub fn clean_name(name: &str) -> Option<String> {
         .collect();
     let trimmed = cleaned.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_owned())
+}
+
+/// Longest group title, in graphemes, as in Signal.
+pub const MAX_GROUP_TITLE: usize = 32;
+
+/// `title` as [`clean_name`] leaves it; `None` if blank or longer than
+/// [`MAX_GROUP_TITLE`].
+pub fn group_title(title: &str) -> Option<String> {
+    clean_name(title).filter(|title| title.graphemes(true).count() <= MAX_GROUP_TITLE)
 }
 
 /// `body` cut to at most [`MAX_BODY_BYTES`] on a character boundary,
@@ -156,6 +167,15 @@ fn clip(text: &str, max: usize) -> Cow<'_, str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn group_titles_are_cleaned_and_bounded_in_graphemes() {
+        assert_eq!(group_title(" Trip\u{202e} ").as_deref(), Some("Trip"));
+        assert_eq!(group_title(" \u{200b} "), None);
+        let longest = "👩‍👩‍👧".repeat(MAX_GROUP_TITLE);
+        assert_eq!(group_title(&longest).as_deref(), Some(longest.as_str()));
+        assert_eq!(group_title(&format!("{longest}a")), None);
+    }
 
     #[test]
     fn names_lose_bidi_controls_and_invisible_characters() {

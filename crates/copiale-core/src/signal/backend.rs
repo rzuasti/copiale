@@ -40,8 +40,8 @@ use super::errors::{presage_error, storage_service_error, store_error, upload_er
 use super::incoming::{identity_key, incoming, service_id};
 use super::store::AppStore;
 use crate::backend::{
-    Ack, BackendError, Incoming, Linker, PeerIdentity, Resendable, RetryRequest, SignalBackend,
-    StoredChats,
+    Ack, BackendError, CreatedGroup, Incoming, Linker, PeerIdentity, Resendable, RetryRequest,
+    SignalBackend, StoredChats,
 };
 use crate::model::{
     Attachment, BlockedList, ChatRef, Destination, GroupInfo, GroupMasterKey, GroupMembers,
@@ -501,13 +501,45 @@ impl SignalBackend for PresageBackend {
     fn refresh_group(
         &mut self,
         key: GroupMasterKey,
-    ) -> LocalBoxFuture<'static, Result<(), BackendError>> {
+    ) -> LocalBoxFuture<'static, Result<bool, BackendError>> {
         let manager = self.manager.clone();
         async move {
-            manager
+            let group = manager
                 .refresh_group(key.as_bytes())
                 .await
-                .map_err(presage_error)
+                .map_err(presage_error)?;
+            Ok(group.terminated)
+        }
+        .boxed_local()
+    }
+
+    fn create_group(
+        &mut self,
+        title: String,
+        members: Vec<ServiceId>,
+    ) -> LocalBoxFuture<'static, Result<CreatedGroup, BackendError>> {
+        let mut manager = self.manager.clone();
+        async move {
+            let members: Vec<_> = members.iter().map(|id| Aci::from(id.uuid())).collect();
+            let (key, sent_at) = manager
+                .create_group(&title, &members)
+                .await
+                .map_err(presage_error)?;
+            let group = manager
+                .store()
+                .group(key)
+                .await
+                .map_err(store_error)?
+                .ok_or_else(|| BackendError::new("the created group wasn't stored"))?;
+            Ok(CreatedGroup {
+                key: GroupMasterKey::new(key),
+                sent_at: Timestamp::from_millis(sent_at),
+                invited: group
+                    .pending_members
+                    .iter()
+                    .map(|member| ServiceId::new(member.uuid))
+                    .collect(),
+            })
         }
         .boxed_local()
     }

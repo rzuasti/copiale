@@ -207,6 +207,7 @@ fn identifiers_and_secrets_are_redacted_in_logs() {
             id: service_id,
             name: Some("Bob Builder".into()),
         }],
+        ended: false,
         last_activity: None,
         unread: 1,
         last_message: None,

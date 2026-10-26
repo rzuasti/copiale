@@ -49,7 +49,7 @@ Scope, UI design, architecture and work items for the first usable release.
 
 - Sending attachments, reactions, stickers, calls, voice notes.
 - Message history transfer: chats start empty at link time.
-- Group creation and management.
+- Group management. New groups (name and members) can be created.
 - Base16 import, accent override.
 - Global hotkey, notification quick reply.
 - Multiple accounts.
@@ -137,7 +137,7 @@ Scope, UI design, architecture and work items for the first usable release.
   (native on macOS; off with reduced motion).
 - `Ctrl/⌘+K` command palette, over the window like the contact picker:
   fuzzy search over other chats (most recent first, at most 5) and commands
-  with their keys: new chat, settings, theme (opens the theme picker), quit. `Ctrl/⌘+K` again, `Esc` or a click outside
+  with their keys: new chat, new group, settings, theme (opens the theme picker), quit. `Ctrl/⌘+K` again, `Esc` or a click outside
   closes it. One overlay shows at a time.
 - In search, `↑`/`↓` move the highlight and `Enter` opens the chat.
 - Other default bindings:
@@ -145,6 +145,7 @@ Scope, UI design, architecture and work items for the first usable release.
   | Key | Action |
   |---|---|
   | `Ctrl/⌘+N` | New chat |
+  | `Ctrl/⌘+Shift+N` | New group |
   | `Ctrl/⌘+F` | Search chats |
   | `Alt+↑/↓` | Previous/next chat |
   | `Ctrl/⌘+,` | Settings (until #24: points to `config.toml`) |
@@ -174,7 +175,18 @@ Scope, UI design, architecture and work items for the first usable release.
 - `Ctrl/⌘+N` opens a contact picker over the window: fuzzy search by name
   or number, `↑`/`↓` and `Enter` or a click to pick, `Esc` or a click
   outside to close. Picking opens the existing chat, or a new one; chats
-  without messages are listed only while open.
+  without messages are listed only while open. Its first entry, `New
+  group…`, is above the first contact (`↑` reaches it).
+- New group (`Ctrl/⌘+Shift+N`, the new chat picker or the palette): pick
+  members from contacts (`Space` or a click toggles, chips above the query
+  remove them; `invite` marks contacts without a known profile key, who
+  are invited rather than added), `Enter` to name it (up to 32
+  characters), `Enter` to create, `Esc` back. Needs the server: it shows
+  `Creating…`, then opens the chat with `-- you created the group`, or
+  shows the error and keeps the input for `Enter` to retry.
+- Ended groups: `-- alice ended the group`, and the banner "This group
+  was ended. No one can send messages." stands in for the composer, with
+  nothing to answer.
 
 ### Quick mode and background
 

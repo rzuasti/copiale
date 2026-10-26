@@ -22,11 +22,12 @@ pub const APP_ID: &str = "page.codeberg.korba.Copiale";
 
 pub use actor::{
     Command, CoreHandle, CoreOptions, CoreStopped, DELETE_WINDOW, EDIT_WINDOW, Event, Events,
-    MAX_RECENT_EMOJI, MAX_SENT_EDITS, StorageFailure, TYPING_TIMEOUT, spawn, spawn_with_options,
+    MAX_GROUP_MEMBERS, MAX_RECENT_EMOJI, MAX_SENT_EDITS, StorageFailure, TYPING_TIMEOUT, spawn,
+    spawn_with_options,
 };
 pub use backend::{
-    Ack, BackendError, Incoming, Linker, PeerIdentity, Resendable, RetryRequest, SignalBackend,
-    StoredChats, Undecryptable,
+    Ack, BackendError, CreatedGroup, Incoming, Linker, PeerIdentity, Resendable, RetryRequest,
+    SignalBackend, StoredChats, Undecryptable,
 };
 pub use clock::{Clock, SystemClock};
 pub use dirs::{create_private_dir, downloads_dir, runtime_dir};

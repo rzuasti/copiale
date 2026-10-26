@@ -608,6 +608,10 @@ pub enum Unsupported {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GroupUpdate {
+    /// The author created the group.
+    Created,
+    /// The author, an admin, ended the group: no one can send there now.
+    Ended,
     Title(String),
     Description,
     Avatar,
@@ -633,6 +637,8 @@ pub enum GroupUpdate {
 impl fmt::Debug for GroupUpdate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Created => f.write_str("Created"),
+            Self::Ended => f.write_str("Ended"),
             Self::Title(_) => f.write_str("Title"),
             Self::Description => f.write_str("Description"),
             Self::Avatar => f.write_str("Avatar"),
@@ -741,6 +747,8 @@ pub struct Contact {
     /// Contact or profile name, if known.
     pub name: Option<String>,
     pub phone: Option<PhoneNumber>,
+    /// Joins new groups only as invited: their profile key is unknown.
+    pub invite_only: bool,
 }
 
 impl fmt::Debug for Contact {
@@ -749,6 +757,7 @@ impl fmt::Debug for Contact {
             .field("id", &self.id)
             .field("named", &self.name.is_some())
             .field("phone", &self.phone)
+            .field("invite_only", &self.invite_only)
             .finish()
     }
 }
@@ -1007,6 +1016,8 @@ pub struct ConversationSummary {
     pub title: Option<String>,
     /// A group's other members; empty for 1:1.
     pub members: Vec<Member>,
+    /// A group an admin ended: nothing more can be sent there.
+    pub ended: bool,
     /// Local time of the newest message.
     pub last_activity: Option<Timestamp>,
     pub unread: u32,
@@ -1021,6 +1032,7 @@ impl fmt::Debug for ConversationSummary {
             .field("state", &self.state)
             .field("titled", &self.title.is_some())
             .field("members", &self.members)
+            .field("ended", &self.ended)
             .field("last_activity", &self.last_activity)
             .field("unread", &self.unread)
             .field("last_message", &self.last_message)

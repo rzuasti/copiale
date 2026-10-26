@@ -8,15 +8,15 @@ use std::time::Duration;
 
 use copiale_core::storage::{Database, SecretError, SecretStore};
 use copiale_core::{
-    Ack, Attachment, BackendError, BlockedList, ChatRef, Clock, Contact, Destination, GroupInfo,
-    GroupMasterKey, GroupMembers, IdentityKey, Incoming, Linker, MessageBody, Outgoing,
-    PeerIdentity, RemoteAttachment, RequestResponse, Resendable, RetryRequest, SafetyNumber,
-    ServiceId, SignalBackend, StoredChats, Timestamp,
+    Ack, Attachment, BackendError, BlockedList, ChatRef, Clock, Contact, CreatedGroup, Destination,
+    GroupInfo, GroupMasterKey, GroupMembers, IdentityKey, Incoming, Linker, Member, MessageBody,
+    Outgoing, PeerIdentity, RemoteAttachment, RequestResponse, Resendable, RetryRequest,
+    SafetyNumber, ServiceId, SignalBackend, StoredChats, Timestamp,
 };
 use futures::future::LocalBoxFuture;
 use futures::stream::LocalBoxStream;
 use futures::{FutureExt as _, StreamExt as _};
-use presage::libsignal_service::prelude::phonenumber;
+use presage::libsignal_service::prelude::{ProfileKey, phonenumber};
 use presage::model::contacts::Contact as StoredContact;
 use presage::store::ContentsStore as _;
 use presage_store_sqlite::SqliteStore;
@@ -78,6 +78,10 @@ pub fn group_key(n: u8) -> GroupMasterKey {
     GroupMasterKey::new([n; 32])
 }
 
+/// The first group the [`FakeBackend`] creates has key
+/// `group_key(FIRST_CREATED_GROUP)`, the next one the following, and so on.
+pub const FIRST_CREATED_GROUP: u8 = 200;
+
 /// A message, or change to one, the backend was asked to send.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SentText {
@@ -125,6 +129,13 @@ struct State {
     /// Group states on the server, stored once fetched.
     server_groups: HashMap<GroupMasterKey, GroupInfo>,
     group_fetches: usize,
+    /// Groups ended on the server.
+    ended_groups: HashSet<GroupMasterKey>,
+    /// Groups created, with their titles and members.
+    created_groups: Vec<(CreatedGroup, String, Vec<ServiceId>)>,
+    group_creation_failures: VecDeque<BackendError>,
+    /// Accounts whose profile key is unknown, so only invited to new groups.
+    invite_only: HashSet<ServiceId>,
     /// Profile names, known once fetched.
     profile_names: HashMap<ServiceId, String>,
     profiles_fetched: HashSet<ServiceId>,
@@ -644,7 +655,7 @@ impl SignalBackend for FakeBackend {
     fn refresh_group(
         &mut self,
         key: GroupMasterKey,
-    ) -> LocalBoxFuture<'static, Result<(), BackendError>> {
+    ) -> LocalBoxFuture<'static, Result<bool, BackendError>> {
         let (state, changes) = (self.state.clone(), self.changes.clone());
         let offline = self.link.borrow().offline;
         async move {
@@ -659,7 +670,50 @@ impl SignalBackend for FakeBackend {
                     .cloned()
                     .ok_or_else(|| BackendError::new("not a member"))?;
                 state.groups.insert(key, info);
-                Ok(())
+                Ok(state.ended_groups.contains(&key))
+            })
+        }
+        .boxed_local()
+    }
+
+    /// Stores the group, named after no one; fails while offline, and as
+    /// scripted.
+    fn create_group(
+        &mut self,
+        title: String,
+        members: Vec<ServiceId>,
+    ) -> LocalBoxFuture<'static, Result<CreatedGroup, BackendError>> {
+        let (state, changes) = (self.state.clone(), self.changes.clone());
+        let offline = self.link.borrow().offline;
+        async move {
+            if offline {
+                return Err(BackendError::network("offline"));
+            }
+            record(&state, &changes, |state| {
+                if let Some(error) = state.group_creation_failures.pop_front() {
+                    return Err(error);
+                }
+                let key = group_key(FIRST_CREATED_GROUP + state.created_groups.len() as u8);
+                let (invited, added): (Vec<_>, Vec<_>) = members
+                    .iter()
+                    .partition(|id| state.invite_only.contains(id));
+                let info = GroupInfo {
+                    title: title.clone(),
+                    revision: 0,
+                    members: added
+                        .into_iter()
+                        .map(|id| Member { id, name: None })
+                        .collect(),
+                };
+                state.groups.insert(key, info.clone());
+                state.server_groups.insert(key, info);
+                let created = CreatedGroup {
+                    key,
+                    sent_at: Timestamp::now(),
+                    invited,
+                };
+                state.created_groups.push((created.clone(), title, members));
+                Ok(created)
             })
         }
         .boxed_local()
@@ -890,6 +944,30 @@ impl FakeNetwork {
         self.state.lock().unwrap().groups_left.insert(key);
     }
 
+    /// Groups created so far, with their titles and the members asked for.
+    pub fn created_groups(&self) -> Vec<(CreatedGroup, String, Vec<ServiceId>)> {
+        self.state.lock().unwrap().created_groups.clone()
+    }
+
+    /// Fails the next group creation.
+    pub fn fail_next_group_creation(&self, error: BackendError) {
+        self.state
+            .lock()
+            .unwrap()
+            .group_creation_failures
+            .push_back(error);
+    }
+
+    /// Makes new groups invite `id` rather than add them.
+    pub fn set_invite_only(&self, id: ServiceId) {
+        self.state.lock().unwrap().invite_only.insert(id);
+    }
+
+    /// Ends the group on the server, as fetching it then shows.
+    pub fn end_group(&self, key: GroupMasterKey) {
+        self.state.lock().unwrap().ended_groups.insert(key);
+    }
+
     /// Groups fetched from the server so far.
     pub fn group_fetches(&self) -> usize {
         self.state.lock().unwrap().group_fetches
@@ -991,7 +1069,8 @@ impl FakeNetwork {
     }
 
     /// Saves contacts to presage's store, as a sync of all the phone's
-    /// contacts does, and delivers [`Incoming::ContactsSynced`].
+    /// contacts does, and delivers [`Incoming::ContactsSynced`]. Profile
+    /// keys of those not [`Contact::invite_only`] are known.
     ///
     /// Panics before the account is loaded or linked.
     pub async fn sync_contacts(&self, contacts: &[Contact]) {
@@ -1031,6 +1110,15 @@ impl FakeNetwork {
                 avatar: None,
             };
             store.save_contact(&stored).await.expect("contact saved");
+            if !contact.invite_only {
+                let mut bytes = [0; 32];
+                bytes[..16].copy_from_slice(contact.id.uuid().as_bytes());
+                let key = ProfileKey::create(bytes);
+                store
+                    .upsert_profile_key(&contact.id.uuid(), key)
+                    .await
+                    .expect("profile key saved");
+            }
         }
     }
 

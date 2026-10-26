@@ -70,6 +70,8 @@ actions!(
         DeleteForMe,
         Cancel,
         NewChat,
+        NewGroupChat,
+        ToggleMember,
         PickPrevious,
         PickNext,
         TogglePalette,
@@ -124,6 +126,8 @@ const EMOJI_PICKING: &str = "EmojiPicking";
 const EMOJI_GRID: &str = "EmojiGrid";
 /// Key context of the new chat picker and the palette.
 const PICKING: &str = "Picking";
+/// Around the new group picker's member list.
+const GROUP_MEMBERS: &str = "GroupMembers";
 /// Key context of the search box.
 const SEARCHING: &str = "Searching";
 /// Key context of the settings list.
@@ -149,6 +153,7 @@ pub fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("secondary-f", FocusSearch, Some(CONTEXT)),
         KeyBinding::new("secondary-n", NewChat, Some(CONTEXT)),
+        KeyBinding::new("secondary-shift-n", NewGroupChat, Some(CONTEXT)),
         KeyBinding::new("secondary-k", TogglePalette, Some(CONTEXT)),
         KeyBinding::new("secondary-,", OpenSettings, Some(CONTEXT)),
         KeyBinding::new("secondary-e", ToggleEmojiGrid, Some(CONTEXT)),
@@ -160,6 +165,11 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("escape", HideWindow, Some(CONTEXT)),
         KeyBinding::new("up", PickPrevious, Some("Picking > Input")),
         KeyBinding::new("down", PickNext, Some("Picking > Input")),
+        KeyBinding::new(
+            "space",
+            ToggleMember,
+            Some("GroupMembers > Picking > Input"),
+        ),
         KeyBinding::new("up", SettingPrevious, Some("Settings > Input")),
         KeyBinding::new("down", SettingNext, Some("Settings > Input")),
         KeyBinding::new("left", SettingDecrease, Some("Settings > Input")),
@@ -324,6 +334,9 @@ struct Inputs {
     composer: Entity<TextareaState>,
     /// The new chat picker's query.
     new_chat: Entity<InputState>,
+    /// The new group picker's query, and the group's name.
+    group_members: Entity<InputState>,
+    group_name: Entity<InputState>,
     /// The palette's query.
     palette: Entity<InputState>,
     /// The settings list's filter.
@@ -457,6 +470,8 @@ impl ChatView {
             composer
         });
         let new_chat = cx.new(|cx| InputState::new(window, cx).placeholder("New chat with…"));
+        let group_members = cx.new(|cx| InputState::new(window, cx).placeholder("Add members…"));
+        let group_name = cx.new(|cx| InputState::new(window, cx).placeholder("Group name"));
         let palette = cx.new(|cx| InputState::new(window, cx).placeholder("Chat or command…"));
         let settings = cx.new(|cx| InputState::new(window, cx).placeholder("Filter settings…"));
         let picker = cx.new(|cx| InputState::new(window, cx));
@@ -467,6 +482,8 @@ impl ChatView {
             cx.subscribe_in(&picker, window, Self::on_picker_query_event),
             cx.subscribe_in(&search, window, Self::on_search_event),
             cx.subscribe_in(&new_chat, window, Self::on_picker_event),
+            cx.subscribe_in(&group_members, window, Self::on_picker_event),
+            cx.subscribe_in(&group_name, window, Self::on_group_name_event),
             cx.subscribe_in(&palette, window, Self::on_picker_event),
             cx.subscribe_in(&composer, window, Self::on_composer_event),
             cx.observe_window_bounds(window, |view, window, cx| view.resized(window, cx)),
@@ -486,6 +503,8 @@ impl ChatView {
             search,
             composer,
             new_chat,
+            group_members,
+            group_name,
             palette,
             settings,
             picker,
@@ -902,6 +921,13 @@ impl ChatView {
         cx.notify();
     }
 
+    /// Opens the new group picker, with contacts refreshed.
+    fn start_new_group(&mut self, _: &NewGroupChat, window: &mut Window, cx: &mut Context<Self>) {
+        self.core.send(self.chat.start_new_group());
+        self.ready_group_step(window, cx);
+        cx.notify();
+    }
+
     /// Opens the palette, empty.
     fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.chat.open_overlay(Overlay::Palette);
@@ -1251,6 +1277,7 @@ impl Render for ChatView {
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::focus_search))
             .on_action(cx.listener(Self::start_new_chat))
+            .on_action(cx.listener(Self::start_new_group))
             .on_action(cx.listener(Self::toggle_palette))
             .on_action(cx.listener(Self::open_settings))
             .on_action(cx.listener(Self::toggle_emoji_grid))

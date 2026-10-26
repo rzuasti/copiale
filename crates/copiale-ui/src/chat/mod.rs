@@ -8,6 +8,7 @@ mod layout;
 mod media;
 mod model;
 mod new_chat;
+mod new_group;
 mod notices;
 mod palette;
 mod settings_panel;
@@ -23,6 +24,7 @@ pub use model::{
     Viewed, member_list, title,
 };
 pub use new_chat::{Candidate, MAX_CANDIDATES};
+pub use new_group::{GroupStep, NewGroup};
 pub use notices::{Notice, NoticeAction, NoticeKey, Notices};
 pub use palette::{Entry, MAX_CHATS, PaletteAction};
 pub use settings_panel::{
@@ -30,4 +32,4 @@ pub use settings_panel::{
     SettingsPanel, Value,
 };
 pub use time::LocalClock;
-pub use view::{ChatView, FocusSearch, NewChat, init};
+pub use view::{ChatView, FocusSearch, NewChat, NewGroupChat, init};

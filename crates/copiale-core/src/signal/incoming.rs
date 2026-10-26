@@ -680,6 +680,7 @@ fn group_update(change: GroupChange, editor: Aci) -> Option<GroupUpdate> {
         | GroupChange::InviteLinkAccess(_)
         | GroupChange::InviteLinkPassword(_)
         | GroupChange::AnnouncementOnly(_) => GroupUpdate::Settings,
+        GroupChange::TerminateGroup => GroupUpdate::Ended,
         _ => return None,
     })
 }
@@ -1235,6 +1236,21 @@ pub(super) mod tests {
                 GroupUpdate::Removed(ServiceId::new(OTHER)),
                 GroupUpdate::Title("Dev team".into()),
             ]))
+        );
+    }
+
+    #[test]
+    fn ending_a_group_becomes_an_update() {
+        let actions = group_change::Actions {
+            modify_title: None,
+            delete_members: Vec::new(),
+            terminate_group: Some(group_change::actions::TerminateGroupAction {}),
+            ..change_actions(SENDER, "")
+        };
+
+        assert_eq!(
+            data(with_change(4, signed(&actions))),
+            Some(model::Content::GroupChanged(vec![GroupUpdate::Ended]))
         );
     }
 

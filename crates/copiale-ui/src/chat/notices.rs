@@ -282,6 +282,7 @@ mod tests {
             state: ChatState::Accepted,
             title: Some(format!("Contact {n}")),
             members: Vec::new(),
+            ended: false,
             last_activity: Some(Timestamp::from_millis(1)),
             unread,
             last_message: None,

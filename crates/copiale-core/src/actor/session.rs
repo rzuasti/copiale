@@ -22,9 +22,10 @@ use super::probe::{Check, Probe};
 use super::retries::Limiter;
 use super::run::{Core, ignored};
 use super::uploads::{self, Uploads};
-use super::{Command, DELETE_WINDOW, EDIT_WINDOW, Event, MAX_SENT_EDITS};
+use super::{Command, DELETE_WINDOW, EDIT_WINDOW, Event, MAX_GROUP_MEMBERS, MAX_SENT_EDITS};
 use crate::backend::{
-    Ack, BackendError, Incoming, RetryRequest, SignalBackend, StoredChats, Undecryptable,
+    Ack, BackendError, CreatedGroup, Incoming, RetryRequest, SignalBackend, StoredChats,
+    Undecryptable,
 };
 use crate::clock::Clock;
 use crate::model::{
@@ -37,7 +38,7 @@ use crate::model::{
 };
 use crate::outgoing;
 use crate::storage::{Database, Removed, StorageError, StoredFile};
-use crate::text::save_name;
+use crate::text::{group_title, save_name};
 
 /// Why serving the account ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -98,6 +99,13 @@ struct Session<'a, B> {
     /// The Storage Service manifest version last applied.
     storage_version: Option<u64>,
     incoming: Option<LocalBoxStream<'static, (Incoming, Ack)>>,
+    /// Groups to fetch once connected, to learn if they were ended unseen.
+    ends_unchecked: Vec<GroupMasterKey>,
+    /// Results of those fetches, running in the background.
+    ends_checked_tx: UnboundedSender<(GroupMasterKey, Result<bool, BackendError>)>,
+    ends_checked_rx: UnboundedReceiver<(GroupMasterKey, Result<bool, BackendError>)>,
+    /// The group being created.
+    creating: Option<LocalBoxFuture<'static, Result<CreatedGroup, BackendError>>>,
     connecting: Option<LocalBoxFuture<'static, Connecting>>,
     retry_at: Option<Instant>,
     /// Next reconnect delay.
@@ -121,6 +129,7 @@ impl<'a, B: SignalBackend> Session<'a, B> {
     fn new(core: &'a mut Core, db: &'a Database, mut backend: B) -> Self {
         let (contacts_asked_tx, contacts_asked_rx) = unbounded_channel();
         let (stored_tx, stored_rx) = unbounded_channel();
+        let (ends_checked_tx, ends_checked_rx) = unbounded_channel();
         let options = &core.options;
         Self {
             device_name: backend.device_name(),
@@ -147,6 +156,10 @@ impl<'a, B: SignalBackend> Session<'a, B> {
             storage_wanted: false,
             storage_version: None,
             incoming: None,
+            ends_unchecked: Vec::new(),
+            ends_checked_tx,
+            ends_checked_rx,
+            creating: None,
             connecting: None,
             retry_at: Some(Instant::now()),
             delay: options.reconnect_initial,
@@ -216,6 +229,10 @@ impl<'a, B: SignalBackend> Session<'a, B> {
         }
         // Before Storage Service was read, the phone's list is all there is.
         self.blocked_wanted = linked_now || self.storage_version.is_none();
+        match self.db.groups_unchecked().await {
+            Ok(keys) => self.ends_unchecked = keys,
+            Err(error) => self.database_error(error),
+        }
         let me = ChatRef::Contact(self.backend.own_id());
         if let Err(error) = self.db.mark_accepted(me).await {
             self.database_error(error);
@@ -235,6 +252,11 @@ impl<'a, B: SignalBackend> Session<'a, B> {
                 command = self.core.commands.recv(), if !self.stopping => self.command(command).await,
                 result = maybe(&mut self.connecting) => {
                     self.connected(result);
+                    None
+                }
+                result = maybe(&mut self.creating) => {
+                    self.creating = None;
+                    self.group_created(result).await;
                     None
                 }
                 item = next_incoming(&mut self.incoming) => match item {
@@ -260,6 +282,10 @@ impl<'a, B: SignalBackend> Session<'a, B> {
                 }
                 Some(read) = self.stored_rx.recv() => {
                     self.stored_read(read).await;
+                    None
+                }
+                Some((key, result)) = self.ends_checked_rx.recv() => {
+                    self.end_checked(key, result).await;
                     None
                 }
                 check = self.probe.next() => self.probe_check(check).await,
@@ -335,6 +361,7 @@ impl<'a, B: SignalBackend> Session<'a, B> {
                 self.retry_at = Some(Instant::now());
             }
             Some(Command::OpenConversation(peer)) => self.open_conversation(peer).await,
+            Some(Command::CreateGroup { title, members }) => self.create_group(title, members),
             Some(Command::LoadConversations) => self.send_conversations().await,
             Some(Command::LoadContacts) => self.send_contacts().await,
             Some(Command::LoadRecentEmoji) => self.send_recent_emoji().await,
@@ -456,6 +483,7 @@ impl<'a, B: SignalBackend> Session<'a, B> {
                     let request = timed(timeout, self.backend.request_blocked_sync());
                     spawn_logged("requesting the blocked list", request);
                 }
+                self.check_ends(timeout);
                 self.read_storage();
             }
             Err(error) if error.is_unauthorized() => {
@@ -636,6 +664,9 @@ impl<'a, B: SignalBackend> Session<'a, B> {
             }
             Err(error) => return self.database_error(error),
         };
+        if self.group_is_ended(conversation).await {
+            return tracing::debug!("not sending to an ended group");
+        }
         // Replying accepts a request, as in Signal: it shares our profile.
         let chat = chat_of(destination);
         match self.db.is_blocked(chat).await {
@@ -699,6 +730,10 @@ impl<'a, B: SignalBackend> Session<'a, B> {
         match self.db.retry_send(id).await {
             Ok(Some((destination, message))) => {
                 self.emit(Event::MessageUpdated(message.clone()));
+                if self.group_is_ended(message.conversation).await {
+                    let error = BackendError::new("the group was ended");
+                    return self.send_finished(message.id, Err(error)).await;
+                }
                 if self.awaits_confirmation(message.conversation).await {
                     return self
                         .send_finished(message.id, Err(BackendError::untrusted_identity()))
@@ -939,6 +974,175 @@ impl<'a, B: SignalBackend> Session<'a, B> {
         }
     }
 
+    fn create_group(&mut self, title: String, mut members: Vec<ServiceId>) {
+        if self.creating.is_some() {
+            return;
+        }
+        let me = self.backend.own_id();
+        members.retain(|member| *member != me);
+        members.sort_unstable_by_key(ServiceId::uuid);
+        members.dedup();
+        let Some(title) = group_title(&title) else {
+            self.emit(Event::GroupNotCreated(BackendError::new(
+                "no valid group name",
+            )));
+            return;
+        };
+        if members.is_empty() || members.len() > MAX_GROUP_MEMBERS {
+            let error = BackendError::new(format!("a group needs 1 to {MAX_GROUP_MEMBERS} others"));
+            self.emit(Event::GroupNotCreated(error));
+            return;
+        }
+        let create = self.backend.create_group(title, members);
+        let timeout = self.core.options.group_timeout;
+        self.creating = Some(
+            tokio::time::timeout(timeout, create)
+                .map(|result| result.unwrap_or_else(|_| Err(BackendError::network("timed out"))))
+                .boxed_local(),
+        );
+    }
+
+    /// Stores a created group, accepted, with a line saying so.
+    async fn group_created(&mut self, result: Result<CreatedGroup, BackendError>) {
+        let created = match result {
+            Ok(created) => created,
+            Err(error) => {
+                tracing::warn!(%error, "creating a group failed");
+                self.emit(Event::GroupNotCreated(error));
+                return;
+            }
+        };
+        let key = created.key;
+        let destination = Destination::Group(GroupRef { key, revision: 0 });
+        let conversation = match self.store_created(&created, &destination).await {
+            Ok(conversation) => conversation,
+            Err(error) => {
+                self.database_error(error);
+                let error = BackendError::new("created, but storing the group failed");
+                self.emit(Event::GroupNotCreated(error));
+                return;
+            }
+        };
+        let updates = std::iter::once(GroupUpdate::Created)
+            .chain(created.invited.iter().copied().map(GroupUpdate::Invited))
+            .collect();
+        let line = self
+            .db
+            .add_message(
+                &destination,
+                None,
+                created.sent_at,
+                &Content::GroupChanged(updates),
+                None,
+                None,
+                self.now(),
+            )
+            .await;
+        match line {
+            Ok(Some(message)) => self.emit(Event::MessageAdded(message)),
+            Ok(None) => {}
+            Err(error) => self.database_error(error),
+        }
+        self.send_conversation(conversation).await;
+        self.emit(Event::GroupCreated(conversation));
+        // Members' names, from their profiles.
+        self.groups.refresh(key, &mut self.backend);
+    }
+
+    async fn store_created(
+        &mut self,
+        created: &CreatedGroup,
+        destination: &Destination,
+    ) -> Result<ConversationId, StorageError> {
+        let conversation = self.db.open_conversation(destination).await?;
+        self.db
+            .mark_accepted(ChatRef::Group(created.key.id()))
+            .await?;
+        self.db.set_group_end_checked(created.key).await?;
+        match self.backend.group(created.key).await {
+            Ok(Some(info)) => {
+                self.db.set_group(created.key, &info).await?;
+            }
+            Ok(None) => tracing::warn!("created group unknown"),
+            Err(error) => tracing::warn!(%error, "reading the created group failed"),
+        }
+        Ok(conversation)
+    }
+
+    /// Whether `conversation` is a group that was ended; nothing more goes
+    /// there.
+    async fn group_is_ended(&self, conversation: ConversationId) -> bool {
+        self.db
+            .is_ended(conversation)
+            .await
+            .unwrap_or_else(|error| {
+                self.database_error(error);
+                false
+            })
+    }
+
+    /// Marks the group ended, if it wasn't.
+    async fn mark_ended(&self, key: GroupMasterKey) -> Option<ConversationId> {
+        match self.db.set_group_ended(key).await {
+            Ok(Some(conversation)) => {
+                tracing::info!(group = ?key.id(), "group ended");
+                Some(conversation)
+            }
+            Ok(None) => None,
+            Err(error) => {
+                self.database_error(error);
+                None
+            }
+        }
+    }
+
+    /// Fetches the groups in `ends_unchecked`, one at a time, in the
+    /// background.
+    fn check_ends(&mut self, timeout: Duration) {
+        let keys = std::mem::take(&mut self.ends_unchecked);
+        if keys.is_empty() {
+            return;
+        }
+        tracing::info!(count = keys.len(), "checking groups for ends");
+        let fetches: Vec<_> = keys
+            .into_iter()
+            .map(|key| (key, timed(timeout, self.backend.refresh_group(key))))
+            .collect();
+        let checked = self.ends_checked_tx.clone();
+        tokio::task::spawn_local(async move {
+            for (key, fetch) in fetches {
+                checked.send((key, fetch.await)).ok();
+            }
+        });
+    }
+
+    /// A network failure leaves the group to check on the next start.
+    async fn end_checked(&mut self, key: GroupMasterKey, result: Result<bool, BackendError>) {
+        match result {
+            Ok(ended) => self.group_fetched(key, ended).await,
+            Err(error) if error.is_network() => {
+                tracing::info!(%error, "checking a group for an end failed");
+            }
+            Err(error) => {
+                tracing::info!(%error, "checking a group for an end failed; not again");
+                if let Err(error) = self.db.set_group_end_checked(key).await {
+                    self.database_error(error);
+                }
+            }
+        }
+    }
+
+    /// Notes what fetching the group showed: whether it was ended.
+    async fn group_fetched(&self, key: GroupMasterKey, ended: bool) {
+        if ended {
+            if let Some(conversation) = self.mark_ended(key).await {
+                self.send_conversation(conversation).await;
+            }
+        } else if let Err(error) = self.db.set_group_end_checked(key).await {
+            self.database_error(error);
+        }
+    }
+
     async fn load_messages(
         &self,
         conversation: ConversationId,
@@ -997,7 +1201,8 @@ impl<'a, B: SignalBackend> Session<'a, B> {
             Ok(None) => return,
             Err(error) => return self.database_error(error),
         };
-        if typing && !self.accepted(conversation).await {
+        if (typing && !self.accepted(conversation).await) || self.group_is_ended(conversation).await
+        {
             return;
         }
         if typing {
@@ -1985,8 +2190,12 @@ impl<'a, B: SignalBackend> Session<'a, B> {
         if self.groups.may_fetch(group.key, sender, Instant::now()) {
             let timeout = self.core.options.connect_timeout;
             match timed(timeout, self.backend.refresh_group(group.key)).await {
-                Ok(()) if self.has_members(group.key, &[author, me]).await => return true,
-                Ok(()) => {}
+                Ok(ended) => {
+                    self.group_fetched(group.key, ended).await;
+                    if self.has_members(group.key, &[author, me]).await {
+                        return true;
+                    }
+                }
                 Err(error) => tracing::info!(%error, "fetching a group failed"),
             }
         }
@@ -2028,7 +2237,11 @@ impl<'a, B: SignalBackend> Session<'a, B> {
             .now()
             .as_millis()
             .saturating_sub(message.sent_at.as_millis());
-        if message.sender.is_some() || !sent || u128::from(age) > window.as_millis() {
+        if message.sender.is_some()
+            || !sent
+            || u128::from(age) > window.as_millis()
+            || self.group_is_ended(message.conversation).await
+        {
             tracing::debug!(message = id.get(), "message can't be changed");
             return None;
         }
@@ -2131,6 +2344,12 @@ impl<'a, B: SignalBackend> Session<'a, B> {
                 self.emit(Event::MessageAdded(message));
                 // Replies may arrive first.
                 self.quote_changed(conversation, author, sent_at).await;
+                if let Destination::Group(group) = destination
+                    && let Content::GroupChanged(updates) = content
+                    && updates.contains(&GroupUpdate::Ended)
+                {
+                    self.mark_ended(group.key).await;
+                }
                 self.send_conversation(conversation).await;
             }
             Ok(None) => tracing::debug!("duplicate message ignored"),
@@ -2556,10 +2775,10 @@ fn own_quotes(content: &mut Content, me: ServiceId) {
 }
 
 /// `request`, failing as a network error after `timeout`.
-fn timed<'a>(
+fn timed<'a, T: 'a>(
     timeout: Duration,
-    request: impl Future<Output = Result<(), BackendError>> + 'a,
-) -> LocalBoxFuture<'a, Result<(), BackendError>> {
+    request: impl Future<Output = Result<T, BackendError>> + 'a,
+) -> LocalBoxFuture<'a, Result<T, BackendError>> {
     tokio::time::timeout(timeout, request)
         .map(|result| result.unwrap_or_else(|_| Err(BackendError::network("timed out"))))
         .boxed_local()

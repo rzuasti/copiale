@@ -379,10 +379,11 @@ where
         let message_to_self = recipient == &self.local_aci;
         let sync_message =
             matches!(content_body, ContentBody::SynchronizeMessage(..));
+        let syncable = is_syncable(&content_body);
         let is_multi_device = self.is_multi_device().await;
 
         // only send a sync message when sending to self and skip the rest of the process
-        if message_to_self && is_multi_device && !sync_message {
+        if message_to_self && is_multi_device && !sync_message && syncable {
             debug!("sending note to self");
             if let Some(sync_message) = self
                 .create_multi_device_sent_transcript_content(
@@ -432,7 +433,7 @@ where
             _ => false,
         };
 
-        if needs_sync || is_multi_device {
+        if (needs_sync || is_multi_device) && syncable {
             let sync_body = if sync_message {
                 Some(content_body)
             } else {
@@ -480,6 +481,7 @@ where
         online: bool,
     ) -> Vec<SendMessageResult> {
         let content_body: ContentBody = message.into();
+        let syncable = is_syncable(&content_body);
         let mut results = vec![];
 
         let mut needs_sync_in_results = false;
@@ -509,7 +511,7 @@ where
         }
 
         // we only need to send a synchronization message once
-        if needs_sync_in_results || self.is_multi_device().await {
+        if (needs_sync_in_results || self.is_multi_device().await) && syncable {
             if let Some(sync_message) = self
                 .create_multi_device_sent_transcript_content(
                     None,
@@ -1314,4 +1316,18 @@ where
             ..SyncMessage::with_padding(&mut rng())
         }))
     }
+}
+
+/// Whether a content body can produce a sync transcript.
+///
+/// Only data messages, edit messages, and sync messages have sync
+/// transcripts. Typing indicators, receipts, and other ephemeral
+/// messages are not synced across devices via this path.
+fn is_syncable(content_body: &ContentBody) -> bool {
+    matches!(
+        content_body,
+        ContentBody::DataMessage(_)
+            | ContentBody::EditMessage(_)
+            | ContentBody::SynchronizeMessage(_)
+    )
 }

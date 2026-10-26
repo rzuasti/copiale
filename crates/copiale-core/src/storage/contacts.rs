@@ -5,6 +5,7 @@
 
 use std::collections::HashSet;
 
+use presage::libsignal_service::prelude::ProfileKey;
 use presage::libsignal_service::profile_name::ProfileName;
 use presage::libsignal_service::protocol::{Aci, ServiceId as SignalServiceId};
 use presage::model::contacts::Contact as StoredContact;
@@ -51,7 +52,13 @@ impl Database {
                 .phone_number
                 .map(|number| PhoneNumber::new(number.to_string()));
             if name.is_some() || phone.is_some() {
-                contacts.push(Contact { id, name, phone });
+                let invite_only = self.profile_key(id).await.is_none();
+                contacts.push(Contact {
+                    id,
+                    name,
+                    phone,
+                    invite_only,
+                });
             }
         }
         contacts.sort_by_cached_key(|contact| {
@@ -89,9 +96,13 @@ impl Database {
         Ok(stale.len())
     }
 
-    async fn profile_name(&self, peer: ServiceId) -> Option<String> {
+    async fn profile_key(&self, peer: ServiceId) -> Option<ProfileKey> {
         let id: SignalServiceId = Aci::from(peer.uuid()).into();
-        let key = self.presage.profile_key(&id).await.ok().flatten()?;
+        self.presage.profile_key(&id).await.ok().flatten()
+    }
+
+    async fn profile_name(&self, peer: ServiceId) -> Option<String> {
+        let key = self.profile_key(peer).await?;
         let profile = self
             .presage
             .profile(peer.uuid(), key)
@@ -163,7 +174,7 @@ fn presage_error(error: impl std::error::Error) -> StorageError {
 #[cfg(test)]
 mod tests {
     use presage::libsignal_service::Profile;
-    use presage::libsignal_service::prelude::{ProfileKey, phonenumber};
+    use presage::libsignal_service::prelude::phonenumber;
     use uuid::Uuid;
 
     use super::*;
@@ -323,6 +334,24 @@ mod tests {
             .save_profile(Uuid::from_u128(n), key, profile)
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn contacts_without_a_profile_key_are_invite_only() {
+        let (_dir, db) = db().await;
+        save(&db, 1, "Alice", None).await;
+        save(&db, 2, "Bob", None).await;
+        save_profile(&db, 2, "Bob", None).await;
+
+        let invite_only: Vec<_> = db
+            .contacts()
+            .await
+            .unwrap()
+            .iter()
+            .map(|contact| (contact.id, contact.invite_only))
+            .collect();
+        assert_eq!(invite_only, [(peer(1), true), (peer(2), false)]);
+        db.close().await;
     }
 
     #[tokio::test]

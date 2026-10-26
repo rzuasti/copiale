@@ -58,7 +58,12 @@ went unsolved until 2011.
   - Groups: messages, edits and deletes kept only from members of the
     group as last fetched, with this account in it (one fetch first on a
     mismatch); group change lines only from server-signed changes newer
-    than the stored group. Edits are text only.
+    than the stored group. Edits are text only. New groups (name and
+    members, made admin) through vendored upstream PRs (`vendor/README.md`);
+    members without a known profile key are invited. Ended groups (from
+    the server-signed change, or the fetched state; each group fetched
+    once to catch earlier ends) take nothing more: no sends, edits,
+    deletes for everyone or typing.
   - Others' edits and deletes apply only within 48h of the message, by
     server time (edits from the original, not the last edit); at most 100
     edits per message (`storage::changes`), 10 of our own sent.
