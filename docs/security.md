@@ -64,8 +64,8 @@ they can also reach swap.
 
 ## Attachments
 
-Downloaded attachments live outside the database, in `attachments/` next
-to it, private to the user (`copiale_core::storage`).
+Downloaded and sent attachments live outside the database, in
+`attachments/` next to it, private to the user (`copiale_core::storage`).
 
 - **Encrypted**: each file with AES-256-GCM under its own random key,
   kept in the database; the file's name is authenticated, so files can't
@@ -87,7 +87,8 @@ to it, private to the user (`copiale_core::storage`).
   Linux a seccomp filter allowing only reading stdin, writing stdout,
   memory without execution and exiting, plus threads (never processes)
   when playing; on macOS the pure computation sandbox profile (no files,
-  network or other processes). It gets no environment and no stderr. A
+  network or other processes), with the signed app's hardened runtime
+  refusing executable memory. It gets no environment and no stderr. A
   first frame is killed after 30 s; playback ends with the viewer.
   Decoding is in software: the GPU would need driver access the sandbox
   refuses. Only MOV/MP4 with H.264, HEVC, VP9 or AV1, and AAC sound, is
@@ -95,6 +96,14 @@ to it, private to the user (`copiale_core::storage`).
   and plays the sound itself. Windows has no such sandbox yet, so no
   previews or playback there (#94). Frames are stored encrypted like
   attachments and go with them; played video lives only in memory.
+- **Sending**: a file is read only once picked, dropped or pasted (pasted
+  text counts only if every line is a `file://` URI), then copied in
+  encrypted like a download. JPEG, PNG and WebP are re-encoded by default:
+  turned upright, at most 2048 px, as JPEG (PNG if transparent), so their
+  EXIF and XMP metadata, location included, stay behind; GIFs, other
+  files and pictures marked `original` go as they are, metadata and all.
+  The uploaded copy is encrypted and padded by libsignal-service; where
+  it is is stored, so a retry uploads only what's missing.
 - **Saving**: a plaintext copy is written only where the user picks, under
   a name without path separators, hidden characters or names Windows
   reserves.

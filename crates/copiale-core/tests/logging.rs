@@ -215,6 +215,7 @@ fn identifiers_and_secrets_are_redacted_in_logs() {
         conversation: ConversationId::new(1),
         body: body.clone(),
         reply_to: None,
+        attachments: Vec::new(),
     };
 
     let out = logged("trace", false, || {

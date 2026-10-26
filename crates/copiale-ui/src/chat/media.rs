@@ -167,16 +167,45 @@ pub fn status_label(attachment: &Attachment) -> Option<String> {
 }
 
 /// A file line: its name, size and state.
-pub fn file_line(attachment: &Attachment) -> String {
-    let name = attachment
+pub fn file_name(attachment: &Attachment) -> String {
+    attachment
         .name
         .as_deref()
         .filter(|name| !name.trim().is_empty())
         .map(super::text::visible)
-        .unwrap_or_else(|| kind_name(attachment.kind).into());
+        .unwrap_or_else(|| kind_name(attachment.kind).into())
+}
+
+/// The type a file card's icon shows: its name's extension, else its
+/// content type's, in capitals; letters and digits only, at most four.
+pub fn file_type(attachment: &Attachment) -> String {
+    let from_name = attachment
+        .name
+        .as_deref()
+        .and_then(|name| name.rsplit_once('.'))
+        .map(|(_, extension)| extension);
+    let from_type = attachment
+        .content_type
+        .as_deref()
+        .and_then(|content_type| content_type.split_once('/'))
+        .map(|(_, subtype)| subtype)
+        .filter(|subtype| *subtype != "octet-stream");
+    from_name
+        .into_iter()
+        .chain(from_type)
+        .find(|extension| {
+            (1..=4).contains(&extension.len())
+                && extension.chars().all(|c| c.is_ascii_alphanumeric())
+        })
+        .map_or_else(|| "FILE".into(), str::to_ascii_uppercase)
+}
+
+/// A file card's second line: its size and type.
+pub fn file_details(attachment: &Attachment) -> String {
+    let kind = file_type(attachment);
     match attachment.size {
-        Some(size) => format!("▤ {name} · {}", size_label(size)),
-        None => format!("▤ {name}"),
+        Some(size) => format!("{} · {kind}", size_label(size)),
+        None => kind,
     }
 }
 
@@ -329,18 +358,38 @@ mod tests {
     }
 
     #[test]
+    fn file_types_come_from_names_or_content_types() {
+        let typed = |name: Option<&str>, content_type: Option<&str>| {
+            file_type(&Attachment {
+                name: name.map(Into::into),
+                content_type: content_type.map(Into::into),
+                ..Attachment::new(AttachmentKind::File)
+            })
+        };
+        assert_eq!(typed(Some("Profile.pdf"), None), "PDF");
+        assert_eq!(typed(Some("notes"), Some("text/plain")), "FILE");
+        assert_eq!(typed(Some("notes"), Some("application/zip")), "ZIP");
+        assert_eq!(typed(Some("a.tar.gz"), None), "GZ");
+        assert_eq!(
+            typed(Some("weird.p<d>f"), Some("application/octet-stream")),
+            "FILE"
+        );
+        assert_eq!(typed(Some("long.markdown"), None), "FILE");
+        assert_eq!(typed(None, None), "FILE");
+    }
+
+    #[test]
     fn files_read_with_name_size_and_action() {
         let mut file = attachment(AttachmentKind::File, AttachmentState::Remote, 1);
         file.name = Some("a\u{202e}fdp.exe".into());
 
-        assert_eq!(
-            file_line(&file),
-            "▤ \u{2068}a<U+202E>fdp.exe\u{2069} · 2.3 MB"
-        );
+        assert_eq!(file_name(&file), "\u{2068}a<U+202E>fdp.exe\u{2069}");
+        assert_eq!(file_details(&file), "2.3 MB · EXE");
         assert_eq!(file_action(&file), Some("download"));
         file.name = None;
         file.state = AttachmentState::Ready;
-        assert_eq!(file_line(&file), "▤ file · 2.3 MB");
+        assert_eq!(file_name(&file), "file");
+        assert_eq!(file_details(&file), "2.3 MB · FILE");
         assert_eq!(file_action(&file), Some("save"));
         assert_eq!(
             status_label(&attachment(

@@ -8,11 +8,11 @@ use copiale_core::config::{
     Config, ConfigFile, Density, MessageStyle, NotificationContent, Setting, ThemeName, TimeFormat,
 };
 use copiale_core::{
-    Account, AccountSettings, Attachment, AttachmentId, AttachmentKind, AttachmentState,
-    BackendError, ChatState, Command, Contact, Content, ConversationId, ConversationSummary,
-    Direction, Event, Expiry, FileContents, GroupMasterKey, GroupUpdate, Identity, Member, Message,
-    MessageBody, MessageId, MessageStatus, Peer, Quote, Quoted, RecentEmoji, SafetyNumber,
-    ServiceId, StorageFailure, Timestamp, Unsupported, Verification,
+    Account, AccountSettings, Attachment, AttachmentId, AttachmentKind, AttachmentSource,
+    AttachmentState, BackendError, ChatState, Command, Contact, Content, ConversationId,
+    ConversationSummary, Direction, Event, Expiry, FileContents, GroupMasterKey, GroupUpdate,
+    Identity, Member, Message, MessageBody, MessageId, MessageStatus, Peer, Quote, Quoted,
+    RecentEmoji, SafetyNumber, ServiceId, StorageFailure, Timestamp, Unsupported, Verification,
 };
 use copiale_ui::chat::{
     COMPACT_BELOW, ChatView, Compose, Field, Layout, Notice, NoticeAction, NoticeKey, Overlay,
@@ -501,6 +501,112 @@ fn opening_a_chat_loads_it_and_marks_it_read(cx: &mut TestAppContext) {
     );
 }
 
+/// The commands sent, without typing notices.
+fn commands_sent(ui: &Ui) -> Vec<Command> {
+    ui.core
+        .take()
+        .into_iter()
+        .filter(|command| !matches!(command, Command::Typing { .. }))
+        .collect()
+}
+
+#[gpui_kit::test]
+fn pasted_images_and_files_go_with_the_next_message(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.open_alice(cx);
+    let dir = tempfile::tempdir().unwrap();
+    let notes = dir.path().join("notes 1.pdf");
+    std::fs::write(&notes, b"%PDF").unwrap();
+
+    cx.write_to_clipboard(gpui_kit::ClipboardItem {
+        entries: vec![gpui_kit::ClipboardEntry::Image(
+            gpui_kit::Image::from_bytes(gpui_kit::ImageFormat::Png, png(4, 4)),
+        )],
+    });
+    ui.press("ctrl-v", cx);
+    let uri = url::Url::from_file_path(&notes).unwrap();
+    cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(format!("{uri}\n")));
+    ui.press("ctrl-v", cx);
+    ui.frame(cx);
+
+    assert!(ui.shows("tray", cx));
+    assert!(ui.shows(("staged", 1u64), cx));
+    assert!(ui.shows(("staged", 2u64), cx));
+    assert!(
+        ui.shows(("staged-original", 1u64), cx),
+        "pictures can go as they are"
+    );
+    assert!(!ui.shows(("staged-original", 2u64), cx));
+    ui.click(("staged-original", 1u64), cx);
+
+    // Nothing typed: the files alone go.
+    ui.press("enter", cx);
+    let commands = commands_sent(&ui);
+    let [
+        Command::SendText {
+            body, attachments, ..
+        },
+    ] = commands.as_slice()
+    else {
+        panic!("{commands:?}");
+    };
+    assert_eq!(body.as_str(), "");
+    assert_eq!(attachments.len(), 2);
+    assert!(attachments[0].original);
+    assert!(matches!(
+        &attachments[0].source,
+        AttachmentSource::Pasted { name, .. } if name == "image.png"
+    ));
+    assert!(matches!(
+        &attachments[1].source,
+        AttachmentSource::Path(path) if *path == notes
+    ));
+    assert!(!ui.shows("tray", cx));
+}
+
+#[gpui_kit::test]
+fn pasted_text_still_goes_in_the_composer(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.open_alice(cx);
+
+    cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string("/etc/passwd".into()));
+    ui.press("ctrl-v", cx);
+
+    assert!(!ui.shows("tray", cx));
+    let composer = cx.update(|cx| {
+        ui.shell
+            .read(cx)
+            .chat()
+            .unwrap()
+            .read(cx)
+            .composer()
+            .clone()
+    });
+    assert_eq!(
+        cx.update(|cx| composer.read(cx).value().to_string()),
+        "/etc/passwd"
+    );
+}
+
+#[gpui_kit::test]
+fn staged_files_can_be_removed(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.open_alice(cx);
+    cx.write_to_clipboard(gpui_kit::ClipboardItem {
+        entries: vec![gpui_kit::ClipboardEntry::Image(
+            gpui_kit::Image::from_bytes(gpui_kit::ImageFormat::Png, png(4, 4)),
+        )],
+    });
+    ui.press("ctrl-v", cx);
+    ui.frame(cx);
+
+    ui.click(("unstage", 1u64), cx);
+
+    assert!(!ui.shows("tray", cx));
+    ui.press("enter", cx);
+    assert!(commands_sent(&ui).is_empty());
+}
+
 #[gpui_kit::test]
 fn composer_sends_to_the_open_chat(cx: &mut TestAppContext) {
     let ui = Ui::ready(cx);
@@ -522,7 +628,7 @@ fn composer_sends_to_the_open_chat(cx: &mut TestAppContext) {
     assert!(
         matches!(
             commands.as_slice(),
-            [Command::SendText { conversation, body, reply_to: None }]
+            [Command::SendText { conversation, body, reply_to: None, .. }]
                 if *conversation == ConversationId::new(1) && body.as_str() == "hello\nthere"
         ),
         "{commands:?}"

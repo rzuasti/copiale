@@ -1,6 +1,7 @@
 //! Main window once linked: chat list on the left, the open conversation on
 //! the right.
 
+mod attach;
 mod emoji;
 mod log;
 mod media;
@@ -11,7 +12,9 @@ mod sidebar;
 mod video;
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use copiale_core::config;
@@ -23,9 +26,9 @@ use gpui_kit::component::{Icon, Sizable as _, h_flex};
 use gpui_kit::{
     Action, AnyElement, App, AppContext as _, AsKeystroke as _, Context, Div, Entity, FocusHandle,
     Focusable as _, FollowMode, InteractiveElement as _, IntoElement, KeyBinding, KeyContext,
-    ListAlignment, ListState, ParentElement as _, Pixels, Render, ScrollHandle, SharedString,
-    Stateful, StatefulInteractiveElement as _, StyleRefinement, Styled as _, Subscription, Task,
-    WeakEntity, Window, WindowId, actions, div, point, px,
+    ListAlignment, ListState, ParentElement as _, Pixels, Render, RenderImage, ScrollHandle,
+    SharedString, Stateful, StatefulInteractiveElement as _, StyleRefinement, Styled as _,
+    Subscription, Task, WeakEntity, Window, WindowId, actions, div, point, px,
 };
 
 use super::emoji::EmojiTyping;
@@ -105,6 +108,8 @@ actions!(
         SaveViewed,
         TogglePlay,
         ToggleMute,
+        AttachFiles,
+        PasteAttachments,
     ]
 );
 
@@ -147,6 +152,8 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("secondary-k", TogglePalette, Some(CONTEXT)),
         KeyBinding::new("secondary-,", OpenSettings, Some(CONTEXT)),
         KeyBinding::new("secondary-e", ToggleEmojiGrid, Some(CONTEXT)),
+        KeyBinding::new("secondary-o", AttachFiles, Some(CONTEXT)),
+        KeyBinding::new("secondary-v", PasteAttachments, composing),
         KeyBinding::new("alt-up", PreviousChat, Some(CONTEXT)),
         KeyBinding::new("alt-down", NextChat, Some(CONTEXT)),
         // After everything else Esc does.
@@ -247,6 +254,8 @@ pub struct ChatView {
     pictures: RefCell<Pictures>,
     /// The video the viewer shows.
     video: Option<Entity<video::VideoView>>,
+    /// Thumbnails of staged pictures, by staged file.
+    staged_thumbnails: HashMap<u64, Arc<RenderImage>>,
     /// Held in a message request or blocked chat, which has no composer.
     request_focus: FocusHandle,
     /// Device name and privacy settings, once the core reports them.
@@ -393,6 +402,7 @@ impl ChatView {
             viewer_focus: cx.focus_handle(),
             pictures: RefCell::default(),
             video: None,
+            staged_thumbnails: HashMap::new(),
             request_focus: cx.focus_handle(),
             account: None,
             layout: Layout::default(),
@@ -706,6 +716,7 @@ impl ChatView {
         }
         let effects = self.chat.open(id);
         self.run(effects, cx);
+        self.prune_staged_thumbnails(cx);
     }
 
     /// Clears the composer for the open conversation and focuses it.
@@ -873,6 +884,7 @@ impl ChatView {
             self.emoji.reset();
             self.typing_idle = None;
             self.core.send(command);
+            self.prune_staged_thumbnails(cx);
             composer.update(cx, |composer, cx| composer.set_value("", window, cx));
             self.kinetic.stop();
             self.log.set_follow_mode(FollowMode::Tail);
@@ -1242,6 +1254,7 @@ impl Render for ChatView {
             .on_action(cx.listener(Self::toggle_palette))
             .on_action(cx.listener(Self::open_settings))
             .on_action(cx.listener(Self::toggle_emoji_grid))
+            .on_action(cx.listener(Self::attach_files))
             .on_action(cx.listener(Self::hide_window))
             .on_action(
                 cx.listener(|view, _: &PreviousChat, window, cx| view.step_chat(-1, window, cx)),

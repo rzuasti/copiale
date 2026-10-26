@@ -25,9 +25,16 @@ Scope, UI design, architecture and work items for the first usable release.
   the caption, albums as a grid of up to four; videos as their first
   frame once downloaded (Linux and macOS), before that their blurred
   preview, with `▶`, played with sound in the viewer; other files as
-  `▤ name · size · download/save` lines.
+  cards: a page icon with the file's type (`PDF`), the name, then
+  `size · type · download/save`.
   Not yet downloaded: the blurred preview with `↓ size`. Attachments that
   can't be downloaded keep a placeholder line.
+- Sending attachments (#91): `Ctrl/⌘+O` or the composer's paperclip picks
+  files; dropping files on the chat or pasting images or copied files adds
+  them too. They wait in a tray above the composer (thumbnail, name,
+  size, `original` for pictures, `✕`); `Enter` sends them with the
+  composer's text as one message, up to 32 files of 100 MB each. Pictures
+  go re-encoded without their metadata unless marked `original`.
 - Group and timer changes: system lines, e.g. `-- alice added bob · 10:04`.
 - Dark and light themes: follow the system by default (dark without a
   system preference), overridable in settings with a built-in theme

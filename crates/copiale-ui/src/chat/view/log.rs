@@ -11,9 +11,10 @@ use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, Context, Font, HighlightStyle, Hsla, InteractiveElement as _, IntoElement,
-    ParentElement as _, Pixels, Rems, SharedString, StatefulInteractiveElement as _, Styled as _,
-    StyledText, TestSupportExt as _, TextRun, Window, div, font, list, px, relative, rems,
+    AnyElement, App, Context, ExternalPaths, Font, HighlightStyle, Hsla, InteractiveElement as _,
+    IntoElement, ParentElement as _, Pixels, Rems, SharedString, StatefulInteractiveElement as _,
+    Styled as _, StyledText, TestSupportExt as _, TextRun, Window, div, font, list, px, relative,
+    rems,
 };
 
 use crate::chat::jumbo::jumbo_size;
@@ -102,8 +103,11 @@ impl ChatView {
         }
 
         v_flex()
+            .id("chat-main")
             .size_full()
             .min_w_0()
+            .on_drop(cx.listener(|view, paths: &ExternalPaths, _, cx| view.drop_paths(paths, cx)))
+            .drag_over::<ExternalPaths>(|style, _, _, cx| style.bg(cx.palette().selection))
             .child(header)
             .child(
                 div()
@@ -131,6 +135,7 @@ impl ChatView {
                     .on_action(cx.listener(Self::delete_for_everyone))
                     .on_action(cx.listener(Self::delete_for_me))
                     .on_action(cx.listener(Self::cancel))
+                    .on_action(cx.listener(Self::paste_attachments))
                     .children(self.chat.identity_banner().map(|(banner, peer)| {
                         h_flex()
                             .id("identity-banner")
@@ -177,6 +182,7 @@ impl ChatView {
                         Some(banner) => composer.child(banner),
                         None => composer
                             .relative()
+                            .children(self.render_tray(cx))
                             .children(self.render_emoji_grid(cx))
                             .children(self.render_emoji_picker(cx))
                             .child(
@@ -189,8 +195,8 @@ impl ChatView {
                                     .on_action(cx.listener(Self::emoji_previous))
                                     .on_action(cx.listener(Self::emoji_next))
                                     .on_action(cx.listener(Self::close_emoji_picker))
-                                    // Room for the emoji button inside the frame.
-                                    .child(Textarea::new(&self.inputs().composer).pr(px(32.)))
+                                    // Room for the buttons inside the frame.
+                                    .child(Textarea::new(&self.inputs().composer).pr(px(56.)))
                                     .child(
                                         div()
                                             .absolute()
@@ -199,6 +205,7 @@ impl ChatView {
                                             .right_1()
                                             .flex()
                                             .items_center()
+                                            .child(self.render_attach_button(cx))
                                             .child(self.render_emoji_button(cx)),
                                     ),
                             ),

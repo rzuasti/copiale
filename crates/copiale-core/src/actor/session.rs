@@ -21,6 +21,7 @@ use super::previews::{self, Made, Previews};
 use super::probe::{Check, Probe};
 use super::retries::Limiter;
 use super::run::{Core, ignored};
+use super::uploads::{self, Uploads};
 use super::{Command, DELETE_WINDOW, EDIT_WINDOW, Event, MAX_SENT_EDITS};
 use crate::backend::{
     Ack, BackendError, Incoming, RetryRequest, SignalBackend, StoredChats, Undecryptable,
@@ -29,11 +30,13 @@ use crate::clock::Clock;
 use crate::model::{
     Account, AccountSettings, Attachment, AttachmentId, AttachmentState, BlockedList, Change,
     ChatRef, ChatState, Content, ConversationId, Destination, FileContents, GroupId,
-    GroupMasterKey, GroupRef, GroupUpdate, Identity, IdentityKey, IncomingMessage, Message,
-    MessageBody, MessageChange, MessageId, MessageRef, MessageStatus, Outgoing, Peer, Quote,
-    ReceiptKind, RecentEmoji, RequestResponse, SentMessage, ServiceId, Timestamp, Verification,
+    GroupMasterKey, GroupRef, GroupUpdate, Identity, IdentityKey, IncomingMessage, MAX_ATTACHMENTS,
+    Message, MessageBody, MessageChange, MessageId, MessageRef, MessageStatus, NewAttachment,
+    Outgoing, Peer, Quote, ReceiptKind, RecentEmoji, RemoteAttachment, RequestResponse,
+    SentMessage, ServiceId, Timestamp, Verification,
 };
-use crate::storage::{Database, Removed, StorageError};
+use crate::outgoing;
+use crate::storage::{Database, Removed, StorageError, StoredFile};
 use crate::text::save_name;
 
 /// Why serving the account ended.
@@ -65,6 +68,7 @@ struct Session<'a, B> {
     settings: AccountSettings,
     outbox: Outbox,
     downloads: Downloads,
+    uploads: Uploads,
     previews: Previews,
     probe: Probe,
     groups: Groups,
@@ -123,6 +127,7 @@ impl<'a, B: SignalBackend> Session<'a, B> {
             settings: AccountSettings::default(),
             outbox: Outbox::new(options.send_timeout),
             downloads: Downloads::new(db.files()),
+            uploads: Uploads::new(db.files()),
             previews: Previews::new(options.video_helper.clone(), db.files()),
             probe: Probe::new(options.probe_interval, options.probe_timeout),
             groups: Groups::new(),
@@ -263,6 +268,10 @@ impl<'a, B: SignalBackend> Session<'a, B> {
                     self.download_finished(finished).await;
                     None
                 }
+                finished = self.uploads.finished() => {
+                    self.upload_finished(finished).await;
+                    None
+                }
                 made = self.previews.finished() => {
                     self.preview_made(made).await;
                     None
@@ -309,7 +318,11 @@ impl<'a, B: SignalBackend> Session<'a, B> {
                 conversation,
                 body,
                 reply_to,
-            }) => self.send_text(conversation, body, reply_to).await,
+                attachments,
+            }) => {
+                self.send_text(conversation, body, reply_to, attachments)
+                    .await;
+            }
             Some(Command::RetrySend(id)) => self.retry_send(id).await,
             Some(Command::Edit { id, body }) => self.edit(id, body).await,
             Some(Command::Delete { id, everyone }) => self.delete(id, everyone).await,
@@ -426,6 +439,7 @@ impl<'a, B: SignalBackend> Session<'a, B> {
                 self.probe.start();
                 self.outbox.connected(&mut self.backend);
                 self.downloads.connected(&mut self.backend);
+                self.uploads.connected(&mut self.backend);
                 let timeout = self.core.options.connect_timeout;
                 if std::mem::take(&mut self.contacts_wanted) {
                     let request = timed(timeout, self.backend.request_contact_sync());
@@ -478,6 +492,7 @@ impl<'a, B: SignalBackend> Session<'a, B> {
         self.probe.stop();
         self.outbox.disconnected();
         self.downloads.disconnected();
+        self.uploads.disconnected();
         self.draining = Some(Some(error));
         if self.incoming.is_none() {
             return self.ended().await;
@@ -499,6 +514,7 @@ impl<'a, B: SignalBackend> Session<'a, B> {
         self.probe.stop();
         self.outbox.disconnected();
         self.downloads.disconnected();
+        self.uploads.disconnected();
         let error = self.draining.take().flatten();
         if error.as_ref().is_some_and(BackendError::is_unauthorized) {
             self.revoked = true;
@@ -592,12 +608,17 @@ impl<'a, B: SignalBackend> Session<'a, B> {
         conversation: ConversationId,
         body: MessageBody,
         reply_to: Option<MessageId>,
+        attachments: Vec<NewAttachment>,
     ) {
         // Recipients stop showing us typing when the message arrives.
         self.typing_sent.remove(&conversation);
-        if body.as_str().trim().is_empty() {
+        if body.as_str().trim().is_empty() && attachments.is_empty() {
             tracing::debug!("empty message not sent");
             return;
+        }
+        if attachments.len() > MAX_ATTACHMENTS {
+            let error = format!("at most {MAX_ATTACHMENTS} files go in one message");
+            return self.emit(Event::AttachFailed(error));
         }
         let quote = match reply_to {
             Some(id) => match self.db.message(id).await {
@@ -606,11 +627,6 @@ impl<'a, B: SignalBackend> Session<'a, B> {
                 Err(error) => return self.database_error(error),
             },
             None => None,
-        };
-        let content = Content::Text {
-            body,
-            attachments: Vec::new(),
-            quote,
         };
         let destination = match self.db.destination(conversation).await {
             Ok(Some(destination)) => destination,
@@ -627,6 +643,14 @@ impl<'a, B: SignalBackend> Session<'a, B> {
             Ok(false) => {}
             Err(error) => return self.database_error(error),
         }
+        let Some((described, files)) = self.prepare(attachments).await else {
+            return;
+        };
+        let content = Content::Text {
+            body,
+            attachments: described,
+            quote,
+        };
         if let Err(error) = self.db.mark_accepted(chat).await {
             return self.database_error(error);
         }
@@ -645,7 +669,7 @@ impl<'a, B: SignalBackend> Session<'a, B> {
         let message = loop {
             match self
                 .db
-                .add_pending(conversation, sent_at, &content, expire_timer, now)
+                .add_pending(conversation, sent_at, &content, &files, expire_timer, now)
                 .await
             {
                 Ok(Some(message)) => break message,
@@ -655,19 +679,20 @@ impl<'a, B: SignalBackend> Session<'a, B> {
         };
         self.emit(Event::MessageAdded(message.clone()));
         self.send_conversation(conversation).await;
+        if let Content::Text { attachments, .. } = &message.content {
+            for attachment in attachments.iter().filter(|a| a.is_video()) {
+                if let Some(id) = attachment.id {
+                    self.previews.push(id);
+                }
+            }
+            self.start_preview().await;
+        }
         if self.awaits_confirmation(conversation).await {
             return self
                 .send_finished(message.id, Err(BackendError::untrusted_identity()))
                 .await;
         }
-        let outgoing = text_of(&message.content);
-        self.outbox.push(
-            message.id,
-            destination,
-            outgoing,
-            message.sent_at,
-            &mut self.backend,
-        );
+        self.go_out(&message, destination).await;
     }
 
     async fn retry_send(&mut self, id: MessageId) {
@@ -679,18 +704,125 @@ impl<'a, B: SignalBackend> Session<'a, B> {
                         .send_finished(message.id, Err(BackendError::untrusted_identity()))
                         .await;
                 }
-                let outgoing = text_of(&message.content);
-                self.outbox.push(
-                    message.id,
-                    destination,
-                    outgoing,
-                    message.sent_at,
-                    &mut self.backend,
-                );
+                self.go_out(&message, destination).await;
             }
             Ok(None) => tracing::debug!(message = id.get(), "nothing to retry"),
             Err(error) => self.database_error(error),
         }
+    }
+
+    /// Reads files to send and stores their copies; `None`, having said
+    /// why, if any can't be.
+    async fn prepare(
+        &mut self,
+        attachments: Vec<NewAttachment>,
+    ) -> Option<(Vec<Attachment>, Vec<StoredFile>)> {
+        let mut described = Vec::new();
+        let mut files = Vec::new();
+        for new in attachments {
+            let prepared = tokio::task::spawn_blocking(move || outgoing::prepare(new))
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|prepared| prepared.map_err(|error| error.to_string()));
+            let prepared = match prepared {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    tracing::info!(%error, "attachment not sent");
+                    self.emit(Event::AttachFailed(error));
+                    return None;
+                }
+            };
+            // Copies of a message that's never stored go at the next start.
+            match self.db.files().store(prepared.contents).await {
+                Ok(file) => files.push(file),
+                Err(error) => {
+                    self.emit(Event::AttachFailed(format!("couldn't store it: {error}")));
+                    return None;
+                }
+            }
+            described.push(prepared.attachment);
+        }
+        Some((described, files))
+    }
+
+    /// Sends our pending message: uploads its attachments not yet up, else
+    /// queues it in the outbox.
+    async fn go_out(&mut self, message: &Message, destination: Destination) {
+        let uploads = match self.db.uploads(message.id).await {
+            Ok(uploads) => uploads,
+            Err(error) => return self.database_error(error),
+        };
+        if uploads.iter().all(|(_, remote)| remote.is_some()) {
+            let remote = uploads.into_iter().filter_map(|(_, remote)| remote);
+            let outgoing = text_of(&message.content, remote.collect());
+            self.outbox.push(
+                message.id,
+                destination,
+                outgoing,
+                message.sent_at,
+                &mut self.backend,
+            );
+            return;
+        }
+        let Content::Text { attachments, .. } = &message.content else {
+            return;
+        };
+        for (id, _) in uploads.into_iter().filter(|(_, remote)| remote.is_none()) {
+            let Some(attachment) = attachments.iter().find(|a| a.id == Some(id)) else {
+                continue;
+            };
+            let file = match self.db.attachment_file(id).await {
+                Ok(Some(file)) => file,
+                Ok(None) => {
+                    self.uploads.cancel(message.id);
+                    let error = BackendError::new("an attachment's copy is missing");
+                    return self.send_finished(message.id, Err(error)).await;
+                }
+                Err(error) => return self.database_error(error),
+            };
+            let job = uploads::Job {
+                message: message.id,
+                id,
+                attachment: attachment.clone(),
+                file,
+            };
+            self.uploads.push(job, &mut self.backend);
+        }
+    }
+
+    /// Records an upload; sends its message once all of its are up, fails
+    /// it if one failed, or tries again on a lost connection.
+    async fn upload_finished(&mut self, finished: uploads::Finished) {
+        let id = finished.message;
+        let failed = match finished.result {
+            Ok(remote) => match self.db.set_uploaded(finished.id, &remote).await {
+                Ok(()) => None,
+                Err(error) => return self.database_error(error),
+            },
+            Err(error) => Some(error),
+        };
+        if let Some(error) = &failed
+            && !error.is_network()
+        {
+            self.uploads.cancel(id);
+            return self.send_finished(id, failed.map_or(Ok(()), Err)).await;
+        }
+        if failed.is_none() && self.uploads.uploading(id) {
+            return;
+        }
+        // The rest go again: one job per attachment.
+        self.uploads.cancel(id);
+        let message = match self.db.message(id).await {
+            Ok(Some(message)) if message.status == Some(MessageStatus::Pending) => message,
+            Ok(_) => return,
+            Err(error) => return self.database_error(error),
+        };
+        let destination = match self.db.destination(message.conversation).await {
+            Ok(Some(destination)) => destination,
+            Ok(None) => return,
+            Err(error) => return self.database_error(error),
+        };
+        self.go_out(&message, destination).await;
     }
 
     /// Replaces our message's text here, then for everyone.
@@ -2387,16 +2519,18 @@ fn chat_of(destination: Destination) -> ChatRef {
     }
 }
 
-/// A text message as sent: its body and quote.
-fn text_of(content: &Content) -> Outgoing {
+/// A text message as sent: its body, quote and uploaded `attachments`.
+fn text_of(content: &Content, attachments: Vec<RemoteAttachment>) -> Outgoing {
     match content {
         Content::Text { body, quote, .. } => Outgoing::Text {
             body: body.clone(),
             quote: quote.clone(),
+            attachments,
         },
         _ => Outgoing::Text {
             body: MessageBody::new(""),
             quote: None,
+            attachments: Vec::new(),
         },
     }
 }

@@ -7,7 +7,7 @@ use copiale_core::{
 };
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Bounds, Context, Entity, ImageSource,
+    AnyElement, App, AppContext as _, Bounds, Context, Entity, FontWeight, Hsla, ImageSource,
     InteractiveElement as _, IntoElement, MouseButton, ObjectFit, ParentElement as _, PathBuilder,
     PathPromptOptions, Pixels, RenderImage, SharedString, StatefulInteractiveElement as _, Styled,
     StyledImage as _, TestSupportExt as _, Window, canvas, div, img, point, px, relative, white,
@@ -15,7 +15,7 @@ use gpui_kit::{
 
 use crate::chat::media::{
     self, ALL_CORNERS, CELL, Corners, GAP, MAX_CELLS, RADIUS, Shown, box_size, cell_corners,
-    file_action, file_line, shown, status_label,
+    file_action, file_details, file_name, file_type, shown, status_label,
 };
 use crate::chat::model::{Overlay, Row};
 use crate::media::{Picture, Slot, Use, VideoPlayback, decode};
@@ -206,7 +206,8 @@ impl ChatView {
             .into_any_element()
     }
 
-    /// A file's line: name, size and what can be done.
+    /// A file's card: an icon with its type, its name, size and what can be
+    /// done.
     fn render_file(&self, message: MessageId, file: &Attachment, cx: &Context<Self>) -> AnyElement {
         let palette = cx.palette();
         let id = file.id.map_or(0, |id| id.get() as u64);
@@ -216,6 +217,7 @@ impl ChatView {
         };
         let clicked = file.clone();
         let action = file_action(file).map(|label| {
+            let clicked = clicked.clone();
             div()
                 .id(("file-action", id))
                 .flex_none()
@@ -224,20 +226,75 @@ impl ChatView {
                 .hover(|style| style.underline())
                 .child(label)
                 .on_click(cx.listener(move |view, _, window, cx| {
+                    // Not the card's click too.
+                    cx.stop_propagation();
                     view.click_attachment(message, &clicked, window, cx)
                 }))
                 .test_support()
         });
-        h_flex()
-            .id(("file", id))
+        let kind = file_type(file);
+        let (page, fold, label) = (palette.text_secondary, palette.text_muted, palette.surface);
+        let icon = div()
+            .relative()
+            .flex_none()
+            .w(px(FILE_ICON.0))
+            .h(px(FILE_ICON.1))
+            .child(
+                canvas(
+                    |_, _, _| {},
+                    move |bounds, (), window, _| {
+                        paint_document(bounds, page, fold, window);
+                    },
+                )
+                .absolute()
+                .inset_0(),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .bottom(px(7.))
+                    .flex()
+                    .justify_center()
+                    .text_size(px(9.))
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(label)
+                    .child(kind),
+            );
+        let details = h_flex()
             .gap_1()
             .min_w_0()
-            .font_family(cx.theme().mono_font_family.clone())
             .text_xs()
             .text_color(palette.text_muted)
-            .child(div().min_w_0().truncate().child(file_line(file)))
+            .child(div().flex_none().child(file_details(file)))
             .children(state.map(|state| div().flex_none().child(format!("· {state}"))))
-            .children(action.map(|action| h_flex().flex_none().gap_1().child("·").child(action)))
+            .children(action.map(|action| h_flex().flex_none().gap_1().child("·").child(action)));
+        h_flex()
+            .id(("file", id))
+            .gap_3()
+            .max_w(px(FILE_CARD_WIDTH))
+            .py_1()
+            .cursor_pointer()
+            .font_family(cx.theme().mono_font_family.clone())
+            .child(icon)
+            .child(
+                v_flex()
+                    .min_w_0()
+                    .gap_0p5()
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_sm()
+                            .text_color(palette.text)
+                            .child(file_name(file)),
+                    )
+                    .child(details),
+            )
+            .on_click(cx.listener(move |view, _, window, cx| {
+                view.click_attachment(message, &clicked, window, cx)
+            }))
             .test_support()
             .into_any_element()
     }
@@ -664,6 +721,34 @@ impl ChatView {
     /// Whether the viewer is open.
     pub(super) fn viewing(&self) -> bool {
         self.chat.overlay() == Some(Overlay::Viewer)
+    }
+}
+
+/// A file card's icon, in pixels.
+const FILE_ICON: (f32, f32) = (32., 40.);
+/// A file card's widest.
+const FILE_CARD_WIDTH: f32 = 320.;
+
+/// A page with its top-right corner folded, filling `bounds`.
+fn paint_document(bounds: Bounds<Pixels>, page: Hsla, fold: Hsla, window: &mut Window) {
+    let at = |x: f32, y: f32| bounds.origin + point(bounds.size.width * x, bounds.size.height * y);
+    // The fold's size, as a share of the width and height.
+    let (fx, fy) = (0.7, 0.28);
+    let mut sheet = PathBuilder::fill();
+    sheet.move_to(at(0., 0.));
+    sheet.line_to(at(fx, 0.));
+    sheet.line_to(at(1., fy));
+    sheet.line_to(at(1., 1.));
+    sheet.line_to(at(0., 1.));
+    sheet.close();
+    let mut corner = PathBuilder::fill();
+    corner.move_to(at(fx, 0.));
+    corner.line_to(at(fx, fy));
+    corner.line_to(at(1., fy));
+    corner.close();
+    if let (Ok(sheet), Ok(corner)) = (sheet.build(), corner.build()) {
+        window.paint_path(sheet, page);
+        window.paint_path(corner, fold);
     }
 }
 

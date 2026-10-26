@@ -19,6 +19,8 @@ argon2 = { version = "0.6", features = ["parallel", "zeroize"] }
 ashpd = { version = "0.13", default-features = false, features = ["async-io", "settings"] }
 # Implements libsignal's store traits, which use it.
 async-trait = "0.1"
+# Blurred previews of images sent.
+blurhash = "0.2"
 chrono = "0.4"
 copiale-core = { path = "crates/copiale-core" }
 copiale-testkit = { path = "crates/copiale-testkit" }
@@ -46,6 +48,8 @@ libc = "0.2"
 log = "0.4"
 # UNUserNotificationCenter: replaces and closes notifications by ID.
 mac-usernotifications = { version = "0.3", default-features = false }
+# Content types of files sent, by name.
+mime_guess = "2"
 notify = "8"
 notify-rust = "4.18"
 # Same version as GPUI's.

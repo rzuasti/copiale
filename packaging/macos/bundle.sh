@@ -28,8 +28,9 @@ done
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 lipo -create -output "$app/Contents/MacOS/copiale" "${binaries[@]}"
-# FFmpeg is linked in: nothing outside the system's libraries.
-if otool -L "$app/Contents/MacOS/copiale" | tail -n +2 | grep -Ev '^\s*(/usr/lib/|/System/Library/)'; then
+# FFmpeg is linked in: nothing outside the system's libraries. Lines
+# ending in `:` name each architecture.
+if otool -L "$app/Contents/MacOS/copiale" | grep -Ev '^\s*(/usr/lib/|/System/Library/)|:$'; then
   echo "linked to libraries outside the system" >&2
   exit 1
 fi

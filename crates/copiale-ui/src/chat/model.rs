@@ -6,10 +6,10 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use copiale_core::{
-    Attachment, AttachmentId, BackendError, ChatState, Command, Contact, Content, ConversationId,
-    ConversationSummary, DELETE_WINDOW, Direction, EDIT_WINDOW, Event, Identity, MAX_SENT_EDITS,
-    Message, MessageBody, MessageId, MessageStatus, Peer, ServiceId, TYPING_TIMEOUT, Timestamp,
-    Verification,
+    Attachment, AttachmentId, AttachmentSource, BackendError, ChatState, Command, Contact, Content,
+    ConversationId, ConversationSummary, DELETE_WINDOW, Direction, EDIT_WINDOW, Event, Identity,
+    MAX_ATTACHMENT_SIZE, MAX_ATTACHMENTS, MAX_SENT_EDITS, Message, MessageBody, MessageId,
+    MessageStatus, NewAttachment, Peer, ServiceId, TYPING_TIMEOUT, Timestamp, Verification,
 };
 use url::Url;
 
@@ -17,7 +17,7 @@ use super::content::{placeholders, quote_line, system_lines};
 use super::media::{self, downloadable, saveable, viewable};
 use super::new_chat::{Candidate, candidates};
 use super::palette::{self, Entry, PaletteAction};
-use super::text::{isolate, link_target};
+use super::text::{isolate, link_target, visible};
 use super::time::{LocalClock, countdown, countdown_changes_in};
 
 /// Messages loaded per page.
@@ -153,6 +153,34 @@ pub struct Viewed<'a> {
     pub count: usize,
 }
 
+/// A file waiting in the tray to go with the next message.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Staged {
+    pub id: u64,
+    pub source: AttachmentSource,
+    pub name: String,
+    pub size: u64,
+    /// Sent as it is, not re-encoded.
+    pub original: bool,
+}
+
+impl std::fmt::Debug for Staged {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Staged")
+            .field("id", &self.id)
+            .field("size", &self.size)
+            .field("original", &self.original)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A file to stage: where it is, its name and size.
+pub struct ToStage {
+    pub source: AttachmentSource,
+    pub name: String,
+    pub size: u64,
+}
+
 /// A picker's query and highlighted entry.
 #[derive(Debug, Default)]
 struct Picker {
@@ -204,6 +232,8 @@ pub struct Chat {
     viewer: Option<(MessageId, AttachmentId)>,
     /// Videos play in the viewer.
     videos_play: bool,
+    /// The last staged file's ID.
+    next_staged: u64,
 }
 
 #[derive(Debug)]
@@ -235,6 +265,8 @@ struct Log {
     /// Asking how to delete it.
     confirming: Option<MessageId>,
     change_failed: HashSet<MessageId>,
+    /// Files to send with the next message.
+    staged: Vec<Staged>,
 }
 
 impl Log {
@@ -311,6 +343,7 @@ impl Chat {
             link: None,
             viewer: None,
             videos_play: false,
+            next_staged: 0,
         }
     }
 
@@ -623,6 +656,9 @@ impl Chat {
             Event::DatabaseError(error) => self.storage_error = Some(error.clone()),
             Event::SaveFailed(error) => {
                 self.storage_error = Some(format!("couldn't save the file: {error}"));
+            }
+            Event::AttachFailed(error) => {
+                self.storage_error = Some(format!("not sent: {error}"));
             }
             Event::Identity(identity) => {
                 self.identities.insert(identity.peer, identity.clone());
@@ -1144,6 +1180,7 @@ impl Chat {
             selected: None,
             confirming: None,
             change_failed: HashSet::new(),
+            staged: Vec::new(),
         });
         let mut commands = vec![Command::LoadMessages {
             conversation: id,
@@ -1240,24 +1277,95 @@ impl Chat {
         }
         let log = self.open.as_mut()?;
         let text = text.trim();
-        if text.is_empty() {
+        let editing = matches!(log.compose, Compose::Edit(_));
+        if text.is_empty() && (log.staged.is_empty() || editing) {
             return None;
         }
         let body = MessageBody::new(text);
         log.compose_ended = None;
+        // Edits change text only: the tray waits for the next message.
+        let attachments = match editing {
+            true => Vec::new(),
+            false => std::mem::take(&mut log.staged)
+                .into_iter()
+                .map(|staged| NewAttachment {
+                    source: staged.source,
+                    original: staged.original,
+                })
+                .collect(),
+        };
         Some(match std::mem::take(&mut log.compose) {
             Compose::New => Command::SendText {
                 conversation: log.id,
                 body,
                 reply_to: None,
+                attachments,
             },
             Compose::Reply(id) => Command::SendText {
                 conversation: log.id,
                 body,
                 reply_to: Some(id),
+                attachments,
             },
             Compose::Edit(id) => Command::Edit { id, body },
         })
+    }
+
+    /// The files waiting to go with the next message.
+    pub fn staged(&self) -> &[Staged] {
+        self.open.as_ref().map_or(&[], |log| &log.staged)
+    }
+
+    /// Adds files to the tray, up to [`MAX_ATTACHMENTS`] and
+    /// [`MAX_ATTACHMENT_SIZE`] each, reporting those left out; returns the
+    /// staged ones' IDs.
+    pub fn stage(&mut self, files: Vec<ToStage>) -> Vec<u64> {
+        let Some(log) = self.open.as_mut() else {
+            return Vec::new();
+        };
+        let mut staged = Vec::new();
+        let mut refused = None;
+        for file in files {
+            if file.size > u64::from(MAX_ATTACHMENT_SIZE) {
+                refused = Some(format!("{} is larger than 100 MB", visible(&file.name)));
+                continue;
+            }
+            if log.staged.len() >= MAX_ATTACHMENTS {
+                refused = Some(format!("at most {MAX_ATTACHMENTS} files go in one message"));
+                break;
+            }
+            self.next_staged += 1;
+            log.staged.push(Staged {
+                id: self.next_staged,
+                source: file.source,
+                name: file.name,
+                size: file.size,
+                original: false,
+            });
+            staged.push(self.next_staged);
+        }
+        if let Some(refused) = refused {
+            self.storage_error = Some(format!("not attached: {refused}"));
+        }
+        staged
+    }
+
+    /// Takes a file out of the tray.
+    pub fn unstage(&mut self, id: u64) {
+        if let Some(log) = self.open.as_mut() {
+            log.staged.retain(|staged| staged.id != id);
+        }
+    }
+
+    /// Switches a file between re-encoded and sent as it is.
+    pub fn toggle_original(&mut self, id: u64) {
+        if let Some(staged) = self
+            .open
+            .as_mut()
+            .and_then(|log| log.staged.iter_mut().find(|staged| staged.id == id))
+        {
+            staged.original = !staged.original;
+        }
     }
 
     /// What can be done to `message` now.
@@ -2026,6 +2134,7 @@ mod tests {
             conversation,
             body,
             reply_to: None,
+            ..
         }) = chat.submit("  hi\nthere \n")
         else {
             panic!("expected SendText");
@@ -3233,6 +3342,67 @@ mod tests {
         assert!(chat.open_selected().is_empty());
         assert_eq!(chat.overlay(), Some(Overlay::Viewer));
         assert!(!opened(vec![incoming(3, NOW)]).open_viewer(MessageId::new(3), None));
+    }
+
+    fn to_stage(name: &str, size: u64) -> ToStage {
+        ToStage {
+            source: AttachmentSource::Path(name.into()),
+            name: name.into(),
+            size,
+        }
+    }
+
+    #[test]
+    fn staged_files_go_with_the_next_message() {
+        let mut chat = opened(Vec::new());
+
+        let ids = chat.stage(vec![to_stage("a.jpg", 10), to_stage("b.pdf", 20)]);
+        assert_eq!(ids.len(), 2);
+        chat.toggle_original(ids[0]);
+        chat.unstage(ids[1]);
+        assert_eq!(chat.staged().len(), 1);
+
+        // No text needed.
+        let Some(Command::SendText {
+            body, attachments, ..
+        }) = chat.submit("  ")
+        else {
+            panic!();
+        };
+        assert_eq!(body.as_str(), "");
+        assert_eq!(attachments.len(), 1);
+        assert!(attachments[0].original);
+        assert!(chat.staged().is_empty());
+        assert!(chat.submit("").is_none());
+    }
+
+    #[test]
+    fn the_tray_refuses_too_many_or_too_large_files() {
+        let mut chat = opened(Vec::new());
+
+        let ids = chat.stage(vec![
+            to_stage("huge.mov", u64::from(MAX_ATTACHMENT_SIZE) + 1),
+            to_stage("ok.txt", 1),
+        ]);
+        assert_eq!(ids.len(), 1);
+        assert_eq!(
+            chat.storage_error(),
+            Some("not attached: \u{2068}huge.mov\u{2069} is larger than 100 MB")
+        );
+
+        let many = (0..40).map(|n| to_stage(&format!("{n}.txt"), 1)).collect();
+        chat.stage(many);
+        assert_eq!(chat.staged().len(), MAX_ATTACHMENTS);
+    }
+
+    #[test]
+    fn edits_leave_the_tray_for_the_next_message() {
+        let mut chat = opened(vec![mine(1, NOW - MINUTE)]);
+        chat.stage(vec![to_stage("a.jpg", 10)]);
+        chat.start_edit(ConversationId::new(1), MessageId::new(1));
+
+        assert!(matches!(chat.submit("fixed"), Some(Command::Edit { .. })));
+        assert_eq!(chat.staged().len(), 1);
     }
 
     #[test]

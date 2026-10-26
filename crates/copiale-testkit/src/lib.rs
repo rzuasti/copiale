@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use copiale_core::storage::{Database, SecretError, SecretStore};
 use copiale_core::{
-    Ack, BackendError, BlockedList, ChatRef, Clock, Contact, Destination, GroupInfo,
+    Ack, Attachment, BackendError, BlockedList, ChatRef, Clock, Contact, Destination, GroupInfo,
     GroupMasterKey, GroupMembers, IdentityKey, Incoming, Linker, MessageBody, Outgoing,
     PeerIdentity, RemoteAttachment, RequestResponse, Resendable, RetryRequest, SafetyNumber,
     ServiceId, SignalBackend, StoredChats, Timestamp,
@@ -91,6 +91,7 @@ pub fn text(body: &str) -> Outgoing {
     Outgoing::Text {
         body: MessageBody::new(body),
         quote: None,
+        attachments: Vec::new(),
     }
 }
 
@@ -98,6 +99,7 @@ pub fn text(body: &str) -> Outgoing {
 struct Link {
     sends_paused: bool,
     downloads_paused: bool,
+    uploads_paused: bool,
     offline: bool,
     connections_stalled: bool,
 }
@@ -167,6 +169,10 @@ struct State {
     /// Attachments downloaded, in order, including failed ones.
     downloads: Vec<RemoteAttachment>,
     download_failures: VecDeque<BackendError>,
+    /// Attachments uploaded, in order, as described and sent.
+    uploads: Vec<(Attachment, Vec<u8>)>,
+    uploads_started: usize,
+    upload_failures: VecDeque<BackendError>,
 }
 
 type DeletedForMe = (Destination, Vec<(Option<ServiceId>, Timestamp)>);
@@ -314,6 +320,40 @@ impl SignalBackend for FakeBackend {
                     recipients,
                     content,
                 }
+            }))
+        }
+        .boxed_local()
+    }
+
+    /// Puts the file on the CDN as `upload-N`, once uploads aren't paused
+    /// and the network is up.
+    fn upload(
+        &mut self,
+        attachment: Attachment,
+        contents: LocalBoxFuture<'static, std::io::Result<Vec<u8>>>,
+    ) -> LocalBoxFuture<'static, Result<RemoteAttachment, BackendError>> {
+        let failure = self.record(|state| {
+            state.uploads_started += 1;
+            state.upload_failures.pop_front()
+        });
+        let state = self.state.clone();
+        let changes = self.changes.clone();
+        let mut link = self.link.subscribe();
+        async move {
+            link.wait_for(|link| !link.uploads_paused && !link.offline)
+                .await
+                .ok();
+            if let Some(error) = failure {
+                return Err(error);
+            }
+            let contents = contents
+                .await
+                .map_err(|error| BackendError::new(error.to_string()))?;
+            Ok(record(&state, &changes, |state| {
+                let name = format!("upload-{}", state.uploads.len()).into_bytes();
+                state.attachments.insert(name.clone(), contents.clone());
+                state.uploads.push((attachment, contents));
+                RemoteAttachment::new(name)
             }))
         }
         .boxed_local()
@@ -719,6 +759,26 @@ impl FakeNetwork {
             .attachments
             .insert(name.as_bytes().to_vec(), contents.to_vec());
         remote
+    }
+
+    /// Files uploaded so far, oldest first, as described and sent.
+    pub fn uploads(&self) -> Vec<(Attachment, Vec<u8>)> {
+        self.state.lock().unwrap().uploads.clone()
+    }
+
+    /// Uploads begun so far, finished or not.
+    pub fn uploads_started(&self) -> usize {
+        self.state.lock().unwrap().uploads_started
+    }
+
+    /// Makes the next upload fail; queues up for repeated calls.
+    pub fn fail_next_upload(&self, error: BackendError) {
+        self.state.lock().unwrap().upload_failures.push_back(error);
+    }
+
+    /// Holds uploads in flight until called with `false`.
+    pub fn pause_uploads(&self, paused: bool) {
+        self.link.send_modify(|link| link.uploads_paused = paused);
     }
 
     /// Attachments downloads asked for so far, oldest first.

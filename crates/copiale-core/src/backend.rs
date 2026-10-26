@@ -8,8 +8,8 @@ use futures::stream::LocalBoxStream;
 use tokio::sync::oneshot;
 
 use crate::model::{
-    BlockedList, ChatRef, Destination, GroupId, GroupInfo, GroupMasterKey, GroupMembers,
-    IdentityKey, IncomingMessage, MessageChange, MessageRef, Outgoing, ReceiptKind,
+    Attachment, BlockedList, ChatRef, Destination, GroupId, GroupInfo, GroupMasterKey,
+    GroupMembers, IdentityKey, IncomingMessage, MessageChange, MessageRef, Outgoing, ReceiptKind,
     RemoteAttachment, RequestResponse, SafetyNumber, SentMessage, ServiceId, StoredChat,
     StoredIdentity, Timestamp,
 };
@@ -324,6 +324,15 @@ pub trait SignalBackend {
         outgoing: Outgoing,
         timestamp: Timestamp,
     ) -> LocalBoxFuture<'static, Result<Resendable, BackendError>>;
+
+    /// Encrypts and uploads a file to send, described by `attachment`,
+    /// reading `contents` as it starts; returns where it is. Doesn't borrow
+    /// the backend.
+    fn upload(
+        &mut self,
+        attachment: Attachment,
+        contents: LocalBoxFuture<'static, std::io::Result<Vec<u8>>>,
+    ) -> LocalBoxFuture<'static, Result<RemoteAttachment, BackendError>>;
 
     /// Downloads and decrypts an attachment, failing if it's larger than
     /// [`MAX_ATTACHMENT_SIZE`](crate::MAX_ATTACHMENT_SIZE) or than it says; [`BackendError::is_gone`]

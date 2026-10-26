@@ -9,6 +9,7 @@ mod probe;
 mod retries;
 mod run;
 mod session;
+mod uploads;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -22,7 +23,7 @@ use crate::backend::{BackendError, Linker};
 use crate::clock::{Clock, SystemClock};
 use crate::model::{
     Account, AttachmentId, Contact, ConversationId, ConversationSummary, FileContents, Identity,
-    Message, MessageBody, MessageId, RecentEmoji, ServiceId,
+    Message, MessageBody, MessageId, NewAttachment, RecentEmoji, ServiceId,
 };
 use crate::storage::{Passphrase, SecretStore, Storage};
 use crate::video::VideoHelper;
@@ -48,15 +49,21 @@ pub enum Command {
     /// Deletes all local data and starts from scratch, after
     /// [`Event::StorageFailed`]. The UI must confirm first.
     StartOver,
-    /// Stores the text as pending ([`Event::MessageAdded`]) and sends it
-    /// in the background: [`Event::MessageUpdated`] once sent, or
-    /// [`Event::SendFailed`]. Sends go out one at a time, in order. Sending
-    /// accepts a message request; nothing is sent to a blocked chat.
+    /// Stores the text and copies of its attachments as pending
+    /// ([`Event::MessageAdded`]) and sends it in the background: the
+    /// attachments are uploaded first, then [`Event::MessageUpdated`] once
+    /// sent, or [`Event::SendFailed`]. Sends go out one at a time, in order.
+    /// Sending accepts a message request; nothing is sent to a blocked
+    /// chat. [`Event::AttachFailed`], sending nothing, if an attachment
+    /// can't be read or is too large; at most [`MAX_ATTACHMENTS`] go.
+    ///
+    /// [`MAX_ATTACHMENTS`]: crate::MAX_ATTACHMENTS
     SendText {
         conversation: ConversationId,
         body: MessageBody,
         /// The message it replies to, quoted.
         reply_to: Option<MessageId>,
+        attachments: Vec<NewAttachment>,
     },
     /// Replaces the text of our message, within [`EDIT_WINDOW`] of sending
     /// it and up to [`MAX_SENT_EDITS`] times: [`Event::MessageUpdated`] at
@@ -208,6 +215,9 @@ pub enum Event {
     },
     /// Saving an attachment failed.
     SaveFailed(String),
+    /// A file to send couldn't be read, or is too large: the message wasn't
+    /// sent.
+    AttachFailed(String),
     /// A downloaded attachment's contents; `None` if it isn't here.
     /// Answers [`Command::LoadAttachment`].
     AttachmentLoaded {

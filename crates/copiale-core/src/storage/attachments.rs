@@ -1,9 +1,10 @@
-//! Attachments' downloads and their encrypted copies on disk.
+//! Attachments' downloads and uploads, and their encrypted copies on disk.
 //!
 //! A message's `content` describes its attachments; rows here, by position
-//! in that list, track the downloadable ones, and for videos their first
-//! frame. Deleting a row, also with its message, queues its copies in
-//! `deleted_files` until they're gone from disk.
+//! in that list, track the downloadable ones and our own, and for videos
+//! their first frame. Ours are copied in when sent and have no `pointer`
+//! until uploaded. Deleting a row, also with its message, queues its copies
+//! in `deleted_files` until they're gone from disk.
 
 use std::collections::HashSet;
 
@@ -28,7 +29,7 @@ impl Database {
     ) -> Result<Option<(MessageId, RemoteAttachment)>, StorageError> {
         let row: Option<(i64, Vec<u8>)> = sqlx::query_as(
             "UPDATE attachments SET state = 'downloading'
-             WHERE id = ? AND state IN ('remote', 'failed')
+             WHERE id = ? AND state IN ('remote', 'failed') AND pointer IS NOT NULL
              RETURNING message_id, pointer",
         )
         .bind(id.get())
@@ -36,6 +37,62 @@ impl Database {
         .await
         .map_err(database_error)?;
         Ok(row.map(|(message, pointer)| (MessageId::new(message), RemoteAttachment::new(pointer))))
+    }
+
+    /// Our message's attachments in order, each with where it was
+    /// uploaded, if it was.
+    pub(crate) async fn uploads(
+        &self,
+        message: MessageId,
+    ) -> Result<Vec<(AttachmentId, Option<RemoteAttachment>)>, StorageError> {
+        let rows: Vec<(i64, Option<Vec<u8>>)> = sqlx::query_as(
+            "SELECT a.id, a.pointer FROM attachments a JOIN messages m ON m.id = a.message_id
+             WHERE a.message_id = ? AND m.outgoing ORDER BY a.position",
+        )
+        .bind(message.get())
+        .fetch_all(&self.app)
+        .await
+        .map_err(database_error)?;
+        Ok(rows
+            .into_iter()
+            .map(|(id, pointer)| (AttachmentId::new(id), pointer.map(RemoteAttachment::new)))
+            .collect())
+    }
+
+    /// Where an attachment's copy is, if it's here.
+    pub(crate) async fn attachment_file(
+        &self,
+        id: AttachmentId,
+    ) -> Result<Option<StoredFile>, StorageError> {
+        let row: Option<(String, Vec<u8>)> = sqlx::query_as(
+            "SELECT file, file_key FROM attachments
+             WHERE id = ? AND state = 'ready' AND file IS NOT NULL AND file_key IS NOT NULL",
+        )
+        .bind(id.get())
+        .fetch_optional(&self.app)
+        .await
+        .map_err(database_error)?;
+        row.map(|(name, key)| {
+            let key = FileKey::from_slice(&key)
+                .ok_or_else(|| StorageError::Database("invalid file key".into()))?;
+            Ok(StoredFile { name, key })
+        })
+        .transpose()
+    }
+
+    /// Records where our attachment was uploaded.
+    pub(crate) async fn set_uploaded(
+        &self,
+        id: AttachmentId,
+        remote: &RemoteAttachment,
+    ) -> Result<(), StorageError> {
+        sqlx::query("UPDATE attachments SET pointer = ? WHERE id = ?")
+            .bind(remote.as_bytes())
+            .bind(id.get())
+            .execute(&self.app)
+            .await
+            .map_err(database_error)?;
+        Ok(())
     }
 
     /// Records a download's copy; returns the attachment's message, or
@@ -261,8 +318,11 @@ impl Database {
         }
         for name in kept.difference(&on_disk) {
             tracing::warn!("an attachment's file is missing");
+            // Ours not uploaded yet are lost.
             sqlx::query(
-                "UPDATE attachments SET state = 'remote', file = NULL, file_key = NULL
+                "UPDATE attachments
+                 SET state = CASE WHEN pointer IS NULL THEN 'unavailable' ELSE 'remote' END,
+                     file = NULL, file_key = NULL
                  WHERE file = ?",
             )
             .bind(name)
@@ -308,6 +368,34 @@ pub(super) async fn insert_attachments(
         .bind(message.get())
         .bind(position as i64)
         .bind(remote.as_bytes())
+        .bind(attachment.is_video().then_some("wanted"))
+        .execute(&mut *tx)
+        .await
+        .map_err(database_error)?;
+    }
+    Ok(())
+}
+
+/// Rows for our message's attachments, stored as `files` in order: here,
+/// not uploaded yet.
+pub(super) async fn insert_own_attachments(
+    tx: &mut sqlx::SqliteConnection,
+    message: MessageId,
+    content: &Content,
+    files: &[StoredFile],
+) -> Result<(), StorageError> {
+    let Content::Text { attachments, .. } = content else {
+        return Ok(());
+    };
+    for (position, (attachment, file)) in attachments.iter().zip(files).enumerate() {
+        sqlx::query(
+            "INSERT INTO attachments (message_id, position, state, file, file_key, preview)
+             VALUES (?, ?, 'ready', ?, ?, ?)",
+        )
+        .bind(message.get())
+        .bind(position as i64)
+        .bind(&file.name)
+        .bind(file.key.as_bytes())
         .bind(attachment.is_video().then_some("wanted"))
         .execute(&mut *tx)
         .await
@@ -389,6 +477,7 @@ fn parse_state(name: &str) -> Result<AttachmentState, StorageError> {
         "ready" => Ok(AttachmentState::Ready),
         "failed" => Ok(AttachmentState::Failed),
         "expired" => Ok(AttachmentState::Expired),
+        "unavailable" => Ok(AttachmentState::Unavailable),
         _ => Err(StorageError::Database("invalid attachment state".into())),
     }
 }
@@ -455,6 +544,62 @@ mod tests {
 
     async fn files_on_disk(db: &Database) -> usize {
         db.files.list().unwrap().len()
+    }
+
+    #[tokio::test]
+    async fn our_attachments_are_here_at_once_and_upload_once() {
+        let (_dir, db) = db().await;
+        let conversation = db
+            .open_conversation(&Destination::Contact(peer(1)))
+            .await
+            .unwrap();
+        let content = with_attachments(
+            "",
+            vec![
+                Attachment::new(AttachmentKind::Image),
+                Attachment::new(AttachmentKind::File),
+            ],
+        );
+        let files = vec![
+            db.files().store(b"one".to_vec()).await.unwrap(),
+            db.files().store(b"two".to_vec()).await.unwrap(),
+        ];
+        let second_file = files[1].name.clone();
+
+        let sent = db
+            .add_pending(conversation, at(1), &content, &files, None, at(1))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let states: Vec<_> = attachments(&sent).iter().map(|a| a.state).collect();
+        assert_eq!(states, [AttachmentState::Ready, AttachmentState::Ready]);
+        let (first, second) = (id(&sent, 0), id(&sent, 1));
+        assert_eq!(
+            db.uploads(sent.id).await.unwrap(),
+            [(first, None), (second, None)]
+        );
+        // Not on the CDN: nothing to download.
+        assert_eq!(db.start_download(first).await.unwrap(), None);
+        let file = db.attachment_file(first).await.unwrap().unwrap();
+        assert_eq!(db.files().load(file).await.unwrap(), b"one");
+
+        let remote = RemoteAttachment::new(b"cdn-1".to_vec());
+        db.set_uploaded(first, &remote).await.unwrap();
+        assert_eq!(
+            db.uploads(sent.id).await.unwrap(),
+            [(first, Some(remote)), (second, None)]
+        );
+
+        // A copy lost before its upload is gone for good.
+        db.files.remove(&second_file).unwrap();
+        db.check_files().await.unwrap();
+        let reloaded = db.message(sent.id).await.unwrap().unwrap();
+        assert_eq!(
+            attachments(&reloaded)[1].state,
+            AttachmentState::Unavailable
+        );
+        assert!(db.attachment_file(second).await.unwrap().is_none());
     }
 
     #[tokio::test]

@@ -7,13 +7,13 @@ use std::time::Duration;
 
 use copiale_core::storage::{KdfParams, Passphrase, Storage, StoragePaths};
 use copiale_core::{
-    Account, AccountSettings, Attachment, AttachmentId, AttachmentKind, AttachmentState,
-    BackendError, BlockedList, Change, ChatRef, ChatState, Command, Contact, Content,
-    ConversationId, ConversationSummary, CoreHandle, CoreOptions, Destination, Direction,
+    Account, AccountSettings, Attachment, AttachmentId, AttachmentKind, AttachmentSource,
+    AttachmentState, BackendError, BlockedList, Change, ChatRef, ChatState, Command, Contact,
+    Content, ConversationId, ConversationSummary, CoreHandle, CoreOptions, Destination, Direction,
     EDIT_WINDOW, Event, Events, Expiry, GroupId, GroupInfo, GroupRef, GroupUpdate, Identity,
     Incoming, IncomingMessage, MAX_SENT_EDITS, Member, Message, MessageBody, MessageChange,
-    MessagePreview, MessageRef, MessageStatus, Outgoing, Peer, PhoneNumber, Quote, Quoted,
-    ReceiptKind, RecentEmoji, RemoteAttachment, RequestResponse, RetryRequest, SentMessage,
+    MessagePreview, MessageRef, MessageStatus, NewAttachment, Outgoing, Peer, PhoneNumber, Quote,
+    Quoted, ReceiptKind, RecentEmoji, RemoteAttachment, RequestResponse, RetryRequest, SentMessage,
     StorageFailure, StoredChat, StoredChats, StoredIdentity, Timestamp, Undecryptable,
     Verification,
 };
@@ -544,6 +544,7 @@ fn send_text(running: &Running, conversation: ConversationId, body: &str) {
             conversation,
             body: MessageBody::new(body),
             reply_to: None,
+            attachments: Vec::new(),
         },
     );
 }
@@ -665,6 +666,195 @@ async fn failed_send_can_be_retried() {
     assert_eq!(sent.status, Some(MessageStatus::Sent));
     // Same timestamp, so the recipient can drop a copy that got through.
     assert_eq!(running.network.sent()[0].timestamp, pending.sent_at);
+    stop(running).await;
+}
+
+/// A pasted 30×20 opaque PNG.
+fn pasted_png() -> NewAttachment {
+    let image = image::RgbaImage::from_pixel(30, 20, image::Rgba([10, 200, 10, 255]));
+    let mut bytes = Vec::new();
+    image
+        .write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
+        .unwrap();
+    NewAttachment {
+        source: AttachmentSource::Pasted {
+            name: "screenshot.png".into(),
+            bytes,
+        },
+        original: false,
+    }
+}
+
+fn send_files(
+    running: &Running,
+    conversation: ConversationId,
+    body: &str,
+    files: Vec<NewAttachment>,
+) {
+    send(
+        running,
+        Command::SendText {
+            conversation,
+            body: MessageBody::new(body),
+            reply_to: None,
+            attachments: files,
+        },
+    );
+}
+
+#[tokio::test]
+async fn attachments_are_uploaded_before_their_message_goes() {
+    let (dir, mut running) = ready().await;
+    let notes = dir.path().join("notes.txt");
+    std::fs::write(&notes, "remember").unwrap();
+    let chat = open_chat(&mut running, 2).await;
+
+    let file = NewAttachment {
+        source: AttachmentSource::Path(notes),
+        original: false,
+    };
+    send_files(&running, chat, "look", vec![pasted_png(), file]);
+
+    let pending = pending_added(&mut running.events).await;
+    let Content::Text {
+        body, attachments, ..
+    } = &pending.content
+    else {
+        panic!("{:?}", pending.content);
+    };
+    assert_eq!(body.as_str(), "look");
+    let described: Vec<_> = attachments
+        .iter()
+        .map(|a| (a.kind, a.name.as_deref(), a.state, a.id.is_some()))
+        .collect();
+    assert_eq!(
+        described,
+        [
+            (
+                AttachmentKind::Image,
+                Some("screenshot.jpg"),
+                AttachmentState::Ready,
+                true
+            ),
+            (
+                AttachmentKind::File,
+                Some("notes.txt"),
+                AttachmentState::Ready,
+                true
+            ),
+        ]
+    );
+    let sent = message_updated(&mut running.events).await;
+    assert_eq!(sent.status, Some(MessageStatus::Sent));
+
+    let uploads = running.network.uploads();
+    assert_eq!(uploads.len(), 2);
+    let notes_upload = uploads
+        .iter()
+        .find(|(attachment, _)| attachment.name.as_deref() == Some("notes.txt"))
+        .unwrap();
+    assert_eq!(notes_upload.1, b"remember");
+    assert_eq!(notes_upload.0.content_type.as_deref(), Some("text/plain"));
+    let image_upload = uploads
+        .iter()
+        .find(|(attachment, _)| attachment.kind == AttachmentKind::Image)
+        .unwrap();
+    assert_eq!(image_upload.0.content_type.as_deref(), Some("image/jpeg"));
+    assert_eq!(
+        (image_upload.0.width, image_upload.0.height),
+        (Some(30), Some(20))
+    );
+    assert!(image_upload.0.blurhash.is_some());
+    // Pointers in the message's order, whichever finished first.
+    let Outgoing::Text {
+        attachments: remote,
+        ..
+    } = &running.network.sent()[0].outgoing
+    else {
+        panic!();
+    };
+    let order: Vec<_> = uploads
+        .iter()
+        .enumerate()
+        .map(|(n, (attachment, _))| (attachment.kind, format!("upload-{n}")))
+        .collect();
+    let image_at = order
+        .iter()
+        .find(|(kind, _)| *kind == AttachmentKind::Image)
+        .unwrap();
+    assert_eq!(
+        remote[0],
+        RemoteAttachment::new(image_at.1.clone().into_bytes())
+    );
+
+    // Our own copies open at once.
+    let id = attachments[1].id.unwrap();
+    send(&running, Command::LoadAttachment(id));
+    match next_event(&mut running.events).await {
+        Event::AttachmentLoaded { contents, .. } => {
+            assert_eq!(contents.unwrap().as_bytes(), b"remember");
+        }
+        other => panic!("{other:?}"),
+    }
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn failed_uploads_fail_the_message_and_retries_upload_the_rest() {
+    let (_dir, mut running) = ready().await;
+    running.network.pause_uploads(true);
+    running
+        .network
+        .fail_next_upload(BackendError::new("too large for the CDN"));
+    let chat = open_chat(&mut running, 2).await;
+
+    send_files(&running, chat, "", vec![pasted_png(), pasted_png()]);
+    let pending = pending_added(&mut running.events).await;
+    running.network.pause_uploads(false);
+    let (failed, error) = send_failed(&mut running.events).await;
+    assert_eq!(failed.id, pending.id);
+    assert_eq!(error, BackendError::new("too large for the CDN"));
+    assert!(running.network.sent().is_empty());
+    let uploaded_before = running.network.uploads().len();
+    assert!(uploaded_before <= 1);
+
+    send(&running, Command::RetrySend(pending.id));
+    message_updated(&mut running.events).await;
+    let sent = message_updated(&mut running.events).await;
+    assert_eq!(sent.status, Some(MessageStatus::Sent));
+    // Each uploaded once.
+    assert_eq!(running.network.uploads().len(), 2);
+    let Outgoing::Text {
+        body, attachments, ..
+    } = &running.network.sent()[0].outgoing
+    else {
+        panic!();
+    };
+    assert_eq!(body.as_str(), "");
+    assert_eq!(attachments.len(), 2);
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn unreadable_attachments_send_nothing() {
+    let (dir, mut running) = ready().await;
+    let chat = open_chat(&mut running, 2).await;
+
+    let missing = NewAttachment {
+        source: AttachmentSource::Path(dir.path().join("gone.pdf")),
+        original: false,
+    };
+    send_files(&running, chat, "with a file", vec![missing]);
+
+    match next_event(&mut running.events).await {
+        Event::AttachFailed(error) => assert!(error.contains("gone.pdf"), "{error}"),
+        other => panic!("{other:?}"),
+    }
+    assert!(load_messages(&mut running, chat).await.is_empty());
+    assert_eq!(running.network.uploads_started(), 0);
     stop(running).await;
 }
 
@@ -2043,6 +2233,7 @@ async fn commands_for_other_states_are_ignored() {
             conversation: ConversationId::new(1),
             body: MessageBody::new("too early"),
             reply_to: None,
+            attachments: Vec::new(),
         },
     );
     send(
@@ -3073,6 +3264,7 @@ async fn replies_quote_the_message() {
             conversation: question.conversation,
             body: MessageBody::new("yes"),
             reply_to: Some(question.id),
+            attachments: Vec::new(),
         },
     );
 
@@ -3099,6 +3291,7 @@ async fn replies_quote_the_message() {
         Outgoing::Text {
             body: MessageBody::new("yes"),
             quote: Some(quote),
+            attachments: Vec::new(),
         }
     );
     stop(running).await;

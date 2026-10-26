@@ -230,7 +230,9 @@ mod tests {
             (11, &|| std::fs::write("copiale-sandbox-test", "x").is_ok()),
             (12, &|| std::net::TcpStream::connect("127.0.0.1:9").is_ok()),
             (13, &|| Command::new("true").status().is_ok()),
-            (14, &executable_memory),
+            // On macOS the signed app's hardened runtime refuses it, not the
+            // sandbox profile; test binaries run without it.
+            (14, &|| cfg!(target_os = "linux") && executable_memory()),
             (15, &forks),
         ];
         for (code, attempt) in attempts {

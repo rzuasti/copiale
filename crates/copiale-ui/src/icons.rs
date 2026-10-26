@@ -7,7 +7,7 @@ use gpui_kit::{AssetSource, Result, SharedString};
 
 pub use gpui_kit::assets::IconName;
 
-icon_assets!(Extra, [FaceSlightlySmiling, SquarePen]);
+icon_assets!(Extra, [FaceSlightlySmiling, Paperclip, SquarePen]);
 
 /// The app's asset source.
 #[derive(Clone, Copy, Debug, Default)]
@@ -38,6 +38,7 @@ mod tests {
         for icon in [
             IconName::Settings,
             IconName::FaceSlightlySmiling,
+            IconName::Paperclip,
             IconName::SquarePen,
         ] {
             let data = Assets.load(&icon.path()).unwrap();

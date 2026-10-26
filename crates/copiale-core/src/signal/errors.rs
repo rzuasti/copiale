@@ -3,7 +3,7 @@
 use presage::libsignal_service::StorageServiceError;
 use presage::libsignal_service::protocol::SignalProtocolError;
 use presage::libsignal_service::push_service::ServiceError;
-use presage::libsignal_service::sender::MessageSenderError;
+use presage::libsignal_service::sender::{AttachmentUploadError, MessageSenderError};
 
 use crate::backend::BackendError;
 
@@ -64,6 +64,14 @@ pub(super) fn cdn_error(error: ServiceError) -> BackendError {
         Some(status) => BackendError::new(format!("the CDN answered {status}")),
         None if http.is_timeout() => BackendError::network("the CDN timed out"),
         None => BackendError::network("the CDN couldn't be reached"),
+    }
+}
+
+/// Upload failures, as [`cdn_error`] names no URL.
+pub(super) fn upload_error(error: AttachmentUploadError) -> BackendError {
+    match error {
+        AttachmentUploadError::ServiceError(error) => cdn_error(error),
+        AttachmentUploadError::IoError(error) => BackendError::new(error.to_string()),
     }
 }
 

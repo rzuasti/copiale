@@ -5,10 +5,13 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 use super::StorageError;
-use super::attachments::{insert_attachments, resolve_attachments, without_remotes};
+use super::attachments::{
+    insert_attachments, insert_own_attachments, resolve_attachments, without_remotes,
+};
 use super::changes::apply_pending;
 use super::contacts::display_name;
 use super::database::{Database, database_error};
+use super::files::StoredFile;
 use crate::model::{
     ChatState, Content, ConversationId, ConversationSummary, Destination, Direction, Expiry,
     GroupId, GroupInfo, GroupMasterKey, GroupRef, Member, Message, MessageBody, MessageId,
@@ -172,14 +175,16 @@ impl Database {
         Ok(message)
     }
 
-    /// Stores a message this device is about to send; with `expire_timer`,
-    /// its countdown starts once sent. `None` if one with the same sent time
+    /// Stores a message this device is about to send, with its
+    /// attachments' copies, `files`, in order; with `expire_timer`, its
+    /// countdown starts once sent. `None` if one with the same sent time
     /// exists, or there is no such conversation.
     pub(crate) async fn add_pending(
         &self,
         conversation: ConversationId,
         sent_at: Timestamp,
         content: &Content,
+        files: &[StoredFile],
         expire_timer: Option<u32>,
         now: Timestamp,
     ) -> Result<Option<Message>, StorageError> {
@@ -206,8 +211,13 @@ impl Database {
             now,
         )
         .await?;
+        let Some(mut message) = message else {
+            return Ok(None);
+        };
+        insert_own_attachments(&mut tx, message.id, content, files).await?;
+        resolve(&mut tx, &mut message).await?;
         tx.commit().await.map_err(database_error)?;
-        Ok(message)
+        Ok(Some(message))
     }
 
     /// The conversation with `destination`, created if new.
@@ -1085,6 +1095,7 @@ mod tests {
             conversation,
             Timestamp::from_millis(sent_at),
             &Content::text("out"),
+            &[],
             None,
             Timestamp::from_millis(sent_at),
         )
@@ -1448,6 +1459,7 @@ mod tests {
                 ConversationId::new(42),
                 Timestamp::from_millis(1),
                 &Content::text("x"),
+                &[],
                 None,
                 Timestamp::from_millis(1),
             )
@@ -1610,6 +1622,7 @@ mod tests {
                 conversation,
                 at(200),
                 &Content::text("out"),
+                &[],
                 Some(30),
                 at(200),
             )
@@ -1635,6 +1648,7 @@ mod tests {
                 conversation,
                 at(200),
                 &Content::text("out"),
+                &[],
                 Some(30),
                 at(200),
             )

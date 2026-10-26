@@ -36,7 +36,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant};
 
 use super::attachments;
-use super::errors::{presage_error, storage_service_error, store_error};
+use super::errors::{presage_error, storage_service_error, store_error, upload_error};
 use super::incoming::{identity_key, incoming, service_id};
 use super::store::AppStore;
 use crate::backend::{
@@ -44,9 +44,9 @@ use crate::backend::{
     StoredChats,
 };
 use crate::model::{
-    BlockedList, ChatRef, Destination, GroupInfo, GroupMasterKey, GroupMembers, IdentityKey,
-    Member, MessageBody, Outgoing, Quote, RemoteAttachment, RequestResponse, SafetyNumber,
-    ServiceId, StoredChat, StoredIdentity, Timestamp,
+    Attachment, BlockedList, ChatRef, Destination, GroupInfo, GroupMasterKey, GroupMembers,
+    IdentityKey, Member, MessageBody, Outgoing, Quote, RemoteAttachment, RequestResponse,
+    SafetyNumber, ServiceId, StoredChat, StoredIdentity, Timestamp,
 };
 use crate::storage::{Database, synced};
 use crate::text::clean_name;
@@ -256,14 +256,26 @@ impl SignalBackend for PresageBackend {
                 Destination::Contact(_) => None,
             };
             let text = |body: MessageBody, quote: Option<Quote>| DataMessage {
-                body: Some(body.as_str().into()),
+                // Signal's clients send no body with attachments alone.
+                body: Some(body.as_str().to_owned()).filter(|body| !body.is_empty()),
                 timestamp: Some(at),
                 quote: quote.map(|quote| proto_quote(quote, me)),
                 group_v2: group_v2.clone(),
                 ..Default::default()
             };
             let content: ContentBody = match outgoing {
-                Outgoing::Text { body, quote } => text(body, quote).into(),
+                Outgoing::Text {
+                    body,
+                    quote,
+                    attachments: remote,
+                } => DataMessage {
+                    attachments: remote
+                        .iter()
+                        .map(attachments::pointer)
+                        .collect::<Result<_, _>>()?,
+                    ..text(body, quote)
+                }
+                .into(),
                 Outgoing::Edit {
                     target,
                     body,
@@ -307,6 +319,27 @@ impl SignalBackend for PresageBackend {
                     .collect(),
                 content: sent.content.encode_to_vec(),
             })
+        }
+        .boxed_local()
+    }
+
+    fn upload(
+        &mut self,
+        attachment: Attachment,
+        contents: LocalBoxFuture<'static, std::io::Result<Vec<u8>>>,
+    ) -> LocalBoxFuture<'static, Result<RemoteAttachment, BackendError>> {
+        let manager = self.manager.clone();
+        async move {
+            let contents = contents
+                .await
+                .map_err(|error| BackendError::new(format!("reading the attachment: {error}")))?;
+            let spec = attachments::spec(attachment, contents.len());
+            let pointer = manager
+                .upload_attachment(spec, contents)
+                .await
+                .map_err(presage_error)?
+                .map_err(upload_error)?;
+            Ok(RemoteAttachment::new(pointer.encode_to_vec()))
         }
         .boxed_local()
     }

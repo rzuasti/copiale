@@ -336,9 +336,16 @@ mod tests {
             .open_conversation(&Destination::Contact(peer(1)))
             .await
             .unwrap();
-        db.add_pending(conversation, at(100), &Content::text("x"), None, at(100))
-            .await
-            .unwrap();
+        db.add_pending(
+            conversation,
+            at(100),
+            &Content::text("x"),
+            &[],
+            None,
+            at(100),
+        )
+        .await
+        .unwrap();
 
         let changed = db
             .apply_receipt(peer(1), ReceiptKind::Read, &[at(100)])

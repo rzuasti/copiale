@@ -1,7 +1,8 @@
-//! Downloading attachments from Signal's CDN.
+//! Downloading attachments from Signal's CDN, and describing ours for
+//! upload.
 //!
-//! Like presage's `Manager::get_attachment`, but reading no more than the
-//! attachment's declared size allows.
+//! Downloads are like presage's `Manager::get_attachment`, but read no more
+//! than the attachment's declared size allows.
 
 use futures::AsyncReadExt as _;
 use presage::libsignal_service::attachment_cipher::decrypt_in_place;
@@ -9,11 +10,12 @@ use presage::libsignal_service::configuration::SignalServers;
 use presage::libsignal_service::prelude::ProtobufMessage as _;
 use presage::libsignal_service::proto::AttachmentPointer;
 use presage::libsignal_service::push_service::PushService;
+use presage::libsignal_service::sender::AttachmentSpec;
 use sha2::{Digest as _, Sha256};
 
 use super::errors::cdn_error;
 use crate::backend::BackendError;
-use crate::model::{MAX_ATTACHMENT_SIZE, RemoteAttachment};
+use crate::model::{Attachment, MAX_ATTACHMENT_SIZE, RemoteAttachment};
 
 /// presage's, which its other requests send.
 const USER_AGENT: &str = "presage-rs-0.8.0-dev";
@@ -26,8 +28,7 @@ pub(super) async fn download(
     servers: SignalServers,
     attachment: RemoteAttachment,
 ) -> Result<Vec<u8>, BackendError> {
-    let pointer = AttachmentPointer::decode(attachment.as_bytes())
-        .map_err(|error| BackendError::new(format!("invalid attachment: {error}")))?;
+    let pointer = pointer(&attachment)?;
     let size = pointer
         .size
         .filter(|size| *size <= MAX_ATTACHMENT_SIZE)
@@ -48,6 +49,30 @@ pub(super) async fn download(
     tokio::task::spawn_blocking(move || decrypt(&pointer, ciphertext))
         .await
         .map_err(|_| BackendError::new("decrypting the attachment failed"))?
+}
+
+/// What recipients learn of `attachment` besides its contents.
+pub(super) fn spec(attachment: Attachment, length: usize) -> AttachmentSpec {
+    AttachmentSpec {
+        content_type: attachment
+            .content_type
+            .unwrap_or_else(|| "application/octet-stream".into()),
+        length,
+        file_name: attachment.name,
+        preview: None,
+        voice_note: None,
+        borderless: None,
+        width: attachment.width,
+        height: attachment.height,
+        caption: None,
+        blur_hash: attachment.blurhash,
+    }
+}
+
+/// `attachment` as sent in a message.
+pub(super) fn pointer(attachment: &RemoteAttachment) -> Result<AttachmentPointer, BackendError> {
+    AttachmentPointer::decode(attachment.as_bytes())
+        .map_err(|error| BackendError::new(format!("invalid attachment: {error}")))
 }
 
 /// Checks the downloaded file against the pointer's digest and decrypts it.

@@ -107,6 +107,14 @@ impl Files {
         Ok(StoredFile { name, key })
     }
 
+    /// [`Self::read`] of a recorded file, on the blocking pool.
+    pub(crate) async fn load(&self, file: StoredFile) -> io::Result<Vec<u8>> {
+        let files = self.clone();
+        tokio::task::spawn_blocking(move || files.read(&file.name, &file.key))
+            .await
+            .map_err(io::Error::other)?
+    }
+
     /// Reads and decrypts a file.
     pub(super) fn read(&self, name: &str, key: &FileKey) -> io::Result<Vec<u8>> {
         let mut contents = fs::read(self.path(name)?)?;

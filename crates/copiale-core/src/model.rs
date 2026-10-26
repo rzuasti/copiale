@@ -298,6 +298,8 @@ pub enum Outgoing {
     Text {
         body: MessageBody,
         quote: Option<Quote>,
+        /// Uploaded already, in order.
+        attachments: Vec<RemoteAttachment>,
     },
     /// New text for our message sent at `target`.
     Edit {
@@ -335,8 +337,33 @@ pub enum Change {
 
 /// Most attachments kept per message, as in Signal.
 pub const MAX_ATTACHMENTS: usize = 32;
-/// Largest attachment downloaded, in bytes, as Signal allows.
+/// Largest attachment downloaded or sent, in bytes, as Signal allows.
 pub const MAX_ATTACHMENT_SIZE: u32 = 100 * 1024 * 1024;
+
+/// A file to send ([`Command::SendText`](crate::Command::SendText)).
+/// `Debug` shows neither its name nor its contents.
+#[derive(Clone, PartialEq, Eq)]
+pub struct NewAttachment {
+    pub source: AttachmentSource,
+    /// Sent as it is: images aren't re-encoded or stripped of metadata.
+    pub original: bool,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub enum AttachmentSource {
+    /// A file the user picked, dropped or pasted.
+    Path(std::path::PathBuf),
+    /// A pasted image.
+    Pasted { name: String, bytes: Vec<u8> },
+}
+
+impl fmt::Debug for NewAttachment {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("NewAttachment")
+            .field("original", &self.original)
+            .finish_non_exhaustive()
+    }
+}
 
 /// A file sent with a message, as its sender describes it, and whether it's
 /// here. `Debug` hides the name and blurhash.

@@ -75,7 +75,10 @@ went unsolved until 2011.
     others when asked. At most 32 per message and 100 MiB each, enforced
     while downloading. Pictures decoded by contents (JPEG, PNG, WebP, GIF)
     with size limits; saved only where the user picks, under safe names
-    (`copiale_core::text::save_name`).
+    (`copiale_core::text::save_name`). Sent ones are copied in encrypted
+    at once, still images re-encoded upright without their metadata
+    unless sent as originals (`copiale_core::outgoing`), and uploaded two
+    at a time before the message joins the outbox.
   - Videos: first frames (`copiale --video-frame`) and playback in the
     viewer (`copiale --video-play`, frames and sound streamed back) come
     from a child process sandboxed before it reads the video (Linux
