@@ -740,16 +740,6 @@ impl<S: Store> Manager<S, Registered> {
                             };
                             match envelope {
                                 Ok(Some(content)) => {
-                                    // only our own devices may send sync messages
-                                    if matches!(content.body, ContentBody::SynchronizeMessage(_))
-                                        && content.metadata.sender
-                                            != ServiceId::Aci(state.service_ids.aci())
-                                    {
-                                        warn!("dropping sync message not sent by this account");
-                                        acknowledge(acknowledgement);
-                                        continue;
-                                    }
-
                                     if let ContentBody::DecryptionErrorMessage(request) =
                                         &content.body
                                     {

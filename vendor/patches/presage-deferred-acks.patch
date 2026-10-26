@@ -18,7 +18,7 @@ Requires MessagePipe::stream_unacknowledged from libsignal-service.
 Assisted-by: Claude Opus 5.5
 ---
 diff --git a/src/manager/registered.rs b/src/manager/registered.rs
-index 97c0904..07927fd 100644
+index 3cd407f..c2fd1a9 100644
 --- a/src/manager/registered.rs
 +++ b/src/manager/registered.rs
 @@ -17,7 +17,7 @@ use libsignal_service::{
@@ -86,15 +86,7 @@ index 97c0904..07927fd 100644
                                              continue;
                                          }
                                          state
-@@ -730,6 +746,7 @@ impl<S: Store> Manager<S, Registered> {
-                                             != ServiceId::Aci(state.service_ids.aci())
-                                     {
-                                         warn!("dropping sync message not sent by this account");
-+                                        acknowledge(acknowledgement);
-                                         continue;
-                                     }
- 
-@@ -744,8 +761,13 @@ impl<S: Store> Manager<S, Registered> {
+@@ -735,8 +751,13 @@ impl<S: Store> Manager<S, Registered> {
                                          )
                                          .await
                                          {
@@ -110,7 +102,7 @@ index 97c0904..07927fd 100644
                                          }
                                      }
  
-@@ -866,7 +888,7 @@ impl<S: Store> Manager<S, Registered> {
+@@ -857,7 +878,7 @@ impl<S: Store> Manager<S, Registered> {
                                          .await;
                                          let complete = contacts.complete();
                                          return Some((
@@ -119,7 +111,7 @@ index 97c0904..07927fd 100644
                                              state,
                                          ));
                                      }
-@@ -1014,23 +1036,38 @@ impl<S: Store> Manager<S, Registered> {
+@@ -1005,23 +1026,38 @@ impl<S: Store> Manager<S, Registered> {
                                          error!(%error, "error saving message to store");
                                      }
  
@@ -162,7 +154,7 @@ index 97c0904..07927fd 100644
                              debug!("got empty queue");
                              if state.account_entropy_pool.is_none() {
                                  debug!("device does not have the needed keys; requesting from primary device");
-@@ -1055,7 +1092,7 @@ impl<S: Store> Manager<S, Registered> {
+@@ -1046,7 +1082,7 @@ impl<S: Store> Manager<S, Registered> {
                                      }
                                  });
                              }
@@ -171,7 +163,7 @@ index 97c0904..07927fd 100644
                          }
                          Some(Err(error)) => {
                              error!(%error, "unexpected error in message receiving loop")
-@@ -1795,6 +1832,13 @@ impl<S: Store> Manager<S, Registered> {
+@@ -1786,6 +1822,13 @@ impl<S: Store> Manager<S, Registered> {
      }
  }
  

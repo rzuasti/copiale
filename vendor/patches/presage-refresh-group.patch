@@ -10,7 +10,7 @@ stored state before dropping their message.
 Assisted-by: Claude Opus 5.5
 ---
 diff --git a/src/manager/registered.rs b/src/manager/registered.rs
-index 9bef1d3..b6d976c 100644
+index 94ca612..b334844 100644
 --- a/src/manager/registered.rs
 +++ b/src/manager/registered.rs
 @@ -560,6 +560,20 @@ impl<S: Store> Manager<S, Registered> {

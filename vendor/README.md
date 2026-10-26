@@ -64,10 +64,6 @@ libsignal-service git hash back to `nix/package.nix`.
     resend with
     `Manager::resend_content`; `Manager::send_null_message` starts a new
     session. Not upstream yet.
-  - `patches/presage-sync-sender.patch`. The receive loop drops sync
-    messages not sent by this account's ACI; any account could otherwise
-    overwrite contacts and keys or set disappearing timers.
-    Upstream PR: [whisperfish/presage#467](https://github.com/whisperfish/presage/pull/467).
   - `patches/presage-refresh-group.patch`. `Manager::refresh_group`
     fetches and stores a group's state whatever revision is stored, to
     check a sender missing from it before dropping their message.

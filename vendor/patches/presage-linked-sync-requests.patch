@@ -10,10 +10,10 @@ the device asking. Only the primary answers them now.
 Assisted-by: Claude Opus 5.5
 ---
 diff --git a/src/manager/registered.rs b/src/manager/registered.rs
-index fa9d9ed..00f1f24 100644
+index 282ab5e..68def6c 100644
 --- a/src/manager/registered.rs
 +++ b/src/manager/registered.rs
-@@ -739,6 +756,12 @@ impl<S: Store> Manager<S, Registered> {
+@@ -747,6 +747,12 @@ impl<S: Store> Manager<S, Registered> {
                                          use libsignal_service::content::sync_message::request::Type as RequestType;
  
                                          match request.r#type() {

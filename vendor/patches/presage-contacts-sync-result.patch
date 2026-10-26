@@ -11,7 +11,7 @@ without an ACI are skipped, as before.
 Assisted-by: Claude Opus 5.5
 ---
 diff --git a/src/manager/registered.rs b/src/manager/registered.rs
-index 00f1f24..97c0904 100644
+index 68def6c..3cd407f 100644
 --- a/src/manager/registered.rs
 +++ b/src/manager/registered.rs
 @@ -5,6 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
@@ -22,7 +22,7 @@ index 00f1f24..97c0904 100644
  use libsignal_service::prelude::SessionStoreExt;
  use libsignal_service::protocol::{ProtocolAddress, SessionStore};
  use libsignal_service::provisioning::ProvisioningSecrets;
-@@ -857,30 +858,17 @@ impl<S: Store> Manager<S, Registered> {
+@@ -848,30 +849,17 @@ impl<S: Store> Manager<S, Registered> {
                                          ..
                                      }) = &content.body
                                      {
@@ -64,7 +64,7 @@ index 00f1f24..97c0904 100644
                                      }
  
                                      // sticker pack operations
-@@ -2200,6 +2188,48 @@ async fn save_message<S: Store>(
+@@ -2191,6 +2179,48 @@ async fn save_message<S: Store>(
      Ok(())
  }
  

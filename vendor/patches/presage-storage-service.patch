@@ -10,7 +10,7 @@ master key, so clients can read contact and group records.
 Assisted-by: Claude Opus 5.5
 ---
 diff --git a/src/manager/registered.rs b/src/manager/registered.rs
-index fa9d9ed..00f1f24 100644
+index b334844..282ab5e 100644
 --- a/src/manager/registered.rs
 +++ b/src/manager/registered.rs
 @@ -15,6 +15,7 @@ use libsignal_service::{
