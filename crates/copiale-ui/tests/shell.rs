@@ -523,10 +523,10 @@ fn pasted_images_and_files_go_with_the_next_message(cx: &mut TestAppContext) {
             gpui_kit::Image::from_bytes(gpui_kit::ImageFormat::Png, png(4, 4)),
         )],
     });
-    ui.press("ctrl-v", cx);
+    ui.press("secondary-v", cx);
     let uri = url::Url::from_file_path(&notes).unwrap();
     cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(format!("{uri}\n")));
-    ui.press("ctrl-v", cx);
+    ui.press("secondary-v", cx);
     ui.frame(cx);
 
     assert!(ui.shows("tray", cx));
@@ -570,7 +570,7 @@ fn pasted_text_still_goes_in_the_composer(cx: &mut TestAppContext) {
     ui.open_alice(cx);
 
     cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string("/etc/passwd".into()));
-    ui.press("ctrl-v", cx);
+    ui.press("secondary-v", cx);
 
     assert!(!ui.shows("tray", cx));
     let composer = cx.update(|cx| {
@@ -597,7 +597,7 @@ fn staged_files_can_be_removed(cx: &mut TestAppContext) {
             gpui_kit::Image::from_bytes(gpui_kit::ImageFormat::Png, png(4, 4)),
         )],
     });
-    ui.press("ctrl-v", cx);
+    ui.press("secondary-v", cx);
     ui.frame(cx);
 
     ui.click(("unstage", 1u64), cx);

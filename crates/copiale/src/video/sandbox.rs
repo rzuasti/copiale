@@ -193,15 +193,18 @@ mod tests {
 
     /// Runs [`sandboxed_child`] in a copy of this test binary.
     fn run_child(mode: &str) {
-        let status = Command::new(std::env::current_exe().unwrap())
+        let spawning = crate::spawn_guard();
+        let mut child = Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
                 "video::sandbox::tests::sandboxed_child",
                 "--test-threads=1",
             ])
             .env(CHILD, mode)
-            .status()
+            .spawn()
             .unwrap();
+        drop(spawning);
+        let status = child.wait().unwrap();
         assert!(status.success(), "{mode}: {status}");
     }
 
@@ -242,7 +245,9 @@ mod tests {
         }
         let thread = std::thread::Builder::new().spawn(|| (0..1000u64).sum::<u64>());
         let threads = thread.is_ok_and(|thread| thread.join().is_ok_and(|sum| sum == 499_500));
-        if threads != (mode == Mode::Play) {
+        // macOS's profile can't refuse threads.
+        let refused = mode == Mode::Frame && cfg!(target_os = "linux");
+        if threads == refused {
             std::process::exit(16);
         }
         // Computing still works.
