@@ -1,6 +1,7 @@
-# FFmpeg as the video frame helper needs it (`copiale --video-frame`): only
-# the decoding libraries, LGPL, no network, devices, filters or programs.
-# H.264, HEVC and VP9 decoders are FFmpeg's own; AV1 comes from dav1d.
+# FFmpeg as the video helper needs it (`copiale --video-frame`,
+# `--video-play`): only the decoding and conversion libraries, LGPL, no
+# network, devices, filters or programs. H.264, HEVC, VP9 and AAC decoders
+# are FFmpeg's own; AV1 comes from dav1d.
 {ffmpeg-headless}:
 (ffmpeg-headless.override {
   withHeadlessDeps = false;
@@ -10,6 +11,7 @@
   buildAvcodec = true;
   buildAvformat = true;
   buildAvutil = true;
+  buildSwresample = true;
   buildSwscale = true;
 }).overrideAttrs {
   # FFmpeg's test tools need the filter library; Copiale's tests cover

@@ -22,6 +22,7 @@ use std::rc::Rc;
 
 pub use copiale_core::APP_ID;
 use copiale_core::config::ConfigFile;
+use copiale_core::video::VideoHelper;
 use copiale_core::{Command, CoreHandle, Events};
 use futures::StreamExt as _;
 use futures::channel::mpsc::UnboundedReceiver;
@@ -34,6 +35,8 @@ use notifier::{DesktopNotifier, NoNotifier, Notifier};
 pub use qr::QrMatrix;
 pub use shell::Shell;
 use tray::SystemTray;
+
+pub use media::VideoPlayback;
 
 actions!(copiale, [Quit]);
 
@@ -87,6 +90,7 @@ pub fn run(
     core: CoreHandle,
     events: Events,
     mut requests: UnboundedReceiver<Request>,
+    video: Option<VideoHelper>,
     hidden: bool,
 ) {
     let core = Rc::new(RunningCore(RefCell::new(Some(core))));
@@ -95,6 +99,12 @@ pub fn run(
     app.on_reopen(|cx| main_window::show(None, cx));
     app.run(move |cx| {
         init(cx);
+        if let Some(helper) = video {
+            cx.set_global(VideoPlayback {
+                helper,
+                sound: true,
+            });
+        }
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.on_app_quit({
             let core = core.clone();

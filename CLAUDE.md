@@ -76,11 +76,13 @@ went unsolved until 2011.
     while downloading. Pictures decoded by contents (JPEG, PNG, WebP, GIF)
     with size limits; saved only where the user picks, under safe names
     (`copiale_core::text::save_name`).
-  - Video previews: the first frame comes from `copiale --video-frame`, a
-    child process sandboxed before it reads the video (Linux seccomp,
-    macOS pure computation profile; no Windows yet, #94), decoding only
-    MOV/MP4 with H.264, HEVC, VP9 (and AV1 on Linux) through FFmpeg
-    (`crates/copiale/src/frame`, `copiale_core::video`).
+  - Videos: first frames (`copiale --video-frame`) and playback in the
+    viewer (`copiale --video-play`, frames and sound streamed back) come
+    from a child process sandboxed before it reads the video (Linux
+    seccomp, threads only when playing; macOS pure computation profile;
+    no Windows yet, #94), decoding only MOV/MP4 with H.264, HEVC, VP9 (and
+    AV1 on Linux), and AAC sound, through FFmpeg, in software
+    (`crates/copiale/src/video`, `copiale_core::video`).
   - Message requests: a chat the other side wrote in is a request until
     accepted (here, on the phone, in Storage Service, or by replying);
     requests send no read receipts or typing and notify without name or
@@ -127,7 +129,7 @@ went unsolved until 2011.
       autostart entry (NixOS), a systemd user service (Home Manager).
       nixpkgs later.
     - Flatpak, AUR.
-  - FFmpeg (video previews): minimal builds only, never system-wide
+  - FFmpeg (videos): minimal builds only, never system-wide
     extras: `nix/ffmpeg.nix` on Linux, a static build per architecture on
     macOS (`packaging/macos/ffmpeg.sh`, pinned and checksummed).
   - macOS: notarized universal `.dmg` (macOS 14+), built, signed and

@@ -25,7 +25,8 @@ use copiale_ui::theme::{
 };
 use copiale_ui::tray::{self, Tray, TrayAction, TrayState};
 use copiale_ui::{
-    APP_ID, CoreSink, Quit, Request, Shell, main_window, main_window_options, titlebar,
+    APP_ID, CoreSink, Quit, Request, Shell, VideoPlayback, main_window, main_window_options,
+    titlebar,
 };
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::test::TestWindowExt as _;
@@ -3047,6 +3048,119 @@ fn pictures_draw_open_in_the_viewer_and_files_download(cx: &mut TestAppContext) 
         matches!(asked.as_slice(), [Command::Download(id)] if *id == AttachmentId::new(11)),
         "{asked:?}"
     );
+}
+
+/// A helper that plays one blue frame of a second, then waits to be
+/// closed: the protocol's bytes, from `printf`.
+#[cfg(unix)]
+fn fake_player() -> copiale_core::video::VideoHelper {
+    let cat = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|dir| dir.join("cat"))
+        .find(|path| path.is_file())
+        .unwrap();
+    let info = r"\001\001\000\000\000\001\000\000\000\100\102\017\000\000\000\000\000\000";
+    let frame = r"\002\000\000\000\000\000\000\000\000\000\000\000\000\377\000\000\377";
+    let end = r"\004\000\000\000\000";
+    let script = format!("printf '{info}{frame}{end}'; {} >/dev/null", cat.display());
+    copiale_core::video::VideoHelper::with_args("/bin/sh", ["-c".to_owned(), script])
+}
+
+#[cfg(unix)]
+#[gpui_kit::test]
+fn videos_play_in_the_viewer(cx: &mut TestAppContext) {
+    let ui = Ui::open(cx);
+    cx.update(|cx| {
+        cx.set_global(VideoPlayback {
+            helper: fake_player(),
+            sound: false,
+        })
+    });
+    ui.event(Event::Ready, cx);
+    ui.event(Event::Conversations(vec![summary(1, "Alice", 0)]), cx);
+    ui.core.take();
+    let video = Attachment {
+        id: Some(AttachmentId::new(10)),
+        state: AttachmentState::Ready,
+        ..Attachment::new(AttachmentKind::Video)
+    };
+    ui.event(
+        Event::Messages {
+            conversation: ConversationId::new(1),
+            before: None,
+            messages: vec![Message {
+                content: Content::Text {
+                    body: MessageBody::new(""),
+                    attachments: vec![video],
+                    quote: None,
+                },
+                ..message(1, Direction::Incoming, None)
+            }],
+        },
+        cx,
+    );
+    ui.core.take();
+
+    ui.click(("attachment", 10u64), cx);
+    assert!(ui.shows("viewer", cx));
+    assert!(ui.shows("video", cx));
+    let asked = ui.core.take();
+    assert!(
+        matches!(asked.as_slice(), [Command::LoadAttachment(id)] if *id == AttachmentId::new(10)),
+        "{asked:?}"
+    );
+    ui.event(
+        Event::AttachmentLoaded {
+            id: AttachmentId::new(10),
+            contents: Some(FileContents::new(b"video".to_vec())),
+        },
+        cx,
+    );
+    // The helper runs on its own: wait for its frame.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !ui.shows("video-frame", cx) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+        ui.frame(cx);
+    }
+    assert!(ui.shows("video-frame", cx));
+    assert!(ui.shows("video-progress", cx));
+
+    ui.press("space", cx);
+    ui.press("m", cx);
+    ui.press("right", cx);
+    assert!(ui.shows("viewer", cx), "keys act on the video");
+    ui.press("escape", cx);
+    assert!(!ui.shows("viewer", cx));
+    assert!(!ui.shows("video", cx));
+}
+
+#[gpui_kit::test]
+fn videos_save_where_they_cant_play(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.click(("conversation", 1u64), cx);
+    ui.core.take();
+    let video = Attachment {
+        id: Some(AttachmentId::new(10)),
+        state: AttachmentState::Ready,
+        ..Attachment::new(AttachmentKind::Video)
+    };
+    ui.event(
+        Event::Messages {
+            conversation: ConversationId::new(1),
+            before: None,
+            messages: vec![Message {
+                content: Content::Text {
+                    body: MessageBody::new(""),
+                    attachments: vec![video],
+                    quote: None,
+                },
+                ..message(1, Direction::Incoming, None)
+            }],
+        },
+        cx,
+    );
+
+    ui.click(("attachment", 10u64), cx);
+    assert!(!ui.shows("viewer", cx));
 }
 
 #[gpui_kit::test]

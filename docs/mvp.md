@@ -24,7 +24,8 @@ Scope, UI design, architecture and work items for the first usable release.
 - Received attachments (after the MVP, #87): images and GIFs drawn above
   the caption, albums as a grid of up to four; videos as their first
   frame once downloaded (Linux and macOS), before that their blurred
-  preview, with `▶`; other files as `▤ name · size · download/save` lines.
+  preview, with `▶`, played with sound in the viewer; other files as
+  `▤ name · size · download/save` lines.
   Not yet downloaded: the blurred preview with `↓ size`. Attachments that
   can't be downloaded keep a placeholder line.
 - Group and timer changes: system lines, e.g. `-- alice added bob · 10:04`.
@@ -149,8 +150,11 @@ Scope, UI design, architecture and work items for the first usable release.
   (else downloads its attachments), `s` saves its attachments, `Esc`
   returns to the composer.
 - The picture viewer covers the window: `←`/`→` move through the message's
-  pictures, `s` saves, `Esc` or a click outside closes. Clicking a picture
-  opens it; clicking anything else downloads or saves it.
+  pictures and videos, `s` saves, `Esc` or a click outside closes. A video
+  plays at once: `Space` (or a click on it) pauses, `←`/`→` move 5 s,
+  `Shift+←`/`→` move between the message's pictures and videos, `m`
+  mutes; the bar seeks. Clicking a picture or video opens it; clicking
+  anything else downloads or saves it.
 - Saving asks where: a file name for one attachment, a folder for several
   (numbered rather than replacing files), starting in Downloads.
 - Hovering a message shows `reply · edit · download · save · delete` on a

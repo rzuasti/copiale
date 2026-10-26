@@ -1,6 +1,11 @@
-//! Runs the helper that decodes a video's first frame (`copiale
-//! --video-frame`), a sandboxed process of its own: the video goes in on
-//! stdin, a PNG comes back on stdout.
+//! Runs the helper that decodes videos, a sandboxed process of its own:
+//! `copiale --video-frame` takes a video on stdin and gives its first
+//! frame as a PNG; `copiale --video-play` streams it for [`Player`].
+
+mod player;
+pub mod protocol;
+
+pub use player::{Frame, Player, Status};
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -10,22 +15,31 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::process::Command;
 
-/// How long the helper may take.
+/// Runs the helper for a first frame.
+pub const FRAME_FLAG: &str = "--video-frame";
+/// Runs the helper for playback.
+pub const PLAY_FLAG: &str = "--video-play";
+
+/// How long the helper may take for a first frame.
 const TIMEOUT: Duration = Duration::from_secs(30);
 /// Largest frame accepted, in bytes.
 const MAX_FRAME: u64 = 16 * 1024 * 1024;
 /// How every PNG starts.
 const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
 
-/// The program and arguments that run the helper.
+/// The program and arguments that run the helper, before its mode's flag.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FrameHelper {
+pub struct VideoHelper {
     program: PathBuf,
     args: Vec<OsString>,
 }
 
-impl FrameHelper {
-    pub fn new(
+impl VideoHelper {
+    pub fn new(program: impl Into<PathBuf>) -> Self {
+        Self::with_args(program, Vec::<OsString>::new())
+    }
+
+    pub fn with_args(
         program: impl Into<PathBuf>,
         args: impl IntoIterator<Item = impl Into<OsString>>,
     ) -> Self {
@@ -40,6 +54,7 @@ impl FrameHelper {
     pub async fn first_frame(&self, video: Vec<u8>) -> std::io::Result<Vec<u8>> {
         let mut child = Command::new(&self.program)
             .args(&self.args)
+            .arg(FRAME_FLAG)
             .env_clear()
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -76,6 +91,20 @@ impl FrameHelper {
     }
 }
 
+impl VideoHelper {
+    /// The helper streaming a video, with no environment or stderr.
+    fn spawn_player(&self) -> std::io::Result<std::process::Child> {
+        std::process::Command::new(&self.program)
+            .args(&self.args)
+            .arg(PLAY_FLAG)
+            .env_clear()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+    }
+}
+
 fn missing(what: &str) -> std::io::Error {
     std::io::Error::other(format!("no {what} for the video frame helper"))
 }
@@ -86,12 +115,12 @@ mod tests {
 
     /// Runs `script` in `sh`; the helper gets no PATH, so `{name}` stands
     /// for a tool's full path.
-    fn shell(script: &str) -> FrameHelper {
+    fn shell(script: &str) -> VideoHelper {
         let mut script = script.to_owned();
         for name in ["cat", "wc", "tr"] {
             script = script.replace(&format!("{{{name}}}"), &tool(name));
         }
-        FrameHelper::new("/bin/sh", ["-c".to_owned(), script])
+        VideoHelper::with_args("/bin/sh", ["-c".to_owned(), script])
     }
 
     fn tool(name: &str) -> String {
@@ -125,7 +154,7 @@ mod tests {
         let early = shell(r"exit 1");
         assert!(early.first_frame(vec![1; 1_000_000]).await.is_err());
 
-        let missing = FrameHelper::new("/nonexistent/copiale", ["--video-frame"]);
+        let missing = VideoHelper::new("/nonexistent/copiale");
         assert!(missing.first_frame(vec![1; 10]).await.is_err());
     }
 

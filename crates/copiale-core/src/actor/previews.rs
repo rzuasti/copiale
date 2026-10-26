@@ -6,11 +6,11 @@ use tokio::task::JoinHandle;
 
 use crate::model::AttachmentId;
 use crate::storage::{Files, StoredFile};
-use crate::video::FrameHelper;
+use crate::video::VideoHelper;
 
 pub(super) struct Previews {
     /// `None` where there's no helper: frames stay wanted.
-    helper: Option<FrameHelper>,
+    helper: Option<VideoHelper>,
     files: Files,
     queue: VecDeque<AttachmentId>,
     running: Option<JoinHandle<Made>>,
@@ -30,7 +30,7 @@ pub(super) enum Failure {
 }
 
 impl Previews {
-    pub(super) fn new(helper: Option<FrameHelper>, files: Files) -> Self {
+    pub(super) fn new(helper: Option<VideoHelper>, files: Files) -> Self {
         Self {
             helper,
             files,

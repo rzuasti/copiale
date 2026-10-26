@@ -7,10 +7,10 @@ use copiale_core::{
 };
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::{
-    AnyElement, Context, ImageSource, InteractiveElement as _, IntoElement, MouseButton, ObjectFit,
-    ParentElement as _, PathPromptOptions, Pixels, RenderImage, SharedString,
-    StatefulInteractiveElement as _, Styled, StyledImage as _, TestSupportExt as _, Window, div,
-    img, px, relative,
+    AnyElement, App, AppContext as _, Bounds, Context, Entity, ImageSource,
+    InteractiveElement as _, IntoElement, MouseButton, ObjectFit, ParentElement as _, PathBuilder,
+    PathPromptOptions, Pixels, RenderImage, SharedString, StatefulInteractiveElement as _, Styled,
+    StyledImage as _, TestSupportExt as _, Window, canvas, div, img, point, px, relative, white,
 };
 
 use crate::chat::media::{
@@ -18,10 +18,14 @@ use crate::chat::media::{
     file_action, file_line, shown, status_label,
 };
 use crate::chat::model::{Overlay, Row};
-use crate::media::{Picture, Slot, Use, decode};
+use crate::media::{Picture, Slot, Use, VideoPlayback, decode};
 use crate::theme::ActivePalette as _;
 
-use super::{Cancel, ChatView, SaveViewed, VIEWER, ViewerNext, ViewerPrevious};
+use super::video::{SKIP_SECONDS, VideoView};
+use super::{
+    Cancel, ChatView, SaveViewed, ToggleMute, TogglePlay, VIEWER, ViewerNext, ViewerPrevious,
+    ViewerStepNext, ViewerStepPrevious,
+};
 
 impl ChatView {
     /// A row's pictures and videos, alone or as an album, `space` above
@@ -140,14 +144,21 @@ impl ChatView {
             });
         let label = if undrawable {
             Some("can't show this · save".to_owned())
-        } else if video {
-            Some(match status_label(attachment) {
-                Some(status) => format!("▶ {status}"),
-                None => "▶ save".into(),
-            })
+        } else if video && !self.chat.videos_play() {
+            Some(status_label(attachment).unwrap_or_else(|| "save".into()))
         } else {
             status_label(attachment)
         };
+        // A large ▶ in the middle: anywhere on it plays.
+        let play = video.then(|| {
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(canvas(|_, _, _| {}, paint_play).size(px(PLAY_SIZE)))
+        });
         let label = label.map(|label| {
             div()
                 .absolute()
@@ -185,6 +196,7 @@ impl ChatView {
             .bg(palette.surface)
             .cursor_pointer()
             .children(background)
+            .children(play)
             .children(label)
             .children(more)
             .on_click(cx.listener(move |view, _, window, cx| {
@@ -354,8 +366,58 @@ impl ChatView {
             return false;
         }
         window.focus(&self.viewer_focus, cx);
+        self.sync_video(cx);
         cx.notify();
         true
+    }
+
+    /// Plays the video the viewer shows, if any, stopping any other.
+    pub(super) fn sync_video(&mut self, cx: &mut Context<Self>) {
+        let shown = self
+            .chat
+            .viewed()
+            .filter(|viewed| shown(viewed.attachment) == Some(Shown::Video))
+            .and_then(|viewed| viewed.attachment.id)
+            .filter(|_| cx.has_global::<VideoPlayback>());
+        let playing = self.video.as_ref().map(|video| video.read(cx).id());
+        if shown == playing {
+            return;
+        }
+        if let Some(video) = self.video.take() {
+            video.update(cx, |video, cx| video.stop(cx));
+        }
+        if let Some(id) = shown {
+            self.video = Some(cx.new(|_| VideoView::new(id)));
+            self.core.send(Command::LoadAttachment(id));
+        }
+    }
+
+    /// Plays a video loaded for the viewer.
+    pub(super) fn video_loaded(
+        &mut self,
+        id: AttachmentId,
+        contents: Option<&FileContents>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(video) = &self.video else {
+            return;
+        };
+        let waiting = video.read(cx);
+        if waiting.id() != id || !waiting.loading() {
+            return;
+        }
+        let Some(playback) = cx.try_global::<VideoPlayback>().cloned() else {
+            return;
+        };
+        video.update(cx, |video, cx| video.start(&playback, contents, cx));
+    }
+
+    /// The viewer's video, if it shows one.
+    fn viewed_video(&self) -> Option<&Entity<VideoView>> {
+        let viewed = self.chat.viewed()?;
+        self.video
+            .as_ref()
+            .filter(|_| shown(viewed.attachment) == Some(Shown::Video))
     }
 
     /// Asks where to save, then has the core write them: a file name for
@@ -436,11 +498,32 @@ impl ChatView {
         }
     }
 
+    /// ←: back in a video, else the previous picture.
     fn viewer_previous(&mut self, _: &ViewerPrevious, _: &mut Window, cx: &mut Context<Self>) {
+        match self.viewed_video().cloned() {
+            Some(video) => video.update(cx, |video, cx| video.skip(-SKIP_SECONDS, cx)),
+            None => self.step_viewer(-1, cx),
+        }
+    }
+
+    /// →: ahead in a video, else the next picture.
+    fn viewer_next(&mut self, _: &ViewerNext, _: &mut Window, cx: &mut Context<Self>) {
+        match self.viewed_video().cloned() {
+            Some(video) => video.update(cx, |video, cx| video.skip(SKIP_SECONDS, cx)),
+            None => self.step_viewer(1, cx),
+        }
+    }
+
+    fn viewer_step_previous(
+        &mut self,
+        _: &ViewerStepPrevious,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.step_viewer(-1, cx);
     }
 
-    fn viewer_next(&mut self, _: &ViewerNext, _: &mut Window, cx: &mut Context<Self>) {
+    fn viewer_step_next(&mut self, _: &ViewerStepNext, _: &mut Window, cx: &mut Context<Self>) {
         self.step_viewer(1, cx);
     }
 
@@ -449,7 +532,20 @@ impl ChatView {
             let shown = self.chat.viewed().and_then(|viewed| viewed.attachment.id);
             let dropped = self.pictures.borrow_mut().forget_full(shown);
             self.drop_pictures(dropped, cx);
+            self.sync_video(cx);
             cx.notify();
+        }
+    }
+
+    fn toggle_play(&mut self, _: &TogglePlay, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(video) = self.viewed_video().cloned() {
+            video.update(cx, |video, cx| video.toggle(cx));
+        }
+    }
+
+    fn toggle_mute(&mut self, _: &ToggleMute, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(video) = self.viewed_video().cloned() {
+            video.update(cx, |video, cx| video.toggle_mute(cx));
         }
     }
 
@@ -460,18 +556,22 @@ impl ChatView {
         }
     }
 
-    /// Frees the viewer's pictures once it's closed.
+    /// Frees the viewer's pictures and stops its video once it's closed.
     pub(super) fn viewer_closed(&mut self, cx: &mut Context<Self>) {
         let dropped = self.pictures.borrow_mut().forget_full(None);
         self.drop_pictures(dropped, cx);
+        if let Some(video) = self.video.take() {
+            video.update(cx, |video, cx| video.stop(cx));
+        }
     }
 
-    /// The picture over the whole window, scaled to fit, with its place
-    /// among the message's pictures.
+    /// The picture or video over the whole window, scaled to fit, with its
+    /// place among the message's.
     pub(super) fn render_viewer(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let palette = cx.palette();
         let mono = cx.theme().mono_font_family.clone();
         let viewed = self.chat.viewed();
+        let video = self.viewed_video().cloned();
         let title = viewed.map(|viewed| {
             let name = viewed
                 .attachment
@@ -479,13 +579,21 @@ impl ChatView {
                 .as_deref()
                 .filter(|name| !name.trim().is_empty())
                 .map(crate::chat::text::visible)
-                .unwrap_or_else(|| "image".into());
+                .unwrap_or_else(|| if video.is_some() { "video" } else { "image" }.into());
             match viewed.count {
                 1 => name,
                 count => format!("{name} · {}/{count}", viewed.position + 1),
             }
         });
+        let several = viewed.is_some_and(|viewed| viewed.count > 1);
+        let hints = match (&video, several) {
+            (Some(_), true) => "space play · ← → 5s · shift ← → next · m mute · s save · esc close",
+            (Some(_), false) => "space play · ← → 5s · m mute · s save · esc close",
+            (None, true) => "← → · s save · esc close",
+            (None, false) => "s save · esc close",
+        };
         let picture = viewed
+            .filter(|_| video.is_none())
             .and_then(|viewed| viewed.attachment.id)
             .and_then(|id| self.picture(id, Use::Full));
         let available = window.viewport_size();
@@ -501,7 +609,7 @@ impl ChatView {
                 .object_fit(ObjectFit::Contain)
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         });
-        let loading = picture.is_none().then(|| {
+        let loading = (picture.is_none() && video.is_none()).then(|| {
             div()
                 .font_family(mono.clone())
                 .text_color(palette.text_muted)
@@ -514,7 +622,11 @@ impl ChatView {
             .on_action(cx.listener(|view, _: &Cancel, window, cx| view.close_overlay(window, cx)))
             .on_action(cx.listener(Self::viewer_previous))
             .on_action(cx.listener(Self::viewer_next))
+            .on_action(cx.listener(Self::viewer_step_previous))
+            .on_action(cx.listener(Self::viewer_step_next))
             .on_action(cx.listener(Self::save_viewed))
+            .on_action(cx.listener(Self::toggle_play))
+            .on_action(cx.listener(Self::toggle_mute))
             .absolute()
             .inset_0()
             .items_center()
@@ -536,13 +648,14 @@ impl ChatView {
                     .child(SharedString::from(title))
             }))
             .children(picture)
+            .children(video)
             .children(loading)
             .child(
                 div()
                     .font_family(mono)
                     .text_xs()
                     .text_color(palette.text_muted)
-                    .child("← → · s save · esc close"),
+                    .child(hints),
             )
             .test_support()
             .into_any_element()
@@ -551,6 +664,23 @@ impl ChatView {
     /// Whether the viewer is open.
     pub(super) fn viewing(&self) -> bool {
         self.chat.overlay() == Some(Overlay::Viewer)
+    }
+}
+
+/// The play arrow's box on a video.
+const PLAY_SIZE: f32 = 44.;
+
+/// A white triangle pointing right, filling `bounds`; drawn rather than a
+/// glyph, which some fonts show as an emoji.
+fn paint_play(bounds: Bounds<Pixels>, _: (), window: &mut Window, _: &mut App) {
+    let at = |x: f32, y: f32| bounds.origin + point(bounds.size.width * x, bounds.size.height * y);
+    let mut path = PathBuilder::fill();
+    path.move_to(at(0.2, 0.1));
+    path.line_to(at(0.9, 0.5));
+    path.line_to(at(0.2, 0.9));
+    path.close();
+    if let Ok(path) = path.build() {
+        window.paint_path(path, white().opacity(0.9));
     }
 }
 

@@ -23,10 +23,12 @@ chrono = "0.4"
 copiale-core = { path = "crates/copiale-core" }
 copiale-testkit = { path = "crates/copiale-testkit" }
 copiale-ui = { path = "crates/copiale-ui" }
+# Plays videos' sound.
+cpal = "0.18"
 directories = "6"
-# Video previews' first frame (`copiale --video-frame`); same major as
-# FFmpeg.
-ffmpeg-next = { version = "9", default-features = false, features = ["codec", "format", "software-scaling"] }
+# Video previews' first frame and playback (`copiale --video-frame`,
+# `--video-play`); same major as FFmpeg.
+ffmpeg-next = { version = "9", default-features = false, features = ["codec", "format", "software-resampling", "software-scaling"] }
 # Same fontconfig-sys as GPUI's font-kit.
 fontconfig = "0.10"
 futures = "0.3"

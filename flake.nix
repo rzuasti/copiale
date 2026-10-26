@@ -143,9 +143,9 @@
             rust-analyzer
             openssl
             sqlcipher # encrypted database; CLI to inspect dev databases
-            (callPackage ./nix/ffmpeg.nix {}) # video previews' first frame
+            (callPackage ./nix/ffmpeg.nix {}) # video previews and playback
           ]
-          ++ lib.optionals stdenv.hostPlatform.isLinux linuxRuntimeLibs;
+          ++ lib.optionals stdenv.hostPlatform.isLinux (linuxRuntimeLibs ++ [alsa-lib]);
 
         LD_LIBRARY_PATH = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux (pkgs.lib.makeLibraryPath linuxRuntimeLibs);
       };

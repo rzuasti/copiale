@@ -8,6 +8,7 @@ mod overlays;
 mod requests;
 mod settings;
 mod sidebar;
+mod video;
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -36,7 +37,7 @@ use super::text::isolate;
 use super::time::LocalClock;
 use crate::icons::IconName;
 use crate::kinetic::{self, Kinetic};
-use crate::media::Pictures;
+use crate::media::{Pictures, VideoPlayback};
 use crate::notifier::Notifier;
 use crate::settings::Settings;
 use crate::theme::ActivePalette as _;
@@ -99,7 +100,11 @@ actions!(
         OpenSelected,
         ViewerPrevious,
         ViewerNext,
+        ViewerStepPrevious,
+        ViewerStepNext,
         SaveViewed,
+        TogglePlay,
+        ToggleMute,
     ]
 );
 
@@ -173,7 +178,11 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("escape", Cancel, Some(VIEWER)),
         KeyBinding::new("left", ViewerPrevious, Some(VIEWER)),
         KeyBinding::new("right", ViewerNext, Some(VIEWER)),
+        KeyBinding::new("shift-left", ViewerStepPrevious, Some(VIEWER)),
+        KeyBinding::new("shift-right", ViewerStepNext, Some(VIEWER)),
         KeyBinding::new("s", SaveViewed, Some(VIEWER)),
+        KeyBinding::new("space", TogglePlay, Some(VIEWER)),
+        KeyBinding::new("m", ToggleMute, Some(VIEWER)),
         KeyBinding::new("enter", OpenLink, Some(LINK)),
         KeyBinding::new("a", AcceptRequest, Some(REQUEST)),
         KeyBinding::new("d", DeleteRequest, Some(REQUEST)),
@@ -236,6 +245,8 @@ pub struct ChatView {
     viewer_focus: FocusHandle,
     /// Decoded pictures; drawing asks for those missing.
     pictures: RefCell<Pictures>,
+    /// The video the viewer shows.
+    video: Option<Entity<video::VideoView>>,
     /// Held in a message request or blocked chat, which has no composer.
     request_focus: FocusHandle,
     /// Device name and privacy settings, once the core reports them.
@@ -334,6 +345,7 @@ impl ChatView {
         let focus = cx.focus_handle();
         let mut chat = Chat::new(LocalClock::system());
         chat.set_twelve_hour(Settings::get(cx).layout.clock == config::TimeFormat::H12);
+        chat.set_videos_play(cx.has_global::<VideoPlayback>());
         let part = |render, cx: &mut Context<Self>| {
             let view = cx.weak_entity();
             cx.new(|_| Part {
@@ -380,6 +392,7 @@ impl ChatView {
             link_focus: cx.focus_handle(),
             viewer_focus: cx.focus_handle(),
             pictures: RefCell::default(),
+            video: None,
             request_focus: cx.focus_handle(),
             account: None,
             layout: Layout::default(),
@@ -557,7 +570,11 @@ impl ChatView {
         match event {
             Event::Account(account) => self.account = Some(account.clone()),
             Event::RecentEmoji(recent) => self.recent_emoji.clone_from(&recent.0),
-            Event::AttachmentLoaded { id, contents } | Event::PreviewLoaded { id, contents } => {
+            Event::AttachmentLoaded { id, contents } => {
+                self.attachment_loaded(*id, contents.as_ref(), cx);
+                self.video_loaded(*id, contents.as_ref(), cx);
+            }
+            Event::PreviewLoaded { id, contents } => {
                 self.attachment_loaded(*id, contents.as_ref(), cx);
             }
             _ => {}
@@ -1102,6 +1119,7 @@ impl ChatView {
         }
         if self.viewing() {
             window.focus(&self.viewer_focus, cx);
+            self.sync_video(cx);
         }
         cx.notify();
     }

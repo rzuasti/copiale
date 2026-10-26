@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Builds the static FFmpeg the video frame helper links on macOS, for one
-# Rust target, into target/ffmpeg/<target>; prints that directory. Kept if
-# already built. Only the MOV demuxer and the H.264, HEVC and VP9 decoders:
-# no network, devices, filters, programs or system libraries.
+# Builds the static FFmpeg the video helper links on macOS, for one Rust
+# target, into target/ffmpeg/<target>; prints that directory. Kept if
+# already built. Only the MOV demuxer, the H.264, HEVC, VP9 and AAC
+# decoders, scaling and resampling: no network, devices, filters, programs
+# or system libraries.
 #
 # Usage: packaging/macos/ffmpeg.sh aarch64-apple-darwin|x86_64-apple-darwin
 set -euo pipefail
@@ -21,7 +22,7 @@ esac
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
 prefix="$root/target/ffmpeg/$target"
-if [ -f "$prefix/lib/libavcodec.a" ]; then
+if [ -f "$prefix/lib/libavcodec.a" ] && [ -f "$prefix/lib/libswresample.a" ]; then
   echo "$prefix"
   exit 0
 fi
@@ -44,11 +45,11 @@ minimum=$(/usr/libexec/PlistBuddy -c "Print :LSMinimumSystemVersion" "$root/pack
     --extra-ldflags="-mmacosx-version-min=$minimum" \
     --disable-everything --disable-autodetect --disable-network \
     --disable-programs --disable-doc \
-    --disable-avdevice --disable-avfilter --disable-swresample \
-    --enable-avcodec --enable-avformat --enable-swscale \
+    --disable-avdevice --disable-avfilter \
+    --enable-avcodec --enable-avformat --enable-swscale --enable-swresample \
     --enable-demuxer=mov \
-    --enable-decoder=h264,hevc,vp9 \
-    --enable-parser=h264,hevc,vp9 \
+    --enable-decoder=h264,hevc,vp9,aac \
+    --enable-parser=h264,hevc,vp9,aac \
     --disable-x86asm >&2
   make -j"$(sysctl -n hw.ncpu)" >&2
   make install >&2

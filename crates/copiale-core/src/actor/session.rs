@@ -123,7 +123,7 @@ impl<'a, B: SignalBackend> Session<'a, B> {
             settings: AccountSettings::default(),
             outbox: Outbox::new(options.send_timeout),
             downloads: Downloads::new(db.files()),
-            previews: Previews::new(options.frame_helper.clone(), db.files()),
+            previews: Previews::new(options.video_helper.clone(), db.files()),
             probe: Probe::new(options.probe_interval, options.probe_timeout),
             groups: Groups::new(),
             retries_sent: Limiter::new(RETRY_WINDOW, MAX_RETRY_REQUESTS_PER_DEVICE),

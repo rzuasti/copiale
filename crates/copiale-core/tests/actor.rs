@@ -1484,7 +1484,7 @@ async fn downloaded_attachments_save_where_asked() {
 /// A helper that ignores the video and gives a PNG signature then `frame`,
 /// or fails.
 #[cfg(unix)]
-fn fake_frames(works: bool) -> copiale_core::video::FrameHelper {
+fn fake_frames(works: bool) -> copiale_core::video::VideoHelper {
     let cat = std::env::split_paths(&std::env::var_os("PATH").unwrap())
         .map(|dir| dir.join("cat"))
         .find(|path| path.is_file())
@@ -1496,7 +1496,7 @@ fn fake_frames(works: bool) -> copiale_core::video::FrameHelper {
         ),
         false => format!("{} >/dev/null; exit 1", cat.display()),
     };
-    copiale_core::video::FrameHelper::new("/bin/sh", ["-c".to_owned(), script])
+    copiale_core::video::VideoHelper::with_args("/bin/sh", ["-c".to_owned(), script])
 }
 
 #[cfg(unix)]
@@ -1504,7 +1504,7 @@ fn fake_frames(works: bool) -> copiale_core::video::FrameHelper {
 async fn downloaded_videos_get_their_first_frame() {
     let dir = tempfile::tempdir().unwrap();
     let options = CoreOptions {
-        frame_helper: Some(fake_frames(true)),
+        video_helper: Some(fake_frames(true)),
         ..fast()
     };
     let mut running = start_with(
@@ -1556,7 +1556,7 @@ async fn downloaded_videos_get_their_first_frame() {
 async fn videos_without_a_frame_keep_their_blur() {
     let dir = tempfile::tempdir().unwrap();
     let options = CoreOptions {
-        frame_helper: Some(fake_frames(false)),
+        video_helper: Some(fake_frames(false)),
         ..fast()
     };
     let mut running = start_with(

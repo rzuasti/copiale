@@ -202,6 +202,8 @@ pub struct Chat {
     link: Option<Url>,
     /// The message and picture [`Overlay::Viewer`] shows.
     viewer: Option<(MessageId, AttachmentId)>,
+    /// Videos play in the viewer.
+    videos_play: bool,
 }
 
 #[derive(Debug)]
@@ -308,6 +310,7 @@ impl Chat {
             unconfirmed: Vec::new(),
             link: None,
             viewer: None,
+            videos_play: false,
         }
     }
 
@@ -318,6 +321,15 @@ impl Chat {
     /// Shows times as "2:05 PM" instead of "14:05".
     pub fn set_twelve_hour(&mut self, twelve_hour: bool) {
         self.clock.set_twelve_hour(twelve_hour);
+    }
+
+    /// Whether videos play in the viewer; else clicking saves them.
+    pub fn set_videos_play(&mut self, play: bool) {
+        self.videos_play = play;
+    }
+
+    pub fn videos_play(&self) -> bool {
+        self.videos_play
     }
 
     pub fn connection(&self) -> &Connection {
@@ -673,7 +685,7 @@ impl Chat {
         let Some(found) = self.open_message(message) else {
             return false;
         };
-        let pictures = viewable(&found.content);
+        let pictures = viewable(&found.content, self.videos_play);
         let Some(shown) = attachment
             .filter(|id| pictures.contains(id))
             .or(pictures.first().copied())
@@ -693,7 +705,7 @@ impl Chat {
         let Content::Text { attachments, .. } = &self.open_message(message)?.content else {
             return None;
         };
-        let pictures = viewable(&self.open_message(message)?.content);
+        let pictures = viewable(&self.open_message(message)?.content, self.videos_play);
         let position = pictures.iter().position(|shown| *shown == id)?;
         Some(Viewed {
             message,
@@ -712,7 +724,7 @@ impl Chat {
         let Some(content) = self.open_message(viewed.message).map(|m| &m.content) else {
             return false;
         };
-        let pictures = viewable(content);
+        let pictures = viewable(content, self.videos_play);
         let Some(next) = viewed
             .position
             .checked_add_signed(step)
@@ -3161,6 +3173,26 @@ mod tests {
         assert_eq!(chat.viewed().unwrap().attachment.id, Some(attachment(10)));
         chat.close_overlay();
         assert_eq!(chat.viewed(), None);
+    }
+
+    #[test]
+    fn videos_join_the_viewer_where_they_play() {
+        use AttachmentKind::{Image, Video};
+        use AttachmentState::Ready;
+        let mut chat = opened(vec![attached(1, vec![(Video, Ready), (Image, Ready)])]);
+
+        assert!(chat.open_viewer(MessageId::new(1), None));
+        assert_eq!(chat.viewed().unwrap().attachment.id, Some(attachment(11)));
+        assert_eq!(chat.viewed().unwrap().count, 1);
+
+        chat.set_videos_play(true);
+        assert!(chat.open_viewer(MessageId::new(1), None));
+        let viewed = chat.viewed().unwrap();
+        assert_eq!(
+            (viewed.attachment.id, viewed.count),
+            (Some(attachment(10)), 2)
+        );
+        assert!(chat.viewer_step(1));
     }
 
     #[test]

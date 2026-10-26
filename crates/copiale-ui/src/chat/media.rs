@@ -79,14 +79,20 @@ pub fn split(content: &Content) -> (Vec<&Attachment>, Vec<&Attachment>) {
     (visual, files)
 }
 
-/// The pictures of `content` that are here, which the viewer steps through.
-pub fn viewable(content: &Content) -> Vec<AttachmentId> {
+/// The pictures of `content` that are here, which the viewer steps
+/// through; its videos too, where they `play`.
+pub fn viewable(content: &Content, play: bool) -> Vec<AttachmentId> {
     let Content::Text { attachments, .. } = content else {
         return Vec::new();
     };
     attachments
         .iter()
-        .filter(|a| a.state == AttachmentState::Ready && shown(a) == Some(Shown::Picture))
+        .filter(|a| a.state == AttachmentState::Ready)
+        .filter(|a| match shown(a) {
+            Some(Shown::Picture) => true,
+            Some(Shown::Video) => play,
+            _ => false,
+        })
         .filter_map(|a| a.id)
         .collect()
 }
@@ -261,11 +267,14 @@ mod tests {
             attachment(File, Ready, 5),
         ]);
 
-        let ids: Vec<_> = viewable(&content)
-            .into_iter()
-            .map(AttachmentId::get)
-            .collect();
-        assert_eq!(ids, [1, 4]);
+        let ids = |play| {
+            viewable(&content, play)
+                .into_iter()
+                .map(AttachmentId::get)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(false), [1, 4]);
+        assert_eq!(ids(true), [1, 2, 4]);
         let saved: Vec<_> = saveable(&content)
             .iter()
             .map(|a| a.id.unwrap().get())

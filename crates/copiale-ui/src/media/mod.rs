@@ -8,7 +8,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use copiale_core::AttachmentId;
-use gpui_kit::RenderImage;
+use copiale_core::video::VideoHelper;
+use gpui_kit::{Global, RenderImage};
 use image::{Frame, RgbaImage};
 
 pub use decode::{Decoded, decode};
@@ -19,6 +20,16 @@ const MAX_PICTURES: usize = 48;
 const MAX_PREVIEWS: usize = 256;
 /// A blurred preview's side, in pixels; GPUI scales it.
 const PREVIEW_SIDE: u32 = 32;
+
+/// Plays videos in the viewer; unset where the helper can't run.
+#[derive(Clone)]
+pub struct VideoPlayback {
+    pub helper: VideoHelper,
+    /// Plays their sound too.
+    pub sound: bool,
+}
+
+impl Global for VideoPlayback {}
 
 /// What a picture is decoded for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

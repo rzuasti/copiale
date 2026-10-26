@@ -9,11 +9,12 @@
   protobuf,
   perl,
   openssl,
+  alsa-lib,
   callPackage,
 }: let
   cargoToml = lib.importTOML ../Cargo.toml;
   runtimeLibs = import ./runtime-libs.nix pkgs;
-  # Video previews' first frame.
+  # Video previews and playback.
   ffmpeg = callPackage ./ffmpeg.nix {};
 in
   rustPlatform.buildRustPackage {
@@ -50,8 +51,8 @@ in
       perl # SQLCipher build
       rustPlatform.bindgenHook # boring-sys
     ];
-    # OpenSSL: SQLCipher's crypto provider.
-    buildInputs = runtimeLibs ++ [openssl ffmpeg];
+    # OpenSSL: SQLCipher's crypto provider. ALSA: videos' sound.
+    buildInputs = runtimeLibs ++ [openssl ffmpeg alsa-lib];
 
     # Tests run in the dev shell (`cargo test --workspace`).
     doCheck = false;

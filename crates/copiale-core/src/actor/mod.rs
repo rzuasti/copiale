@@ -25,7 +25,7 @@ use crate::model::{
     Message, MessageBody, MessageId, RecentEmoji, ServiceId,
 };
 use crate::storage::{Passphrase, SecretStore, Storage};
-use crate::video::FrameHelper;
+use crate::video::VideoHelper;
 
 /// Stack for the core thread. Generating Kyber prekeys while linking
 /// overflows the 2 MiB default in debug builds.
@@ -355,7 +355,7 @@ pub struct CoreOptions {
     pub unlink_timeout: Duration,
     /// Decodes videos' first frames; without it, videos show only their
     /// blurred preview.
-    pub frame_helper: Option<FrameHelper>,
+    pub video_helper: Option<VideoHelper>,
     /// Times disappearing messages.
     pub clock: Arc<dyn Clock>,
 }
@@ -371,7 +371,7 @@ impl Default for CoreOptions {
             send_timeout: Duration::from_secs(600),
             drain_timeout: Duration::from_secs(10),
             unlink_timeout: Duration::from_secs(10),
-            frame_helper: None,
+            video_helper: None,
             clock: Arc::new(SystemClock),
         }
     }
