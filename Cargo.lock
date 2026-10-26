@@ -1390,6 +1390,7 @@ dependencies = [
  "fontconfig",
  "futures",
  "gpui-kit",
+ "image",
  "mac-usernotifications",
  "notify-rust",
  "objc2-app-kit 0.3.2",

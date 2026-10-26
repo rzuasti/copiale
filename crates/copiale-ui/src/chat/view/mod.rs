@@ -3,12 +3,13 @@
 
 mod emoji;
 mod log;
+mod media;
 mod overlays;
 mod requests;
 mod settings;
 mod sidebar;
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -35,6 +36,7 @@ use super::text::isolate;
 use super::time::LocalClock;
 use crate::icons::IconName;
 use crate::kinetic::{self, Kinetic};
+use crate::media::Pictures;
 use crate::notifier::Notifier;
 use crate::settings::Settings;
 use crate::theme::ActivePalette as _;
@@ -93,6 +95,11 @@ actions!(
         GridRight,
         GridUp,
         GridDown,
+        SaveSelected,
+        OpenSelected,
+        ViewerPrevious,
+        ViewerNext,
+        SaveViewed,
     ]
 );
 
@@ -117,6 +124,8 @@ const CONFIRM_UNLINK: &str = "ConfirmUnlink";
 const SAFETY_NUMBER: &str = "SafetyNumber";
 /// Key context of the question before opening a link.
 const LINK: &str = "Link";
+/// Key context of the picture viewer.
+const VIEWER: &str = "Viewer";
 /// Key context of the banner standing in for the composer in a message
 /// request or blocked chat.
 const REQUEST: &str = "Request";
@@ -152,6 +161,8 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("down", SelectNext, selecting),
         KeyBinding::new("r", ReplySelected, selecting),
         KeyBinding::new("e", EditSelected, selecting),
+        KeyBinding::new("s", SaveSelected, selecting),
+        KeyBinding::new("enter", OpenSelected, selecting),
         KeyBinding::new("delete", DeleteSelected, selecting),
         KeyBinding::new("backspace", DeleteSelected, selecting),
         KeyBinding::new("escape", Cancel, selecting),
@@ -159,6 +170,10 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("escape", Cancel, Some(SAFETY_NUMBER)),
         KeyBinding::new("enter", ConfirmSafetyNumber, Some(SAFETY_NUMBER)),
         KeyBinding::new("escape", Cancel, Some(LINK)),
+        KeyBinding::new("escape", Cancel, Some(VIEWER)),
+        KeyBinding::new("left", ViewerPrevious, Some(VIEWER)),
+        KeyBinding::new("right", ViewerNext, Some(VIEWER)),
+        KeyBinding::new("s", SaveViewed, Some(VIEWER)),
         KeyBinding::new("enter", OpenLink, Some(LINK)),
         KeyBinding::new("a", AcceptRequest, Some(REQUEST)),
         KeyBinding::new("d", DeleteRequest, Some(REQUEST)),
@@ -217,6 +232,10 @@ pub struct ChatView {
     identity_focus: FocusHandle,
     /// Held while asking whether to open a link.
     link_focus: FocusHandle,
+    /// Held while the picture viewer shows.
+    viewer_focus: FocusHandle,
+    /// Decoded pictures; drawing asks for those missing.
+    pictures: RefCell<Pictures>,
     /// Held in a message request or blocked chat, which has no composer.
     request_focus: FocusHandle,
     /// Device name and privacy settings, once the core reports them.
@@ -359,6 +378,8 @@ impl ChatView {
             confirm_focus: cx.focus_handle(),
             identity_focus: cx.focus_handle(),
             link_focus: cx.focus_handle(),
+            viewer_focus: cx.focus_handle(),
+            pictures: RefCell::default(),
             request_focus: cx.focus_handle(),
             account: None,
             layout: Layout::default(),
@@ -536,11 +557,20 @@ impl ChatView {
         match event {
             Event::Account(account) => self.account = Some(account.clone()),
             Event::RecentEmoji(recent) => self.recent_emoji.clone_from(&recent.0),
+            Event::AttachmentLoaded { id, contents } => {
+                self.attachment_loaded(*id, contents.as_ref(), cx);
+            }
             _ => {}
         }
+        let viewing = self.viewing();
         let shown = self.open_state();
         let effects = self.chat.apply(event, self.active);
         self.run(effects, cx);
+        // Its picture went.
+        if viewing && !self.viewing() {
+            self.viewer_closed(cx);
+            self.focus_pending = true;
+        }
         // Accepting brings the composer back; deleting closes the chat.
         if self.open_state() != shown && self.chat.overlay().is_none() {
             self.focus_pending = true;
@@ -904,6 +934,9 @@ impl ChatView {
 
     /// Closes any overlay and returns to the composer.
     fn close_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.viewing() {
+            self.viewer_closed(cx);
+        }
         self.close_picker(false, cx);
         self.chat.close_overlay();
         self.restore_focus(window, cx);
@@ -1055,6 +1088,22 @@ impl ChatView {
         if let Some(id) = self.chat.selected() {
             self.edit_message(id, window, cx);
         }
+    }
+
+    fn save_selected(&mut self, _: &SaveSelected, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = self.chat.selected() {
+            self.save_message(id, window, cx);
+        }
+    }
+
+    fn open_selected(&mut self, _: &OpenSelected, window: &mut Window, cx: &mut Context<Self>) {
+        for command in self.chat.open_selected() {
+            self.send(Some(command));
+        }
+        if self.viewing() {
+            window.focus(&self.viewer_focus, cx);
+        }
+        cx.notify();
     }
 
     fn delete_selected(&mut self, _: &DeleteSelected, _: &mut Window, cx: &mut Context<Self>) {

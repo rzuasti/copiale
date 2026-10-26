@@ -9,6 +9,7 @@ mod retries;
 mod run;
 mod session;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -68,6 +69,16 @@ pub enum Command {
     Download(AttachmentId),
     /// Answered with [`Event::AttachmentLoaded`].
     LoadAttachment(AttachmentId),
+    /// Writes a downloaded attachment to `path`, replacing any file there;
+    /// [`Event::SaveFailed`] if it can't.
+    SaveAttachment { id: AttachmentId, path: PathBuf },
+    /// Writes downloaded attachments into `dir`, each under its
+    /// [`save_name`](crate::text::save_name), numbered rather than
+    /// replacing a file; [`Event::SaveFailed`] for any it can't.
+    SaveAttachments {
+        ids: Vec<AttachmentId>,
+        dir: PathBuf,
+    },
     /// Sends a failed message again: [`Event::MessageUpdated`] as pending,
     /// then as for [`Command::SendText`].
     RetrySend(MessageId),
@@ -185,6 +196,8 @@ pub enum Event {
     DatabaseError(String),
     /// A stored message changed, e.g. its status.
     MessageUpdated(Message),
+    /// Saving an attachment failed.
+    SaveFailed(String),
     /// A downloaded attachment's contents; `None` if it isn't here.
     /// Answers [`Command::LoadAttachment`].
     AttachmentLoaded {

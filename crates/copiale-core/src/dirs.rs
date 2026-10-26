@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use directories::ProjectDirs;
+use directories::{ProjectDirs, UserDirs};
 
 /// `None` if the home directory can't be determined.
 pub(crate) fn project_dirs() -> Option<ProjectDirs> {
@@ -16,6 +16,17 @@ pub fn runtime_dir() -> Option<PathBuf> {
     Some(
         dirs.runtime_dir()
             .unwrap_or_else(|| dirs.data_local_dir())
+            .to_path_buf(),
+    )
+}
+
+/// Where saved attachments go by default: the user's downloads folder,
+/// else their home.
+pub fn downloads_dir() -> Option<PathBuf> {
+    let dirs = UserDirs::new()?;
+    Some(
+        dirs.download_dir()
+            .unwrap_or_else(|| dirs.home_dir())
             .to_path_buf(),
     )
 }

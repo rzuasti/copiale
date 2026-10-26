@@ -12,6 +12,7 @@ chrono.workspace = true
 copiale-core.workspace = true
 futures.workspace = true
 gpui-kit.workspace = true
+image.workspace = true
 qrcode.workspace = true
 raw-window-handle.workspace = true
 serde.workspace = true

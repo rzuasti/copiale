@@ -8,7 +8,7 @@ use copiale_core::{
     ChatState, Content, ConversationId, ConversationSummary, Direction, Event, Message, Peer,
 };
 
-use super::content::placeholders;
+use super::content::summary;
 use super::model::{sender_name, title};
 use super::text::isolate;
 
@@ -253,7 +253,7 @@ fn preview(content: &Content) -> String {
                 None => text,
             }
         }
-        None => placeholders(content).into_iter().next().unwrap_or_default(),
+        None => summary(content).unwrap_or_default(),
     }
 }
 
@@ -444,7 +444,7 @@ mod tests {
     }
 
     #[test]
-    fn non_text_content_shows_its_placeholder() {
+    fn attachments_without_text_show_their_kind() {
         let mut notices = Notices::new(NotificationContent::Message);
         let image = Message {
             content: Content::Text {
@@ -455,10 +455,7 @@ mod tests {
             ..message(1, 1, "")
         };
         let actions = receive(&mut notices, image, summary(1, 1), None);
-        assert_eq!(
-            shown(&actions),
-            [("Contact 1", "[image] open on your phone")]
-        );
+        assert_eq!(shown(&actions), [("Contact 1", "[image]")]);
 
         let long = "word ".repeat(100);
         let actions = receive(&mut notices, message(2, 1, &long), summary(1, 2), None);

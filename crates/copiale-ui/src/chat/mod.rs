@@ -5,6 +5,7 @@ mod emoji;
 mod emoji_grid;
 mod jumbo;
 mod layout;
+mod media;
 mod model;
 mod new_chat;
 mod notices;
@@ -19,7 +20,7 @@ pub use emoji_grid::{CATEGORIES, COLUMNS, EmojiGrid, GridRow, RECENT};
 pub use layout::{COMPACT_BELOW, Layout};
 pub use model::{
     Actions, Chat, Compose, Connection, Effects, LogChange, Overlay, PAGE, RequestBanner, Row,
-    member_list, title,
+    Viewed, member_list, title,
 };
 pub use new_chat::{Candidate, MAX_CANDIDATES};
 pub use notices::{Notice, NoticeAction, NoticeKey, Notices};

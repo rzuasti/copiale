@@ -7,6 +7,7 @@ mod fuzzy;
 mod icons;
 mod kinetic;
 pub mod main_window;
+mod media;
 pub mod notifier;
 pub mod onboarding;
 mod qr;

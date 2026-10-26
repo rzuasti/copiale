@@ -8,11 +8,11 @@ use copiale_core::config::{
     Config, ConfigFile, Density, MessageStyle, NotificationContent, Setting, ThemeName, TimeFormat,
 };
 use copiale_core::{
-    Account, AccountSettings, Attachment, AttachmentKind, BackendError, ChatState, Command,
-    Contact, Content, ConversationId, ConversationSummary, Direction, Event, Expiry,
-    GroupMasterKey, GroupUpdate, Identity, Member, Message, MessageBody, MessageId, MessageStatus,
-    Peer, Quote, Quoted, RecentEmoji, SafetyNumber, ServiceId, StorageFailure, Timestamp,
-    Unsupported, Verification,
+    Account, AccountSettings, Attachment, AttachmentId, AttachmentKind, AttachmentState,
+    BackendError, ChatState, Command, Contact, Content, ConversationId, ConversationSummary,
+    Direction, Event, Expiry, FileContents, GroupMasterKey, GroupUpdate, Identity, Member, Message,
+    MessageBody, MessageId, MessageStatus, Peer, Quote, Quoted, RecentEmoji, SafetyNumber,
+    ServiceId, StorageFailure, Timestamp, Unsupported, Verification,
 };
 use copiale_ui::chat::{
     COMPACT_BELOW, ChatView, Compose, Field, Layout, Notice, NoticeAction, NoticeKey, Overlay,
@@ -2967,4 +2967,84 @@ fn unfocused_windows_raise_by_reopening_where_activation_is_ignored(cx: &mut Tes
         .unwrap();
     cx.run_until_parked();
     assert!(!request(&ui, toggle(), cx));
+}
+
+fn png(width: u32, height: u32) -> Vec<u8> {
+    let image = image::RgbaImage::from_pixel(width, height, image::Rgba([0, 128, 255, 255]));
+    let mut bytes = Vec::new();
+    image
+        .write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
+        .unwrap();
+    bytes
+}
+
+#[gpui_kit::test]
+fn pictures_draw_open_in_the_viewer_and_files_download(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.click(("conversation", 1u64), cx);
+    ui.core.take();
+    let attachment = |id: i64, kind, state| Attachment {
+        id: Some(AttachmentId::new(id)),
+        state,
+        size: Some(1000),
+        width: Some(40),
+        height: Some(20),
+        ..Attachment::new(kind)
+    };
+    let content = Content::Text {
+        body: MessageBody::new("look"),
+        attachments: vec![
+            attachment(10, AttachmentKind::Image, AttachmentState::Ready),
+            attachment(11, AttachmentKind::File, AttachmentState::Remote),
+        ],
+        quote: None,
+    };
+    ui.event(
+        Event::Messages {
+            conversation: ConversationId::new(1),
+            before: None,
+            messages: vec![Message {
+                content,
+                ..message(1, Direction::Incoming, None)
+            }],
+        },
+        cx,
+    );
+
+    assert!(ui.shows(("attachment", 10u64), cx));
+    assert!(ui.shows(("file", 11u64), cx));
+    let asked = ui.core.take();
+    assert!(
+        matches!(asked.as_slice(), [Command::LoadAttachment(id)] if *id == AttachmentId::new(10)),
+        "{asked:?}"
+    );
+    ui.event(
+        Event::AttachmentLoaded {
+            id: AttachmentId::new(10),
+            contents: Some(FileContents::new(png(40, 20))),
+        },
+        cx,
+    );
+    cx.run_until_parked();
+    ui.frame(cx);
+
+    ui.click(("attachment", 10u64), cx);
+    assert!(ui.shows("viewer", cx));
+    let asked = ui.core.take();
+    assert!(
+        matches!(asked.as_slice(), [Command::LoadAttachment(id)] if *id == AttachmentId::new(10)),
+        "the viewer loads it full size: {asked:?}"
+    );
+    ui.press("escape", cx);
+    assert!(!ui.shows("viewer", cx));
+
+    ui.click(("file-action", 11u64), cx);
+    let asked = ui.core.take();
+    assert!(
+        matches!(asked.as_slice(), [Command::Download(id)] if *id == AttachmentId::new(11)),
+        "{asked:?}"
+    );
 }

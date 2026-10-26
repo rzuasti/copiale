@@ -73,7 +73,9 @@ went unsolved until 2011.
     with their message (`storage::attachments`; `docs/security.md`).
     Images up to 10 MiB download on their own, never in message requests;
     others when asked. At most 32 per message and 100 MiB each, enforced
-    while downloading.
+    while downloading. Pictures decoded by contents (JPEG, PNG, WebP, GIF)
+    with size limits; saved only where the user picks, under safe names
+    (`copiale_core::text::save_name`).
   - Message requests: a chat the other side wrote in is a request until
     accepted (here, on the phone, in Storage Service, or by replying);
     requests send no read receipts or typing and notify without name or

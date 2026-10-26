@@ -19,8 +19,13 @@ Scope, UI design, architecture and work items for the first usable release.
   and `:shortcodes:`, and `:` plus two letters lists matching emoji.
   `Ctrl+E` or the composer's `:)` opens a searchable picker by category,
   recently used first (kept in the database).
-- Non-text content (images, files, stickers, reactions, calls): muted
-  placeholder line, e.g. `[image] open on your phone`, above any caption.
+- Non-text content (stickers, reactions, calls): muted placeholder line,
+  e.g. `[sticker] open on your phone`, above any caption.
+- Received attachments (after the MVP, #87): images and GIFs drawn above
+  the caption, albums as a grid of up to four; videos as their blurred
+  preview with `▶`; other files as `▤ name · size · download/save` lines.
+  Not yet downloaded: the blurred preview with `↓ size`. Attachments that
+  can't be downloaded keep a placeholder line.
 - Group and timer changes: system lines, e.g. `-- alice added bob · 10:04`.
 - Dark and light themes: follow the system by default (dark without a
   system preference), overridable in settings with a built-in theme
@@ -33,8 +38,7 @@ Scope, UI design, architecture and work items for the first usable release.
 
 ### Out
 
-- Sending or viewing attachments, reactions, stickers, calls, voice
-  notes.
+- Sending attachments, reactions, stickers, calls, voice notes.
 - Message history transfer: chats start empty at link time.
 - Group creation and management.
 - Base16 import, accent override.
@@ -140,8 +144,16 @@ Scope, UI design, architecture and work items for the first usable release.
 
 - `↑` in an empty composer edits the last own message.
 - `Shift+↑` in an empty composer selects the last message; `↑`/`↓` move,
-  `r` replies, `e` edits (own), `Del` deletes, `Esc` returns to the composer.
-- Hovering a message shows `reply · edit · delete` on a line under it; delete
+  `r` replies, `e` edits (own), `Del` deletes, `Enter` views its pictures
+  (else downloads its attachments), `s` saves its attachments, `Esc`
+  returns to the composer.
+- The picture viewer covers the window: `←`/`→` move through the message's
+  pictures, `s` saves, `Esc` or a click outside closes. Clicking a picture
+  opens it; clicking anything else downloads or saves it.
+- Saving asks where: a file name for one attachment, a folder for several
+  (numbered rather than replacing files), starting in Downloads.
+- Hovering a message shows `reply · edit · download · save · delete` on a
+  line under it (download and save when it has attachments to); delete
   asks `for everyone · for me · cancel` there. Actions use the theme's
   `action` color, kept for things to click; labels like `edited` stay muted. Edits and deletes for everyone only for
   own messages, within 24 hours.

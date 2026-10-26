@@ -1425,6 +1425,62 @@ async fn downloads_cut_off_by_quitting_resume_at_start() {
     stop(running).await;
 }
 
+#[tokio::test]
+async fn downloaded_attachments_save_where_asked() {
+    let (dir, mut running) = ready().await;
+    accept_by_phone(&mut running, 1).await;
+    let named = |remote| Attachment {
+        name: Some("../cat.jpg".into()),
+        ..on_cdn(AttachmentKind::Image, remote)
+    };
+    let first = named(running.network.upload("cdn-1", b"first cat"));
+    let second = named(running.network.upload("cdn-2", b"second cat"));
+    let missing = on_cdn(
+        AttachmentKind::File,
+        RemoteAttachment::new(b"later".to_vec()),
+    );
+    running
+        .network
+        .deliver(with_attachments(1, 100, vec![first, second, missing]));
+    use AttachmentState::{Ready, Remote};
+    let ready = attachments_become(&mut running.events, &[Ready, Ready, Remote]).await;
+    let ids: Vec<_> = (0..3).map(|ix| attachment_id(&ready, ix)).collect();
+    let out = dir.path().join("out");
+    std::fs::create_dir(&out).unwrap();
+
+    let path = out.join("chosen.jpg");
+    std::fs::write(&path, "old").unwrap();
+    send(
+        &running,
+        Command::SaveAttachment {
+            id: ids[0],
+            path: path.clone(),
+        },
+    );
+    send(
+        &running,
+        Command::SaveAttachments {
+            ids: ids.clone(),
+            dir: out.clone(),
+        },
+    );
+
+    loop {
+        if let Event::SaveFailed(error) = next_event(&mut running.events).await {
+            assert!(error.contains("isn't downloaded"), "{error}");
+            break;
+        }
+    }
+    assert_eq!(std::fs::read(&path).unwrap(), b"first cat");
+    assert_eq!(std::fs::read(out.join("_cat.jpg")).unwrap(), b"first cat");
+    assert_eq!(
+        std::fs::read(out.join("_cat (2).jpg")).unwrap(),
+        b"second cat"
+    );
+    assert_eq!(std::fs::read_dir(&out).unwrap().count(), 3);
+    stop(running).await;
+}
+
 // Linking
 
 #[tokio::test]

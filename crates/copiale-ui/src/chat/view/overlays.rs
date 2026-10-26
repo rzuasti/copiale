@@ -103,12 +103,16 @@ impl ChatView {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        if self.viewing() {
+            return Some(self.render_viewer(window, cx));
+        }
         let (id, card) = match self.chat.overlay()? {
             Overlay::NewChat => ("new-chat", self.render_new_chat(cx)),
             Overlay::Palette => ("palette", self.render_palette(window, cx)),
             Overlay::Settings => ("settings", self.render_settings(window, cx)),
             Overlay::SafetyNumber(_) => ("safety-number", self.render_safety_number(cx)),
             Overlay::Link => ("link", self.render_link(cx)),
+            Overlay::Viewer => return None,
         };
         let width = match self.chat.overlay() {
             Some(Overlay::Settings) => px(560.),

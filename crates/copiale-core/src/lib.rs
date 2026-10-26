@@ -27,7 +27,7 @@ pub use backend::{
     StoredChats, Undecryptable,
 };
 pub use clock::{Clock, SystemClock};
-pub use dirs::{create_private_dir, runtime_dir};
+pub use dirs::{create_private_dir, downloads_dir, runtime_dir};
 pub use model::{
     Account, AccountSettings, Attachment, AttachmentId, AttachmentKind, AttachmentState,
     BlockedList, Change, ChatRef, ChatState, Contact, Content, ConversationId, ConversationSummary,

@@ -1,5 +1,6 @@
 //! Characters that can disguise text: bidi controls and invisible ones,
-//! and the longest message body and file name kept.
+//! the longest message body and file name kept, and safe names to save
+//! files as.
 
 use std::borrow::Cow;
 
@@ -8,6 +9,9 @@ pub const MAX_BODY_BYTES: usize = 64 * 1024;
 
 /// Longest attachment file name stored, in bytes.
 pub const MAX_FILE_NAME_BYTES: usize = 255;
+
+/// Longest name [`save_name`] gives, in bytes; room is left for a counter.
+const MAX_SAVE_NAME_BYTES: usize = 200;
 
 /// Controls, bidi controls, line and paragraph separators, and invisible
 /// characters.
@@ -74,6 +78,73 @@ pub fn clip_file_name(name: &str) -> Cow<'_, str> {
     clip(name, MAX_FILE_NAME_BYTES)
 }
 
+/// A name to save an attachment as: the sender's, without path separators,
+/// characters that disguise it or that filesystems refuse, leading dots,
+/// or trailing dots and spaces; else `attachment`, with an extension for
+/// its content type.
+pub fn save_name(name: Option<&str>, content_type: Option<&str>) -> String {
+    let replaced: String = name
+        .unwrap_or_default()
+        .chars()
+        .filter(|c| !hidden(*c))
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            c => c,
+        })
+        .collect();
+    let trimmed = replaced
+        .trim()
+        .trim_start_matches('.')
+        .trim_end_matches(['.', ' ']);
+    if trimmed.is_empty() {
+        return format!("attachment{}", extension(content_type.unwrap_or_default()));
+    }
+    let stem = trimmed
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    let device = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (stem.len() == 4
+            && (stem.starts_with("COM") || stem.starts_with("LPT"))
+            && stem.as_bytes()[3].is_ascii_digit());
+    let name = if device {
+        format!("_{trimmed}")
+    } else {
+        trimmed.to_owned()
+    };
+    if name.len() <= MAX_SAVE_NAME_BYTES {
+        return name;
+    }
+    // Keeps a short extension.
+    let (stem, extension) = match name.rfind('.') {
+        Some(dot) if name.len() - dot <= 16 => name.split_at(dot),
+        _ => (name.as_str(), ""),
+    };
+    let end = stem.floor_char_boundary(MAX_SAVE_NAME_BYTES - extension.len());
+    format!("{}{extension}", &stem[..end])
+}
+
+/// A file extension for common content types, with its dot.
+fn extension(content_type: &str) -> &'static str {
+    match content_type {
+        "image/jpeg" => ".jpg",
+        "image/png" => ".png",
+        "image/gif" => ".gif",
+        "image/webp" => ".webp",
+        "image/heic" => ".heic",
+        "video/mp4" => ".mp4",
+        "video/quicktime" => ".mov",
+        "audio/aac" => ".aac",
+        "audio/mpeg" => ".mp3",
+        "audio/ogg" => ".ogg",
+        "application/pdf" => ".pdf",
+        "application/zip" => ".zip",
+        "text/plain" => ".txt",
+        _ => "",
+    }
+}
+
 fn clip(text: &str, max: usize) -> Cow<'_, str> {
     if text.len() <= max {
         return Cow::Borrowed(text);
@@ -133,6 +204,30 @@ mod tests {
         assert!(clipped.len() <= MAX_BODY_BYTES);
         assert!(clipped.ends_with("é…"));
         assert!(long.starts_with(clipped.trim_end_matches('…')));
+    }
+
+    #[test]
+    fn saved_names_are_safe() {
+        let cases = [
+            (Some("report.pdf"), None, "report.pdf"),
+            (Some("../../.bashrc"), None, "_.._.bashrc"),
+            (Some("a/b\\c:d*e?f\"g<h>i|j"), None, "a_b_c_d_e_f_g_h_i_j"),
+            (Some("photo\u{202e}gpj.exe"), None, "photogpj.exe"),
+            (Some(".hidden"), None, "hidden"),
+            (Some("name. . "), None, "name"),
+            (Some("CON.txt"), None, "_CON.txt"),
+            (Some("com1"), None, "_com1"),
+            (Some("console.txt"), None, "console.txt"),
+            (None, Some("image/jpeg"), "attachment.jpg"),
+            (Some(" \u{200b} "), Some("text/x-unknown"), "attachment"),
+        ];
+        for (name, content_type, expected) in cases {
+            assert_eq!(save_name(name, content_type), expected, "{name:?}");
+        }
+        let long = format!("{}.tar.gz", "ä".repeat(MAX_SAVE_NAME_BYTES));
+        let saved = save_name(Some(&long), None);
+        assert!(saved.len() <= MAX_SAVE_NAME_BYTES);
+        assert!(saved.ends_with("ä.gz"));
     }
 
     #[test]

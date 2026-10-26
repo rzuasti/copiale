@@ -6,13 +6,15 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use copiale_core::{
-    BackendError, ChatState, Command, Contact, Content, ConversationId, ConversationSummary,
-    DELETE_WINDOW, Direction, EDIT_WINDOW, Event, Identity, MAX_SENT_EDITS, Message, MessageBody,
-    MessageId, MessageStatus, Peer, ServiceId, TYPING_TIMEOUT, Timestamp, Verification,
+    Attachment, AttachmentId, BackendError, ChatState, Command, Contact, Content, ConversationId,
+    ConversationSummary, DELETE_WINDOW, Direction, EDIT_WINDOW, Event, Identity, MAX_SENT_EDITS,
+    Message, MessageBody, MessageId, MessageStatus, Peer, ServiceId, TYPING_TIMEOUT, Timestamp,
+    Verification,
 };
 use url::Url;
 
 use super::content::{placeholders, quote_line, system_lines};
+use super::media::{self, downloadable, saveable, viewable};
 use super::new_chat::{Candidate, candidates};
 use super::palette::{self, Entry, PaletteAction};
 use super::text::{isolate, link_target};
@@ -76,6 +78,9 @@ pub struct Row<'a> {
     pub quote: Option<String>,
     /// Muted lines for content the log can't show, above any text.
     pub placeholders: Vec<String>,
+    /// Attachments shown as pictures or videos, then as file lines.
+    pub visual: Vec<&'a Attachment>,
+    pub files: Vec<&'a Attachment>,
     /// System lines (group and timer changes); the row shows only these.
     pub system: Vec<String>,
     /// For disappearing messages, time left: `◷ 4m`, or the whole timer
@@ -101,6 +106,10 @@ pub struct Actions {
     pub reply: bool,
     pub edit: bool,
     pub delete_for_everyone: bool,
+    /// Some attachments are here to save.
+    pub save: bool,
+    /// Some attachments can be downloaded.
+    pub download: bool,
 }
 
 /// What the composer sends.
@@ -130,6 +139,18 @@ pub enum Overlay {
     SafetyNumber(ServiceId),
     /// Asks before opening a clicked link.
     Link,
+    /// A message's pictures, one at a time.
+    Viewer,
+}
+
+/// The picture [`Overlay::Viewer`] shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Viewed<'a> {
+    pub message: MessageId,
+    pub attachment: &'a Attachment,
+    /// Its place among the message's pictures, from 0.
+    pub position: usize,
+    pub count: usize,
 }
 
 /// A picker's query and highlighted entry.
@@ -179,6 +200,8 @@ pub struct Chat {
     unconfirmed: Vec<ServiceId>,
     /// The clicked link [`Overlay::Link`] asks about.
     link: Option<Url>,
+    /// The message and picture [`Overlay::Viewer`] shows.
+    viewer: Option<(MessageId, AttachmentId)>,
 }
 
 #[derive(Debug)]
@@ -284,6 +307,7 @@ impl Chat {
             identities: HashMap::new(),
             unconfirmed: Vec::new(),
             link: None,
+            viewer: None,
         }
     }
 
@@ -444,6 +468,7 @@ impl Chat {
             _ => "you".into(),
         };
         let system = system_lines(&message.content, &actor, |id| self.member_name(id));
+        let (visual, files) = media::split(&message.content);
         Some(Row {
             message,
             prefix: Prefix {
@@ -457,6 +482,8 @@ impl Chat {
                 None => "you".into(),
             }),
             placeholders: placeholders(&message.content),
+            visual,
+            files,
             system,
             timer: message.expiry.map(|expiry| {
                 let left = match expiry.at {
@@ -497,6 +524,12 @@ impl Chat {
 
     /// `active`: whether the window has focus, so new messages count as read.
     pub fn apply(&mut self, event: &Event, active: bool) -> Effects {
+        let effects = self.apply_event(event, active);
+        self.check_viewer();
+        effects
+    }
+
+    fn apply_event(&mut self, event: &Event, active: bool) -> Effects {
         match event {
             Event::Conversations(conversations) => {
                 self.conversations = conversations.clone();
@@ -576,6 +609,9 @@ impl Chat {
                 }
             }
             Event::DatabaseError(error) => self.storage_error = Some(error.clone()),
+            Event::SaveFailed(error) => {
+                self.storage_error = Some(format!("couldn't save the file: {error}"));
+            }
             Event::Identity(identity) => {
                 self.identities.insert(identity.peer, identity.clone());
             }
@@ -628,6 +664,120 @@ impl Chat {
     pub fn close_overlay(&mut self) {
         self.overlay = None;
         self.link = None;
+        self.viewer = None;
+    }
+
+    /// Shows a message's picture, `attachment` or its first; `false` if it
+    /// has none here.
+    pub fn open_viewer(&mut self, message: MessageId, attachment: Option<AttachmentId>) -> bool {
+        let Some(found) = self.open_message(message) else {
+            return false;
+        };
+        let pictures = viewable(&found.content);
+        let Some(shown) = attachment
+            .filter(|id| pictures.contains(id))
+            .or(pictures.first().copied())
+        else {
+            return false;
+        };
+        self.open_overlay(Overlay::Viewer);
+        self.viewer = Some((message, shown));
+        true
+    }
+
+    /// The picture the viewer shows, if open.
+    pub fn viewed(&self) -> Option<Viewed<'_>> {
+        let (message, id) = self
+            .viewer
+            .filter(|_| self.overlay == Some(Overlay::Viewer))?;
+        let Content::Text { attachments, .. } = &self.open_message(message)?.content else {
+            return None;
+        };
+        let pictures = viewable(&self.open_message(message)?.content);
+        let position = pictures.iter().position(|shown| *shown == id)?;
+        Some(Viewed {
+            message,
+            attachment: attachments.iter().find(|a| a.id == Some(id))?,
+            position,
+            count: pictures.len(),
+        })
+    }
+
+    /// Shows the message's previous or next picture; `false` if there's
+    /// none that way.
+    pub fn viewer_step(&mut self, step: isize) -> bool {
+        let Some(viewed) = self.viewed() else {
+            return false;
+        };
+        let Some(content) = self.open_message(viewed.message).map(|m| &m.content) else {
+            return false;
+        };
+        let pictures = viewable(content);
+        let Some(next) = viewed
+            .position
+            .checked_add_signed(step)
+            .and_then(|ix| pictures.get(ix))
+        else {
+            return false;
+        };
+        self.viewer = Some((viewed.message, *next));
+        true
+    }
+
+    /// Closes the viewer if its picture is gone, e.g. deleted.
+    fn check_viewer(&mut self) {
+        if self.overlay == Some(Overlay::Viewer) && self.viewed().is_none() {
+            self.close_overlay();
+        }
+    }
+
+    /// Downloads what a message's attachments need.
+    pub fn download(&self, message: MessageId) -> Vec<Command> {
+        self.open_message(message)
+            .map(|m| downloadable(&m.content))
+            .unwrap_or_default()
+            .into_iter()
+            .map(Command::Download)
+            .collect()
+    }
+
+    /// A message's attachments that are here, to save.
+    pub fn saveable(&self, message: MessageId) -> Vec<Attachment> {
+        self.open_message(message)
+            .map(|m| saveable(&m.content).into_iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// `Enter` on the selected message: shows its pictures, else downloads
+    /// its attachments.
+    pub fn open_selected(&mut self) -> Vec<Command> {
+        let Some(selected) = self.selected() else {
+            return Vec::new();
+        };
+        if self.open_viewer(selected, None) {
+            return Vec::new();
+        }
+        self.download(selected)
+    }
+
+    /// The row of the message carrying `attachment`.
+    pub fn row_of_attachment(&self, attachment: AttachmentId) -> Option<usize> {
+        let log = self.open.as_ref()?;
+        log.messages.iter().position(|m| match &m.content {
+            Content::Text { attachments, .. } => {
+                attachments.iter().any(|a| a.id == Some(attachment))
+            }
+            _ => false,
+        })
+    }
+
+    /// Shows a failure in the error line until dismissed.
+    pub fn report_error(&mut self, error: String) {
+        self.storage_error = Some(error);
+    }
+
+    fn open_message(&self, id: MessageId) -> Option<&Message> {
+        self.open.as_ref()?.messages.iter().find(|m| m.id == id)
     }
 
     /// Opens the new chat picker; refreshes contacts.
@@ -1117,6 +1267,8 @@ impl Chat {
             Content::Text { attachments, .. } if attachments.is_empty()
         );
         Actions {
+            save: !saveable(&message.content).is_empty(),
+            download: !downloadable(&message.content).is_empty(),
             reply: shown,
             edit: own_sent && plain_text && within(EDIT_WINDOW) && message.edits < MAX_SENT_EDITS,
             delete_for_everyone: own_sent && shown && within(DELETE_WINDOW),
@@ -1472,8 +1624,8 @@ fn unknown(peer: ServiceId) -> String {
 mod tests {
     use chrono::FixedOffset;
     use copiale_core::{
-        Attachment, AttachmentKind, Content, Expiry, GroupMasterKey, GroupUpdate, Member,
-        SafetyNumber,
+        Attachment, AttachmentKind, AttachmentState, Content, Expiry, GroupMasterKey, GroupUpdate,
+        Member, SafetyNumber,
     };
     use uuid::Uuid;
 
@@ -2203,6 +2355,7 @@ mod tests {
                 reply: true,
                 edit: true,
                 delete_for_everyone: true,
+                ..Actions::default()
             }
         );
         assert_eq!(
@@ -2211,6 +2364,7 @@ mod tests {
                 reply: true,
                 edit: false,
                 delete_for_everyone: false,
+                ..Actions::default()
             }
         );
         let pending = Message {
@@ -2923,6 +3077,139 @@ mod tests {
                  its members."
                     .into()
             )
+        );
+    }
+
+    fn attached(id: i64, attachments: Vec<(AttachmentKind, AttachmentState)>) -> Message {
+        let attachments = attachments
+            .into_iter()
+            .enumerate()
+            .map(|(ix, (kind, state))| Attachment {
+                id: Some(AttachmentId::new(id * 10 + ix as i64)),
+                state,
+                ..Attachment::new(kind)
+            })
+            .collect();
+        Message {
+            content: Content::Text {
+                body: MessageBody::new("caption"),
+                attachments,
+                quote: None,
+            },
+            ..incoming(id, NOW - MINUTE)
+        }
+    }
+
+    fn attachment(n: i64) -> AttachmentId {
+        AttachmentId::new(n)
+    }
+
+    #[test]
+    fn rows_split_attachments_into_pictures_files_and_placeholders() {
+        use AttachmentKind::{File, Image, Video};
+        use AttachmentState::{Ready, Remote, Unavailable};
+        let chat = opened(vec![attached(
+            1,
+            vec![
+                (Image, Ready),
+                (File, Remote),
+                (Video, Remote),
+                (Image, Unavailable),
+            ],
+        )]);
+
+        let row = chat.row(0).unwrap();
+        let ids =
+            |list: &[&Attachment]| list.iter().map(|a| a.id.unwrap().get()).collect::<Vec<_>>();
+        assert_eq!(ids(&row.visual), [10, 12]);
+        assert_eq!(ids(&row.files), [11]);
+        assert_eq!(row.placeholders, ["[image] open on your phone"]);
+        assert!(row.actions.save);
+        assert!(row.actions.download);
+        let downloads = chat.download(MessageId::new(1));
+        assert!(
+            matches!(
+                downloads.as_slice(),
+                [Command::Download(a), Command::Download(b)]
+                    if *a == attachment(11) && *b == attachment(12)
+            ),
+            "{downloads:?}"
+        );
+        assert_eq!(chat.saveable(MessageId::new(1)).len(), 1);
+    }
+
+    #[test]
+    fn the_viewer_steps_through_a_messages_pictures() {
+        use AttachmentKind::{File, Image};
+        use AttachmentState::Ready;
+        let mut chat = opened(vec![attached(
+            1,
+            vec![(Image, Ready), (File, Ready), (Image, Ready)],
+        )]);
+
+        assert!(chat.open_viewer(MessageId::new(1), Some(attachment(12))));
+        let viewed = chat.viewed().unwrap();
+        assert_eq!(
+            (viewed.attachment.id, viewed.position, viewed.count),
+            (Some(attachment(12)), 1, 2)
+        );
+        assert!(!chat.viewer_step(1));
+        assert!(chat.viewer_step(-1));
+        assert_eq!(chat.viewed().unwrap().attachment.id, Some(attachment(10)));
+        // Files aren't viewed: the first picture shows.
+        assert!(chat.open_viewer(MessageId::new(1), Some(attachment(11))));
+        assert_eq!(chat.viewed().unwrap().attachment.id, Some(attachment(10)));
+        chat.close_overlay();
+        assert_eq!(chat.viewed(), None);
+    }
+
+    #[test]
+    fn the_viewer_closes_when_its_picture_goes() {
+        use AttachmentKind::Image;
+        use AttachmentState::Ready;
+        let mut chat = opened(vec![attached(1, vec![(Image, Ready)])]);
+        chat.open_viewer(MessageId::new(1), None);
+
+        chat.apply(
+            &Event::MessageUpdated(Message {
+                content: Content::Deleted,
+                ..attached(1, Vec::new())
+            }),
+            true,
+        );
+
+        assert_eq!(chat.overlay(), None);
+    }
+
+    #[test]
+    fn enter_on_a_selected_message_views_or_downloads() {
+        use AttachmentKind::{File, Image};
+        use AttachmentState::{Ready, Remote};
+        let mut chat = opened(vec![
+            attached(1, vec![(Image, Ready)]),
+            attached(2, vec![(File, Remote)]),
+        ]);
+
+        chat.select_last();
+        let commands = chat.open_selected();
+        assert!(
+            matches!(commands.as_slice(), [Command::Download(id)] if *id == attachment(20)),
+            "{commands:?}"
+        );
+        assert_eq!(chat.overlay(), None);
+        chat.select_step(-1);
+        assert!(chat.open_selected().is_empty());
+        assert_eq!(chat.overlay(), Some(Overlay::Viewer));
+        assert!(!opened(vec![incoming(3, NOW)]).open_viewer(MessageId::new(3), None));
+    }
+
+    #[test]
+    fn failed_saves_show_in_the_error_line() {
+        let mut chat = opened(Vec::new());
+        chat.apply(&Event::SaveFailed("disk full".into()), true);
+        assert_eq!(
+            chat.storage_error(),
+            Some("couldn't save the file: disk full")
         );
     }
 }

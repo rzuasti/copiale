@@ -3,6 +3,8 @@
 
 use std::cell::Cell;
 use std::collections::HashMap;
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -31,6 +33,7 @@ use crate::model::{
     ReceiptKind, RecentEmoji, RequestResponse, SentMessage, ServiceId, Timestamp, Verification,
 };
 use crate::storage::{Database, Removed, StorageError};
+use crate::text::save_name;
 
 /// Why serving the account ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -300,6 +303,8 @@ impl<'a, B: SignalBackend> Session<'a, B> {
             Some(Command::Delete { id, everyone }) => self.delete(id, everyone).await,
             Some(Command::Download(id)) => self.download(id).await,
             Some(Command::LoadAttachment(id)) => self.load_attachment(id).await,
+            Some(Command::SaveAttachment { id, path }) => self.save_attachment(id, path).await,
+            Some(Command::SaveAttachments { ids, dir }) => self.save_attachments(ids, dir).await,
             Some(Command::Reconnect) if self.incoming.is_none() && self.connecting.is_none() => {
                 self.retry_at = Some(Instant::now());
             }
@@ -2086,6 +2091,69 @@ impl<'a, B: SignalBackend> Session<'a, B> {
         self.emit(Event::AttachmentLoaded { id, contents });
     }
 
+    async fn save_attachment(&self, id: AttachmentId, path: PathBuf) {
+        let Some(contents) = self.saved_contents(id).await else {
+            return;
+        };
+        let written = tokio::task::spawn_blocking(move || std::fs::write(path, contents)).await;
+        self.saved(
+            written
+                .map_err(std::io::Error::other)
+                .and_then(|written| written),
+        );
+    }
+
+    async fn save_attachments(&self, ids: Vec<AttachmentId>, dir: PathBuf) {
+        for id in ids {
+            let attachment = match self.db.attachment(id).await {
+                Ok(Some(attachment)) => attachment,
+                Ok(None) => continue,
+                Err(error) => return self.database_error(error),
+            };
+            let Some(contents) = self.saved_contents(id).await else {
+                continue;
+            };
+            let name = save_name(
+                attachment.name.as_deref(),
+                attachment.content_type.as_deref(),
+            );
+            let dir = dir.clone();
+            let written =
+                tokio::task::spawn_blocking(move || write_new(&dir, &name, &contents)).await;
+            self.saved(
+                written
+                    .map_err(std::io::Error::other)
+                    .and_then(|written| written),
+            );
+        }
+    }
+
+    /// A downloaded attachment's contents to save; reports why if there
+    /// are none.
+    async fn saved_contents(&self, id: AttachmentId) -> Option<Vec<u8>> {
+        match self.db.attachment_contents(id).await {
+            Ok(Some(contents)) => Some(contents),
+            Ok(None) => {
+                self.emit(Event::SaveFailed("the attachment isn't downloaded".into()));
+                None
+            }
+            Err(error) => {
+                self.database_error(error);
+                None
+            }
+        }
+    }
+
+    fn saved(&self, written: std::io::Result<()>) {
+        match written {
+            Ok(()) => tracing::debug!("attachment saved"),
+            Err(error) => {
+                tracing::warn!(%error, "saving an attachment failed");
+                self.emit(Event::SaveFailed(error.to_string()));
+            }
+        }
+    }
+
     async fn attachment_changed(&self, message: MessageId) {
         match self.db.message(message).await {
             Ok(Some(message)) => self.emit(Event::MessageUpdated(message)),
@@ -2201,6 +2269,30 @@ const TYPING_RESEND: Duration = Duration::from_secs(10);
 
 /// Largest page [`Command::LoadMessages`] returns.
 const MAX_PAGE: u32 = 500;
+
+/// Writes `contents` into `dir` as `name`, or `name (2)` and so on if
+/// taken.
+fn write_new(dir: &Path, name: &str, contents: &[u8]) -> std::io::Result<()> {
+    let (stem, extension) = match name.rfind('.') {
+        Some(dot) if dot > 0 => name.split_at(dot),
+        _ => (name, ""),
+    };
+    for n in 1..=MAX_NUMBERED {
+        let path = match n {
+            1 => dir.join(name),
+            n => dir.join(format!("{stem} ({n}){extension}")),
+        };
+        match std::fs::File::create_new(&path) {
+            Ok(mut file) => return file.write_all(contents),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::other("too many files with that name"))
+}
+
+/// Most numbered names [`write_new`] tries.
+const MAX_NUMBERED: u32 = 1000;
 
 /// Resolves when the next expiry may be due; never without one.
 fn due(clock: &dyn Clock, at: Option<Timestamp>) -> LocalBoxFuture<'static, ()> {

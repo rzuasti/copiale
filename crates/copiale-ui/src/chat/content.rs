@@ -1,15 +1,39 @@
 //! How content the log can't show reads: placeholder and system lines.
 
-use copiale_core::{Attachment, AttachmentKind, Content, GroupUpdate, ServiceId, Unsupported};
+use copiale_core::{
+    Attachment, AttachmentKind, AttachmentState, Content, GroupUpdate, ServiceId, Unsupported,
+};
 
+use super::media::shown;
 use super::text::{isolate, visible};
 
 const ON_PHONE: &str = "open on your phone";
 
+/// What a notification says for content without text: its attachments,
+/// or what the log shows in its place.
+pub fn summary(content: &Content) -> Option<String> {
+    match content {
+        Content::Text { attachments, .. } if !attachments.is_empty() => {
+            let all: Vec<_> = attachments.iter().collect();
+            attachment_lines(&all, |_| "").into_iter().next()
+        }
+        _ => placeholders(content).into_iter().next(),
+    }
+}
+
 /// Muted lines standing in for what the log can't show, above any text.
 pub fn placeholders(content: &Content) -> Vec<String> {
     match content {
-        Content::Text { attachments, .. } => attachment_lines(attachments),
+        Content::Text { attachments, .. } => {
+            let unshown: Vec<_> = attachments
+                .iter()
+                .filter(|attachment| shown(attachment).is_none())
+                .collect();
+            attachment_lines(&unshown, |attachment| match attachment.state {
+                AttachmentState::Expired => " no longer available",
+                _ => " open on your phone",
+            })
+        }
         Content::Sticker { emoji } => {
             let emoji = emoji
                 .as_deref()
@@ -71,36 +95,47 @@ pub fn quote_line(
     Some(format!("↳ {}: {quoted}", isolate(&author(quote.author))))
 }
 
-/// Attachments by kind, counted, in order of appearance; files one per
-/// line with their names, hidden characters spelled out.
-fn attachment_lines(attachments: &[Attachment]) -> Vec<String> {
-    let mut counts: Vec<((&str, &str), usize)> = Vec::new();
+/// Attachments by kind, counted, in order of appearance, then files one
+/// per line with their names, hidden characters spelled out; each line ends
+/// with what `note` says of its attachments.
+fn attachment_lines(
+    attachments: &[&Attachment],
+    note: impl Fn(&Attachment) -> &'static str,
+) -> Vec<String> {
+    let mut counts: Vec<((&str, &str), &str, usize)> = Vec::new();
     let counted = attachments
         .iter()
         .filter(|attachment| attachment.kind != AttachmentKind::File)
-        .map(|attachment| label(attachment.kind));
-    for label in counted {
-        match counts.iter_mut().find(|(counted, _)| *counted == label) {
-            Some((_, count)) => *count += 1,
-            None => counts.push((label, 1)),
+        .map(|attachment| (label(attachment.kind), note(attachment)));
+    for (label, note) in counted {
+        match counts
+            .iter_mut()
+            .find(|(counted, noted, _)| *counted == label && *noted == note)
+        {
+            Some((_, _, count)) => *count += 1,
+            None => counts.push((label, note, 1)),
         }
     }
     let mut lines: Vec<_> = counts
         .into_iter()
-        .map(|((one, many), count)| match count {
-            1 => format!("[{one}] {ON_PHONE}"),
-            n => format!("[{n} {many}] {ON_PHONE}"),
+        .map(|((one, many), note, count)| match count {
+            1 => format!("[{one}]{note}"),
+            n => format!("[{n} {many}]{note}"),
         })
         .collect();
     for attachment in attachments {
         if attachment.kind == AttachmentKind::File {
+            let note = note(attachment);
             match attachment
                 .name
                 .as_deref()
                 .filter(|name| !name.trim().is_empty())
             {
-                Some(name) => lines.push(format!("[file] {} · {ON_PHONE}", visible(name))),
-                None => lines.push(format!("[file] {ON_PHONE}")),
+                Some(name) if note.is_empty() => {
+                    lines.push(format!("[file] {}", visible(name)));
+                }
+                Some(name) => lines.push(format!("[file] {} ·{note}", visible(name))),
+                None => lines.push(format!("[file]{note}")),
             }
         }
     }
@@ -463,5 +498,29 @@ mod tests {
             ["your safety number with \u{2068}Alice\u{2069} changed"]
         );
         assert!(placeholders(&Content::SafetyNumberChanged).is_empty());
+    }
+
+    #[test]
+    fn only_attachments_the_log_cant_show_have_placeholders() {
+        let state = |kind, state| Attachment {
+            state,
+            ..Attachment::new(kind)
+        };
+        let content = text(vec![
+            state(AttachmentKind::Image, AttachmentState::Ready),
+            state(AttachmentKind::Image, AttachmentState::Expired),
+            state(AttachmentKind::Image, AttachmentState::Unavailable),
+            state(AttachmentKind::File, AttachmentState::Remote),
+        ]);
+
+        assert_eq!(
+            placeholders(&content),
+            ["[image] no longer available", "[image] open on your phone"]
+        );
+        assert_eq!(summary(&content).as_deref(), Some("[3 images]"));
+        assert_eq!(
+            summary(&Content::Deleted).as_deref(),
+            Some("this message was deleted")
+        );
     }
 }

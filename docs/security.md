@@ -75,7 +75,14 @@ to it, private to the user (`copiale_core::storage`).
   for this account, or with its chat; files nothing refers to go at
   startup. Unlink and wipe deletes the directory.
 - **In memory**: an attachment is whole, in plaintext, while it's
-  downloaded or read; neither zeroed nor locked.
+  downloaded, read or saved; decoded pictures stay in a small cache.
+  Neither is zeroed nor locked.
+- **Decoding**: JPEG, PNG, WebP and GIF only, recognized by their
+  contents rather than the sender's content type, off the main thread,
+  with limits on size, memory and animation frames.
+- **Saving**: a plaintext copy is written only where the user picks, under
+  a name without path separators, hidden characters or names Windows
+  reserves.
 
 ## Notifications
 

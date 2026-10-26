@@ -9,7 +9,9 @@ use std::collections::HashSet;
 use super::StorageError;
 use super::database::{Database, database_error};
 use super::files::{FileKey, Files, StoredFile};
-use crate::model::{AttachmentId, AttachmentState, Content, Message, MessageId, RemoteAttachment};
+use crate::model::{
+    Attachment, AttachmentId, AttachmentState, Content, Message, MessageId, RemoteAttachment,
+};
 
 impl Database {
     /// Where downloads are written before [`Self::finish_download`].
@@ -101,6 +103,31 @@ impl Database {
             .await
             .map_err(std::io::Error::other)??;
         Ok(Some(contents))
+    }
+
+    /// A stored attachment as its message describes it.
+    pub(crate) async fn attachment(
+        &self,
+        id: AttachmentId,
+    ) -> Result<Option<Attachment>, StorageError> {
+        let row: Option<(i64, i64)> =
+            sqlx::query_as("SELECT message_id, position FROM attachments WHERE id = ?")
+                .bind(id.get())
+                .fetch_optional(&self.app)
+                .await
+                .map_err(database_error)?;
+        let Some((message, position)) = row else {
+            return Ok(None);
+        };
+        let Some(message) = self.message(MessageId::new(message)).await? else {
+            return Ok(None);
+        };
+        let Content::Text { attachments, .. } = message.content else {
+            return Ok(None);
+        };
+        Ok(usize::try_from(position)
+            .ok()
+            .and_then(|position| attachments.into_iter().nth(position)))
     }
 
     /// Deletes the copies of deleted attachments. Failures are logged; the

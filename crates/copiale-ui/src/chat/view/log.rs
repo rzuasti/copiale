@@ -1,6 +1,7 @@
 //! The open conversation: header, messages in each style, composer.
 
 use std::borrow::Cow;
+use std::cell::RefCell;
 
 use copiale_core::config::{MessageStyle, TimestampVisibility};
 use copiale_core::{Direction, MessageStatus};
@@ -125,6 +126,8 @@ impl ChatView {
                     .on_action(cx.listener(Self::reply_selected))
                     .on_action(cx.listener(Self::edit_selected))
                     .on_action(cx.listener(Self::delete_selected))
+                    .on_action(cx.listener(Self::save_selected))
+                    .on_action(cx.listener(Self::open_selected))
                     .on_action(cx.listener(Self::delete_for_everyone))
                     .on_action(cx.listener(Self::delete_for_me))
                     .on_action(cx.listener(Self::cancel))
@@ -241,6 +244,7 @@ impl ChatView {
                 spacing: Spacing::for_density(layout.density),
                 timestamps: layout.timestamps,
                 time: self.chat.clock().time(row.message.sent_at),
+                media: RefCell::new(self.render_media(&row, cx)),
             };
             return render_log_row(row, hovered, &style, window, cx);
         }
@@ -268,6 +272,8 @@ struct LogStyle {
     timestamps: TimestampVisibility,
     /// The message's own time, for showing on hover.
     time: String,
+    /// Its attachments, taken by the text.
+    media: RefCell<Vec<AnyElement>>,
 }
 
 /// A message in the configured style, after its day label; system lines
@@ -412,7 +418,7 @@ fn log_row(
                 .flex_1()
                 .min_w_0()
                 .text_color(text)
-                .children(message_text(row, window, cx))
+                .children(message_text(row, style, window, cx))
                 .children(shown.then(|| row_actions(row, muted, mono.clone(), cx))),
         )
         .children(message_meta(row, hover_time, &style.time, cx))
@@ -466,7 +472,7 @@ fn block_row(
                 .min_w_0()
                 .text_color(text)
                 .children(header)
-                .children(message_text(row, window, cx))
+                .children(message_text(row, style, window, cx))
                 .children(shown.then(|| row_actions(row, muted, mono.clone(), cx))),
         )
         .children(message_meta(row, hover_time, &style.time, cx))
@@ -524,7 +530,7 @@ fn bubble_row(
             gpui_kit::transparent_black()
         })
         .text_color(text)
-        .children(message_text(row, window, cx))
+        .children(message_text(row, style, window, cx))
         .children(footer)
         .test_support();
     h_flex()
@@ -561,9 +567,14 @@ fn sender_color(row: &Row<'_>, cx: &App) -> Hsla {
         .map_or(palette.text_secondary, |peer| palette.nick(peer))
 }
 
-/// The quote and placeholder lines, then the text; links ask before
-/// opening, and a few emoji alone draw large.
-fn message_text(row: &Row<'_>, window: &Window, cx: &Context<ChatView>) -> Vec<AnyElement> {
+/// The quote and placeholder lines, attachments, then the text; links ask
+/// before opening, and a few emoji alone draw large.
+fn message_text(
+    row: &Row<'_>,
+    style: &LogStyle,
+    window: &Window,
+    cx: &Context<ChatView>,
+) -> Vec<AnyElement> {
     let mono = cx.theme().mono_font_family.clone();
     let muted = cx.palette().text_muted;
     let line_height = window.line_height();
@@ -581,6 +592,7 @@ fn message_text(row: &Row<'_>, window: &Window, cx: &Context<ChatView>) -> Vec<A
                 .child(line.clone())
                 .into_any_element()
         })
+        .chain(style.media.take())
         .chain(row.message.content.body().map(|body| {
             let view = cx.weak_entity();
             TextView::markdown(("body", id.get() as u64), message_markdown(body.as_str()))
@@ -733,6 +745,25 @@ fn row_actions(
                 action("edit", if keys { "e edit" } else { "edit" })
                     .on_click(
                         cx.listener(move |view, _, window, cx| view.edit_message(id, window, cx)),
+                    )
+                    .into_any_element(),
+            );
+        }
+        if row.actions.download {
+            items.push(
+                action("download", if keys { "enter download" } else { "download" })
+                    .on_click(cx.listener(move |view, _, _, cx| {
+                        view.download_message(id);
+                        cx.notify();
+                    }))
+                    .into_any_element(),
+            );
+        }
+        if row.actions.save {
+            items.push(
+                action("save", if keys { "s save" } else { "save" })
+                    .on_click(
+                        cx.listener(move |view, _, window, cx| view.save_message(id, window, cx)),
                     )
                     .into_any_element(),
             );
