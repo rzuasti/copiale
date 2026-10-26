@@ -8,13 +8,14 @@ use copiale_core::{
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::{
     AnyElement, Context, ImageSource, InteractiveElement as _, IntoElement, MouseButton, ObjectFit,
-    ParentElement as _, PathPromptOptions, RenderImage, SharedString,
-    StatefulInteractiveElement as _, Styled as _, StyledImage as _, TestSupportExt as _, Window,
-    div, img, px, relative,
+    ParentElement as _, PathPromptOptions, Pixels, RenderImage, SharedString,
+    StatefulInteractiveElement as _, Styled, StyledImage as _, TestSupportExt as _, Window, div,
+    img, px, relative,
 };
 
 use crate::chat::media::{
-    self, CELL, MAX_CELLS, Shown, box_size, file_action, file_line, shown, status_label,
+    self, ALL_CORNERS, CELL, Corners, GAP, MAX_CELLS, RADIUS, Shown, box_size, cell_corners,
+    file_action, file_line, shown, status_label,
 };
 use crate::chat::model::{Overlay, Row};
 use crate::media::{Picture, Slot, Use, decode};
@@ -23,9 +24,14 @@ use crate::theme::ActivePalette as _;
 use super::{Cancel, ChatView, SaveViewed, VIEWER, ViewerNext, ViewerPrevious};
 
 impl ChatView {
-    /// A row's pictures and videos, alone or as an album, then its file
-    /// lines.
-    pub(super) fn render_media(&self, row: &Row<'_>, cx: &Context<Self>) -> Vec<AnyElement> {
+    /// A row's pictures and videos, alone or as an album, `space` above
+    /// and below, then its file lines.
+    pub(super) fn render_media(
+        &self,
+        row: &Row<'_>,
+        space: Pixels,
+        cx: &Context<Self>,
+    ) -> Vec<AnyElement> {
         let message = row.message.id;
         let mut elements = Vec::new();
         match row.visual.as_slice() {
@@ -33,28 +39,37 @@ impl ChatView {
             [one] => {
                 let decoded = self.thumbnail_shape(one);
                 let (width, height) = box_size(decoded, one);
-                elements.push(self.render_visual(message, one, width, height, None, cx));
+                elements.push(self.render_visual(
+                    message,
+                    one,
+                    (width, height),
+                    ALL_CORNERS,
+                    None,
+                    cx,
+                ));
             }
             many => {
                 let extra = many.len().saturating_sub(MAX_CELLS);
-                let cells = many
-                    .iter()
-                    .take(MAX_CELLS)
-                    .enumerate()
-                    .map(|(ix, attachment)| {
-                        let more = (ix == MAX_CELLS - 1 && extra > 0).then_some(extra + 1);
-                        self.render_visual(message, attachment, CELL, CELL, more, cx)
-                    });
+                let count = many.len().min(MAX_CELLS);
+                let cells = many.iter().take(count).enumerate().map(|(ix, attachment)| {
+                    let more = (ix == MAX_CELLS - 1 && extra > 0).then_some(extra + 1);
+                    let corners = cell_corners(ix, count);
+                    self.render_visual(message, attachment, (CELL, CELL), corners, more, cx)
+                });
                 elements.push(
                     h_flex()
                         .flex_wrap()
-                        .gap_1()
-                        .w(px(CELL * 2. + 4.))
+                        .gap(px(GAP))
+                        .w(px(CELL * 2. + GAP))
                         .children(cells)
                         .into_any_element(),
                 );
             }
         }
+        let mut elements: Vec<AnyElement> = elements
+            .into_iter()
+            .map(|visual| div().py(space).child(visual).into_any_element())
+            .collect();
         elements.extend(
             row.files
                 .iter()
@@ -72,14 +87,14 @@ impl ChatView {
         }
     }
 
-    /// A picture or video in a box of `width` by `height`; `more` counts
-    /// the album's pictures past the last cell.
+    /// A picture or video in a box of `(width, height)`, rounded at
+    /// `corners`; `more` counts the album's pictures past the last cell.
     fn render_visual(
         &self,
         message: MessageId,
         attachment: &Attachment,
-        width: f32,
-        height: f32,
+        (width, height): (f32, f32),
+        corners: Corners,
         more: Option<usize>,
         cx: &Context<Self>,
     ) -> AnyElement {
@@ -99,10 +114,11 @@ impl ChatView {
                     Some(Slot::Failed)
                 )
             });
-        let fit = if more.is_some() || width == CELL {
-            ObjectFit::Cover
-        } else {
+        // A lone one's box has its shape; an album's cells crop.
+        let fit = if corners == ALL_CORNERS {
             ObjectFit::Contain
+        } else {
+            ObjectFit::Cover
         };
         let background = picture
             .map(|picture| ImageSource::Render(picture.image))
@@ -113,7 +129,12 @@ impl ChatView {
                     .preview(hash)
                     .map(ImageSource::Render)
             })
-            .map(|source| img(source).absolute().inset_0().size_full().object_fit(fit));
+            .map(|source| {
+                rounded(
+                    img(source).absolute().inset_0().size_full().object_fit(fit),
+                    corners,
+                )
+            });
         let label = if undrawable {
             Some("can't show this · save".to_owned())
         } else if video {
@@ -127,8 +148,8 @@ impl ChatView {
         let label = label.map(|label| {
             div()
                 .absolute()
-                .left(px(4.))
-                .bottom(px(4.))
+                .left(px(8.))
+                .bottom(px(8.))
                 .px_1()
                 .rounded(px(3.))
                 .bg(palette.background.opacity(0.8))
@@ -138,7 +159,7 @@ impl ChatView {
                 .child(label)
         });
         let more = more.map(|count| {
-            div()
+            rounded(div(), corners)
                 .absolute()
                 .inset_0()
                 .flex()
@@ -151,14 +172,13 @@ impl ChatView {
         });
         let id = attachment.id.map_or(0, |id| id.get() as u64);
         let clicked = attachment.clone();
-        div()
+        rounded(div(), corners)
             .id(("attachment", id))
             .relative()
             .flex_none()
             .w(px(width))
             .h(px(height))
             .overflow_hidden()
-            .rounded(px(4.))
             .bg(palette.surface)
             .cursor_pointer()
             .children(background)
@@ -518,4 +538,25 @@ impl ChatView {
     pub(super) fn viewing(&self) -> bool {
         self.chat.overlay() == Some(Overlay::Viewer)
     }
+}
+
+/// `element` with `corners` rounded.
+fn rounded<E: Styled>(
+    mut element: E,
+    [top_left, top_right, bottom_right, bottom_left]: Corners,
+) -> E {
+    let radius = px(RADIUS);
+    if top_left {
+        element = element.rounded_tl(radius);
+    }
+    if top_right {
+        element = element.rounded_tr(radius);
+    }
+    if bottom_right {
+        element = element.rounded_br(radius);
+    }
+    if bottom_left {
+        element = element.rounded_bl(radius);
+    }
+    element
 }

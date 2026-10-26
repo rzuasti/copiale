@@ -9,6 +9,31 @@ pub const MAX_BOX: (f32, f32) = (320., 240.);
 pub const CELL: f32 = 120.;
 /// Cells an album shows; a last one counts the rest.
 pub const MAX_CELLS: usize = 4;
+/// Space between an album's cells, in logical pixels.
+pub const GAP: f32 = 2.;
+/// Corner radius of a picture or video, or an album, in logical pixels.
+pub const RADIUS: f32 = 14.;
+
+/// Which corners are rounded: top left, top right, bottom right, bottom
+/// left.
+pub type Corners = [bool; 4];
+
+/// A lone picture or video's corners.
+pub const ALL_CORNERS: Corners = [true; 4];
+
+/// The corners of cell `ix` of an album of `count` cells, two a row, that
+/// are the album's outer ones, so rounded.
+pub fn cell_corners(ix: usize, count: usize) -> Corners {
+    let left = ix.is_multiple_of(2);
+    let last_row = ix + 2 >= count;
+    let right_edge = !left || ix + 1 == count;
+    [
+        ix == 0,
+        ix == 1 || (ix == 0 && count == 1),
+        last_row && right_edge,
+        last_row && left,
+    ]
+}
 
 /// How an attachment shows in the log.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -256,6 +281,24 @@ mod tests {
             .map(AttachmentId::get)
             .collect();
         assert_eq!(downloads, [3]);
+    }
+
+    #[test]
+    fn albums_round_their_outer_corners() {
+        let corners = |count| {
+            (0..count)
+                .map(|ix| cell_corners(ix, count))
+                .collect::<Vec<_>>()
+        };
+        let (o, i) = (true, false);
+
+        assert_eq!(corners(2), [[o, i, i, o], [i, o, o, i]]);
+        assert_eq!(corners(3), [[o, i, i, i], [i, o, o, i], [i, i, o, o]]);
+        assert_eq!(
+            corners(4),
+            [[o, i, i, i], [i, o, i, i], [i, i, i, o], [i, i, o, i]]
+        );
+        assert_eq!(corners(1), [ALL_CORNERS]);
     }
 
     #[test]

@@ -239,12 +239,13 @@ impl ChatView {
         if let Some(row) = self.chat.row(ix) {
             let hovered = self.hovered == Some(row.message.id);
             let layout = &Settings::get(cx).layout;
+            let spacing = Spacing::for_density(layout.density);
             let style = LogStyle {
                 message_style: layout.message_style,
-                spacing: Spacing::for_density(layout.density),
+                spacing,
                 timestamps: layout.timestamps,
                 time: self.chat.clock().time(row.message.sent_at),
-                media: RefCell::new(self.render_media(&row, cx)),
+                media: RefCell::new(self.render_media(&row, spacing.media, cx)),
             };
             return render_log_row(row, hovered, &style, window, cx);
         }
@@ -344,6 +345,7 @@ fn render_log_row(
                 )
                 .w_full()
                 .px_4()
+                .py(style.spacing.row)
                 // Bubbles mark the selected bubble instead.
                 .when(shown && !bubbles, |this| this.bg(surface))
                 .test_support(),

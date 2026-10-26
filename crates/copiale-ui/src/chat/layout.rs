@@ -42,6 +42,11 @@ pub struct Spacing {
     pub bubble: Pixels,
     /// Inside a bubble, horizontal and vertical; never zero.
     pub bubble_padding: (Pixels, Pixels),
+    /// Above and below each message, inside its hover highlight; never
+    /// zero, so messages don't touch.
+    pub row: Pixels,
+    /// Above and below a message's pictures and videos.
+    pub media: Pixels,
 }
 
 impl Spacing {
@@ -53,6 +58,8 @@ impl Spacing {
                 chat: px(2.),
                 bubble: px(2.),
                 bubble_padding: (px(8.), px(3.)),
+                row: px(1.),
+                media: px(3.),
             },
             Density::Cozy => Self {
                 group: px(4.),
@@ -60,6 +67,8 @@ impl Spacing {
                 chat: px(4.),
                 bubble: px(4.),
                 bubble_padding: (px(10.), px(5.)),
+                row: px(2.),
+                media: px(4.),
             },
             Density::Roomy => Self {
                 group: px(10.),
@@ -67,6 +76,8 @@ impl Spacing {
                 chat: px(8.),
                 bubble: px(6.),
                 bubble_padding: (px(12.), px(8.)),
+                row: px(3.),
+                media: px(6.),
             },
         }
     }
@@ -88,6 +99,17 @@ mod tests {
         assert!(cozy.bubble_padding.0 < roomy.bubble_padding.0);
         assert!(compact.bubble_padding.1 < cozy.bubble_padding.1);
         assert!(cozy.bubble_padding.1 < roomy.bubble_padding.1);
+        assert!(compact.row < cozy.row && cozy.row < roomy.row);
+        assert!(compact.media < cozy.media && cozy.media < roomy.media);
+    }
+
+    #[test]
+    fn messages_never_touch() {
+        for density in [Density::Compact, Density::Cozy, Density::Roomy] {
+            let spacing = Spacing::for_density(density);
+            assert!(spacing.row > px(0.));
+            assert!(spacing.media > px(0.));
+        }
     }
 
     #[test]
