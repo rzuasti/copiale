@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.2.0 - 2026-10-26
+
+Attachments and new groups.
+
+- **Attachments**: pictures, videos and files show in the chat. Pictures
+  up to 10 MiB download on their own (not in message requests); others on
+  request. A viewer for pictures and videos, with playback and sound
+  (`←`/`→`, `Space`, `m`); save one or all of a message's attachments.
+- **Sending attachments**: attach with `Ctrl/⌘+O` or the paperclip, drag
+  and drop, or paste. Photos are sent upright without their location and
+  other metadata, unless sent as originals.
+- **New groups**: create a group from the new chat picker (its first
+  entry), `Ctrl/⌘+Shift+N` or the palette: pick members from your
+  contacts, then name it.
+- **Ended groups**: a group an admin ended says so, and nothing more can
+  be sent there.
+- Group titles stand out in the chat header.
+- Videos are decoded in a sandboxed helper process.
+
 ## 0.1.0 - 2026-10-25
 
 First release: a fast, minimalist, keyboard-first desktop client for Signal,
