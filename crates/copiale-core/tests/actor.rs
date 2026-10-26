@@ -2764,7 +2764,14 @@ async fn ended_groups_take_nothing_more() {
 
     running.network.set_group(group_key(1), named_dev_group(4));
     running.network.deliver(group_change(4, GroupUpdate::Ended));
-    let line = message_added(&mut running.events).await;
+    // The first message's group refresh may still update the conversation.
+    let line = loop {
+        match next_event(&mut running.events).await {
+            Event::MessageAdded(line) => break line,
+            Event::ConversationUpdated(_) => {}
+            other => panic!("expected MessageAdded, got {other:?}"),
+        }
+    };
     assert_eq!(
         line.content,
         Content::GroupChanged(vec![GroupUpdate::Ended])
