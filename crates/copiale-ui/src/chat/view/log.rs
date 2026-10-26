@@ -77,6 +77,8 @@ impl ChatView {
                     .flex_none()
                     .max_w_1_2()
                     .truncate()
+                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                    .text_color(cx.palette().text)
                     .child(title(summary)),
             )
             .children(member_list(summary).map(|members| {
