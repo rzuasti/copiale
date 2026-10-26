@@ -107,8 +107,9 @@ libsignal-service git hash back to `nix/package.nix`.
     at `c02e4f6`.
   - `patches/presage-refresh-group-ended.patch`, on top of the others.
     `Manager::refresh_group` returns the group it fetched, to learn whether
-    an admin ended it, which presage's store doesn't keep. Not upstream
-    yet; belongs in presage#468.
+    an admin ended it, which presage's store doesn't keep. Upstream: the
+    second commit of
+    [whisperfish/presage#468](https://github.com/whisperfish/presage/pull/468).
 - **Used via:** `[patch."https://github.com/whisperfish/presage"]` in the
   root `Cargo.toml`.
 
