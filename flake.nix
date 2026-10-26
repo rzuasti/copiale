@@ -143,6 +143,7 @@
             rust-analyzer
             openssl
             sqlcipher # encrypted database; CLI to inspect dev databases
+            (callPackage ./nix/ffmpeg.nix {}) # video previews' first frame
           ]
           ++ lib.optionals stdenv.hostPlatform.isLinux linuxRuntimeLibs;
 

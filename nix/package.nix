@@ -9,9 +9,12 @@
   protobuf,
   perl,
   openssl,
+  callPackage,
 }: let
   cargoToml = lib.importTOML ../Cargo.toml;
   runtimeLibs = import ./runtime-libs.nix pkgs;
+  # Video previews' first frame.
+  ffmpeg = callPackage ./ffmpeg.nix {};
 in
   rustPlatform.buildRustPackage {
     pname = "copiale";
@@ -48,7 +51,7 @@ in
       rustPlatform.bindgenHook # boring-sys
     ];
     # OpenSSL: SQLCipher's crypto provider.
-    buildInputs = runtimeLibs ++ [openssl];
+    buildInputs = runtimeLibs ++ [openssl ffmpeg];
 
     # Tests run in the dev shell (`cargo test --workspace`).
     doCheck = false;

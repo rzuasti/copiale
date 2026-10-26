@@ -4,6 +4,7 @@
 mod downloads;
 mod groups;
 mod outbox;
+mod previews;
 mod probe;
 mod retries;
 mod run;
@@ -24,6 +25,7 @@ use crate::model::{
     Message, MessageBody, MessageId, RecentEmoji, ServiceId,
 };
 use crate::storage::{Passphrase, SecretStore, Storage};
+use crate::video::FrameHelper;
 
 /// Stack for the core thread. Generating Kyber prekeys while linking
 /// overflows the 2 MiB default in debug builds.
@@ -69,6 +71,8 @@ pub enum Command {
     Download(AttachmentId),
     /// Answered with [`Event::AttachmentLoaded`].
     LoadAttachment(AttachmentId),
+    /// A video's first frame; answered with [`Event::PreviewLoaded`].
+    LoadPreview(AttachmentId),
     /// Writes a downloaded attachment to `path`, replacing any file there;
     /// [`Event::SaveFailed`] if it can't.
     SaveAttachment { id: AttachmentId, path: PathBuf },
@@ -196,6 +200,12 @@ pub enum Event {
     DatabaseError(String),
     /// A stored message changed, e.g. its status.
     MessageUpdated(Message),
+    /// A video's first frame as a PNG; `None` if there's none. Answers
+    /// [`Command::LoadPreview`].
+    PreviewLoaded {
+        id: AttachmentId,
+        contents: Option<FileContents>,
+    },
     /// Saving an attachment failed.
     SaveFailed(String),
     /// A downloaded attachment's contents; `None` if it isn't here.
@@ -343,6 +353,9 @@ pub struct CoreOptions {
     pub drain_timeout: Duration,
     /// How long unlinking waits to remove the device from the account.
     pub unlink_timeout: Duration,
+    /// Decodes videos' first frames; without it, videos show only their
+    /// blurred preview.
+    pub frame_helper: Option<FrameHelper>,
     /// Times disappearing messages.
     pub clock: Arc<dyn Clock>,
 }
@@ -358,6 +371,7 @@ impl Default for CoreOptions {
             send_timeout: Duration::from_secs(600),
             drain_timeout: Duration::from_secs(10),
             unlink_timeout: Duration::from_secs(10),
+            frame_helper: None,
             clock: Arc::new(SystemClock),
         }
     }

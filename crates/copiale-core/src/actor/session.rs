@@ -17,6 +17,7 @@ use tokio::time::Instant;
 use super::downloads::{Downloads, Failure, Finished, Job};
 use super::groups::{Groups, Update};
 use super::outbox::{Outbox, Outcome, Sent};
+use super::previews::{self, Made, Previews};
 use super::probe::{Check, Probe};
 use super::retries::Limiter;
 use super::run::{Core, ignored};
@@ -64,6 +65,7 @@ struct Session<'a, B> {
     settings: AccountSettings,
     outbox: Outbox,
     downloads: Downloads,
+    previews: Previews,
     probe: Probe,
     groups: Groups,
     /// Retry requests we sent, and answered.
@@ -121,6 +123,7 @@ impl<'a, B: SignalBackend> Session<'a, B> {
             settings: AccountSettings::default(),
             outbox: Outbox::new(options.send_timeout),
             downloads: Downloads::new(db.files()),
+            previews: Previews::new(options.frame_helper.clone(), db.files()),
             probe: Probe::new(options.probe_interval, options.probe_timeout),
             groups: Groups::new(),
             retries_sent: Limiter::new(RETRY_WINDOW, MAX_RETRY_REQUESTS_PER_DEVICE),
@@ -185,6 +188,11 @@ impl<'a, B: SignalBackend> Session<'a, B> {
             }
             Err(error) => self.database_error(error),
         }
+        match self.db.pending_previews().await {
+            Ok(pending) => pending.into_iter().for_each(|id| self.previews.push(id)),
+            Err(error) => self.database_error(error),
+        }
+        self.start_preview().await;
         // Contact names title conversations; settings stay off until the
         // phone says otherwise.
         self.contacts_wanted = linked_now || self.contacts_due().await;
@@ -255,6 +263,10 @@ impl<'a, B: SignalBackend> Session<'a, B> {
                     self.download_finished(finished).await;
                     None
                 }
+                made = self.previews.finished() => {
+                    self.preview_made(made).await;
+                    None
+                }
                 () = tokio::time::sleep_until(wait), if self.retry_at.is_some() => None,
                 () = tokio::time::sleep_until(drain_wait), if self.drain_by.is_some() => {
                     self.drain_timed_out().await
@@ -303,6 +315,7 @@ impl<'a, B: SignalBackend> Session<'a, B> {
             Some(Command::Delete { id, everyone }) => self.delete(id, everyone).await,
             Some(Command::Download(id)) => self.download(id).await,
             Some(Command::LoadAttachment(id)) => self.load_attachment(id).await,
+            Some(Command::LoadPreview(id)) => self.load_preview(id).await,
             Some(Command::SaveAttachment { id, path }) => self.save_attachment(id, path).await,
             Some(Command::SaveAttachments { ids, dir }) => self.save_attachments(ids, dir).await,
             Some(Command::Reconnect) if self.incoming.is_none() && self.connecting.is_none() => {
@@ -2073,11 +2086,65 @@ impl<'a, B: SignalBackend> Session<'a, B> {
             }
         };
         match stored {
-            Ok(Some(message)) => self.attachment_changed(message).await,
+            Ok(Some(message)) => {
+                self.attachment_changed(message).await;
+                match self.db.preview_wanted(id).await {
+                    Ok(true) => {
+                        self.previews.push(id);
+                        self.start_preview().await;
+                    }
+                    Ok(false) => {}
+                    Err(error) => self.database_error(error),
+                }
+            }
             Ok(None) => tracing::debug!(attachment = id.get(), "downloaded after it was gone"),
             Err(error) => self.database_error(error),
         }
         self.downloads.start(&mut self.backend);
+    }
+
+    /// Starts on the next video's first frame, unless one is being made.
+    async fn start_preview(&mut self) {
+        while let Some(id) = self.previews.next() {
+            match self.db.attachment_contents(id).await {
+                Ok(Some(video)) => return self.previews.start(id, video),
+                // Gone meanwhile.
+                Ok(None) => {}
+                Err(error) => self.database_error(error),
+            }
+        }
+    }
+
+    async fn preview_made(&mut self, made: Option<Made>) {
+        if let Some(Made { id, result }) = made {
+            match result {
+                Ok(file) => match self.db.set_preview(id, file).await {
+                    Ok(Some(message)) => self.attachment_changed(message).await,
+                    Ok(None) => {}
+                    Err(error) => self.database_error(error),
+                },
+                Err(previews::Failure::Helper(error)) => {
+                    tracing::debug!(attachment = id.get(), %error, "no first frame");
+                    if let Err(error) = self.db.preview_failed(id).await {
+                        self.database_error(error);
+                    }
+                }
+                // Tried again at the next start.
+                Err(previews::Failure::Storage(error)) => self.database_error(error.into()),
+            }
+        }
+        self.start_preview().await;
+    }
+
+    async fn load_preview(&self, id: AttachmentId) {
+        let contents = match self.db.preview_contents(id).await {
+            Ok(contents) => contents.map(FileContents::new),
+            Err(error) => {
+                self.database_error(error);
+                None
+            }
+        };
+        self.emit(Event::PreviewLoaded { id, contents });
     }
 
     async fn load_attachment(&self, id: AttachmentId) {

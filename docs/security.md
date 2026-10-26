@@ -80,6 +80,16 @@ to it, private to the user (`copiale_core::storage`).
 - **Decoding**: JPEG, PNG, WebP and GIF only, recognized by their
   contents rather than the sender's content type, off the main thread,
   with limits on size, memory and animation frames.
+- **Video previews**: the first frame comes from the same binary started
+  as `copiale --video-frame`, so FFmpeg, C code parsing others' files,
+  never runs in the app's process. Before reading the video it confines
+  itself: CPU, memory and file limits, then on Linux a seccomp filter
+  allowing only reading stdin, writing stdout, memory without execution
+  and exiting; on macOS the pure computation sandbox profile (no files,
+  network or other processes). It gets no environment, no stderr, and is
+  killed after 30 s. Only MOV/MP4 with H.264, HEVC, VP9 or AV1 is opened.
+  Windows has no such sandbox yet, so no previews there (#94). Frames are
+  stored encrypted like attachments and go with them.
 - **Saving**: a plaintext copy is written only where the user picks, under
   a name without path separators, hidden characters or names Windows
   reserves.

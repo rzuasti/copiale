@@ -24,6 +24,9 @@ copiale-core = { path = "crates/copiale-core" }
 copiale-testkit = { path = "crates/copiale-testkit" }
 copiale-ui = { path = "crates/copiale-ui" }
 directories = "6"
+# Video previews' first frame (`copiale --video-frame`); same major as
+# FFmpeg.
+ffmpeg-next = { version = "9", default-features = false, features = ["codec", "format", "software-scaling"] }
 # Same fontconfig-sys as GPUI's font-kit.
 fontconfig = "0.10"
 futures = "0.3"
@@ -54,6 +57,8 @@ rand = "0.9"
 raw-window-handle = "0.6"
 # Only to read libsignal-service's handshake errors; same major as it uses.
 reqwest-websocket = { version = "0.6", default-features = false }
+# The video frame helper's syscall filter.
+seccompiler = "0.5"
 serde = { version = "1", features = ["derive"] }
 # Same registry as async-process uses for SIGCHLD.
 signal-hook = { version = "0.3", default-features = false, features = ["iterator"] }

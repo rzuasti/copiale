@@ -27,7 +27,7 @@ serde_json.workspace = true
 sha2.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }
+tokio = { workspace = true, features = ["rt", "sync", "macros", "time", "process", "io-util"] }
 toml.workspace = true
 toml_edit.workspace = true
 tracing.workspace = true

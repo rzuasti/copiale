@@ -1481,6 +1481,124 @@ async fn downloaded_attachments_save_where_asked() {
     stop(running).await;
 }
 
+/// A helper that ignores the video and gives a PNG signature then `frame`,
+/// or fails.
+#[cfg(unix)]
+fn fake_frames(works: bool) -> copiale_core::video::FrameHelper {
+    let cat = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|dir| dir.join("cat"))
+        .find(|path| path.is_file())
+        .unwrap();
+    let script = match works {
+        true => format!(
+            r"{} >/dev/null; printf '\211PNG\r\n\032\nframe'",
+            cat.display()
+        ),
+        false => format!("{} >/dev/null; exit 1", cat.display()),
+    };
+    copiale_core::video::FrameHelper::new("/bin/sh", ["-c".to_owned(), script])
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn downloaded_videos_get_their_first_frame() {
+    let dir = tempfile::tempdir().unwrap();
+    let options = CoreOptions {
+        frame_helper: Some(fake_frames(true)),
+        ..fast()
+    };
+    let mut running = start_with(
+        dir.path(),
+        &MemorySecretStore::default(),
+        true,
+        options,
+        |_| {},
+    );
+    expect_ready(&mut running.events).await;
+    expect(&mut running.events, Event::Connected).await;
+    let remote = running.network.upload("cdn-1", b"mp4");
+    running.network.deliver(with_attachments(
+        1,
+        100,
+        vec![on_cdn(AttachmentKind::Video, remote)],
+    ));
+    let added = message_added(&mut running.events).await;
+    let id = attachment_id(&added, 0);
+
+    send(&running, Command::Download(id));
+
+    let previewed = loop {
+        if let Event::MessageUpdated(message) = next_event(&mut running.events).await
+            && let Content::Text { attachments, .. } = &message.content
+            && attachments[0].has_preview
+        {
+            break message;
+        }
+    };
+    assert_eq!(states(&previewed), [AttachmentState::Ready]);
+    send(&running, Command::LoadPreview(id));
+    loop {
+        if let Event::PreviewLoaded {
+            id: loaded,
+            contents,
+        } = next_event(&mut running.events).await
+        {
+            assert_eq!(loaded, id);
+            assert!(contents.unwrap().as_bytes().ends_with(b"frame"));
+            break;
+        }
+    }
+    stop(running).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn videos_without_a_frame_keep_their_blur() {
+    let dir = tempfile::tempdir().unwrap();
+    let options = CoreOptions {
+        frame_helper: Some(fake_frames(false)),
+        ..fast()
+    };
+    let mut running = start_with(
+        dir.path(),
+        &MemorySecretStore::default(),
+        true,
+        options,
+        |_| {},
+    );
+    expect_ready(&mut running.events).await;
+    expect(&mut running.events, Event::Connected).await;
+    let remote = running.network.upload("cdn-1", b"mp4");
+    running.network.deliver(with_attachments(
+        1,
+        100,
+        vec![on_cdn(AttachmentKind::Video, remote)],
+    ));
+    let added = message_added(&mut running.events).await;
+    let id = attachment_id(&added, 0);
+
+    send(&running, Command::Download(id));
+    attachments_become(&mut running.events, &[AttachmentState::Ready]).await;
+    send(&running, Command::LoadPreview(id));
+
+    loop {
+        match next_event(&mut running.events).await {
+            Event::PreviewLoaded { contents, .. } => {
+                assert_eq!(contents, None);
+                break;
+            }
+            Event::MessageUpdated(message) => {
+                let Content::Text { attachments, .. } = &message.content else {
+                    panic!("not text");
+                };
+                assert!(!attachments[0].has_preview);
+            }
+            _ => {}
+        }
+    }
+    stop(running).await;
+}
+
 // Linking
 
 #[tokio::test]

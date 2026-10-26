@@ -1,6 +1,8 @@
 //! Copiale: a fast, minimalist native desktop client for Signal.
 
 mod cli;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod frame;
 mod instance;
 #[cfg(unix)]
 mod signals;
@@ -9,9 +11,11 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use cli::{Cli, USAGE};
+use copiale_core::CoreOptions;
 use copiale_core::config::ConfigFile;
 use copiale_core::signal::PresageLinker;
 use copiale_core::storage::{OsKeychain, Storage, StoragePaths};
+use copiale_core::video::FrameHelper;
 use copiale_ui::Request;
 use futures::channel::mpsc::unbounded;
 use instance::Claim;
@@ -26,7 +30,31 @@ fn spawn_guard() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// This binary as the video frame helper, where it can sandbox itself.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn frame_helper() -> Option<FrameHelper> {
+    match std::env::current_exe() {
+        Ok(program) => Some(FrameHelper::new(program, [frame::FLAG])),
+        Err(error) => {
+            tracing::warn!(%error, "videos show no first frame: can't find this program");
+            None
+        }
+    }
+}
+
+/// No sandbox for the video frame helper here yet (#94).
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn frame_helper() -> Option<FrameHelper> {
+    None
+}
+
 fn main() -> ExitCode {
+    // Before anything else, as little as possible runs before its sandbox.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if std::env::args_os().skip(1).eq([frame::FLAG]) {
+        copiale_core::hardening::init();
+        return frame::run();
+    }
     copiale_core::logging::init();
     copiale_core::hardening::init();
 
@@ -67,10 +95,15 @@ fn main() -> ExitCode {
         tracing::error!("can't determine the data directory: no home directory");
         return ExitCode::FAILURE;
     };
-    let core = copiale_core::spawn(
+    let options = CoreOptions {
+        frame_helper: frame_helper(),
+        ..CoreOptions::default()
+    };
+    let core = copiale_core::spawn_with_options(
         Storage::new(paths),
         Arc::new(OsKeychain::new()),
         PresageLinker::default,
+        options,
     );
     let (core, events) = match core {
         Ok(core) => core,

@@ -55,14 +55,9 @@ pub fn shown(attachment: &Attachment) -> Option<Shown> {
     ) {
         return None;
     }
-    // Signal's GIFs are videos.
-    let video = attachment
-        .content_type
-        .as_deref()
-        .is_some_and(|kind| kind.starts_with("video/"));
     Some(match attachment.kind {
-        AttachmentKind::Image | AttachmentKind::Gif if !video => Shown::Picture,
-        AttachmentKind::Image | AttachmentKind::Gif | AttachmentKind::Video => Shown::Video,
+        _ if attachment.is_video() => Shown::Video,
+        AttachmentKind::Image | AttachmentKind::Gif | AttachmentKind::Video => Shown::Picture,
         AttachmentKind::File | AttachmentKind::Audio | AttachmentKind::Voice => Shown::File,
     })
 }

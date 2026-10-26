@@ -22,8 +22,9 @@ Scope, UI design, architecture and work items for the first usable release.
 - Non-text content (stickers, reactions, calls): muted placeholder line,
   e.g. `[sticker] open on your phone`, above any caption.
 - Received attachments (after the MVP, #87): images and GIFs drawn above
-  the caption, albums as a grid of up to four; videos as their blurred
-  preview with `▶`; other files as `▤ name · size · download/save` lines.
+  the caption, albums as a grid of up to four; videos as their first
+  frame once downloaded (Linux and macOS), before that their blurred
+  preview, with `▶`; other files as `▤ name · size · download/save` lines.
   Not yet downloaded: the blurred preview with `↓ size`. Attachments that
   can't be downloaded keep a placeholder line.
 - Group and timer changes: system lines, e.g. `-- alice added bob · 10:04`.

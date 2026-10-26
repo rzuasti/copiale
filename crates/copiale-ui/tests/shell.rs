@@ -3048,3 +3048,49 @@ fn pictures_draw_open_in_the_viewer_and_files_download(cx: &mut TestAppContext) 
         "{asked:?}"
     );
 }
+
+#[gpui_kit::test]
+fn videos_with_a_first_frame_draw_it(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.click(("conversation", 1u64), cx);
+    ui.core.take();
+    let video = |id: i64, has_preview| Attachment {
+        id: Some(AttachmentId::new(id)),
+        state: AttachmentState::Ready,
+        has_preview,
+        ..Attachment::new(AttachmentKind::Video)
+    };
+    let message = |id, attachment| Message {
+        content: Content::Text {
+            body: MessageBody::new(""),
+            attachments: vec![attachment],
+            quote: None,
+        },
+        ..message(id, Direction::Incoming, None)
+    };
+    ui.event(
+        Event::Messages {
+            conversation: ConversationId::new(1),
+            before: None,
+            messages: vec![message(1, video(10, true)), message(2, video(20, false))],
+        },
+        cx,
+    );
+
+    let asked = ui.core.take();
+    assert!(
+        matches!(asked.as_slice(), [Command::LoadPreview(id)] if *id == AttachmentId::new(10)),
+        "only the video with a frame loads it: {asked:?}"
+    );
+    ui.event(
+        Event::PreviewLoaded {
+            id: AttachmentId::new(10),
+            contents: Some(FileContents::new(png(40, 20))),
+        },
+        cx,
+    );
+    cx.run_until_parked();
+    ui.frame(cx);
+    assert!(ui.shows(("attachment", 10u64), cx));
+    assert!(ui.core.take().is_empty());
+}

@@ -557,7 +557,7 @@ impl ChatView {
         match event {
             Event::Account(account) => self.account = Some(account.clone()),
             Event::RecentEmoji(recent) => self.recent_emoji.clone_from(&recent.0),
-            Event::AttachmentLoaded { id, contents } => {
+            Event::AttachmentLoaded { id, contents } | Event::PreviewLoaded { id, contents } => {
                 self.attachment_loaded(*id, contents.as_ref(), cx);
             }
             _ => {}

@@ -95,3 +95,18 @@ Scrolling feels much smoother than iced (hands-on, Linux).
 - [ ] Fractional scaling: Windows 150%, macOS Retina.
 - [ ] X11 session; Wayland CSD vs SSD.
 - [ ] macOS and Windows builds and measurements.
+
+## Video playback (#95)
+
+`examples/video_fps.rs`: a new `RenderImage` per frame, the old one dropped
+from the atlas, frames from a bounded channel (stands in for the helper's
+pipe). Linux, Hyprland, release build; CPU includes making the frames.
+
+| Size      | fps | Shown/s | Render gap p99 / max | CPU (one core) | RSS     |
+| --------- | --- | ------- | -------------------- | -------------- | ------- |
+| 1280×720  | 30  | 30.0    | 34.0 / 34.4 ms       | 10%            | 115 MiB |
+| 1920×1080 | 30  | 30.0    | 34.0 / 34.4 ms       | 20%            | 146 MiB |
+| 1920×1080 | 60  | 60.0    | 17.7 / 18.4 ms       | 38%            | 146 MiB |
+
+RSS flat over 40 s (2400 frames): dropped frames free their atlas tiles.
+Not measured: macOS, Windows.

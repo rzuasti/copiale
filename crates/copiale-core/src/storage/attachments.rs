@@ -1,8 +1,9 @@
 //! Attachments' downloads and their encrypted copies on disk.
 //!
 //! A message's `content` describes its attachments; rows here, by position
-//! in that list, track the downloadable ones. Deleting a row, also with its
-//! message, queues its copy in `deleted_files` until it's gone from disk.
+//! in that list, track the downloadable ones, and for videos their first
+//! frame. Deleting a row, also with its message, queues its copies in
+//! `deleted_files` until they're gone from disk.
 
 use std::collections::HashSet;
 
@@ -93,7 +94,32 @@ impl Database {
         .fetch_optional(&self.app)
         .await
         .map_err(database_error)?;
-        let Some((name, key)) = row else {
+        self.read_file(row).await
+    }
+
+    /// A video's first frame as a PNG; `None` if there's none yet.
+    pub(crate) async fn preview_contents(
+        &self,
+        id: AttachmentId,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        let row: Option<(String, Vec<u8>)> = sqlx::query_as(
+            "SELECT preview_file, preview_key FROM attachments
+             WHERE id = ? AND preview = 'ready'
+               AND preview_file IS NOT NULL AND preview_key IS NOT NULL",
+        )
+        .bind(id.get())
+        .fetch_optional(&self.app)
+        .await
+        .map_err(database_error)?;
+        self.read_file(row).await
+    }
+
+    /// Reads and decrypts a file by its name and key.
+    async fn read_file(
+        &self,
+        file: Option<(String, Vec<u8>)>,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        let Some((name, key)) = file else {
             return Ok(None);
         };
         let key = FileKey::from_slice(&key)
@@ -103,6 +129,66 @@ impl Database {
             .await
             .map_err(std::io::Error::other)??;
         Ok(Some(contents))
+    }
+
+    /// Downloaded videos whose first frame is still wanted.
+    pub(crate) async fn pending_previews(&self) -> Result<Vec<AttachmentId>, StorageError> {
+        let ids: Vec<i64> = sqlx::query_scalar(
+            "SELECT id FROM attachments WHERE state = 'ready' AND preview = 'wanted' ORDER BY id",
+        )
+        .fetch_all(&self.app)
+        .await
+        .map_err(database_error)?;
+        Ok(ids.into_iter().map(AttachmentId::new).collect())
+    }
+
+    /// Whether a downloaded video's first frame is still wanted.
+    pub(crate) async fn preview_wanted(&self, id: AttachmentId) -> Result<bool, StorageError> {
+        let wanted: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM attachments WHERE id = ? AND state = 'ready' AND preview = 'wanted'",
+        )
+        .bind(id.get())
+        .fetch_optional(&self.app)
+        .await
+        .map_err(database_error)?;
+        Ok(wanted.is_some())
+    }
+
+    /// Records a video's first frame; returns its message, or `None`,
+    /// deleting the copy, if it's gone or no longer wanted.
+    pub(crate) async fn set_preview(
+        &self,
+        id: AttachmentId,
+        file: StoredFile,
+    ) -> Result<Option<MessageId>, StorageError> {
+        let message: Option<i64> = sqlx::query_scalar(
+            "UPDATE attachments SET preview = 'ready', preview_file = ?, preview_key = ?
+             WHERE id = ? AND state = 'ready' AND preview = 'wanted'
+             RETURNING message_id",
+        )
+        .bind(&file.name)
+        .bind(file.key.as_bytes())
+        .bind(id.get())
+        .fetch_optional(&self.app)
+        .await
+        .map_err(database_error)?;
+        if message.is_none() {
+            self.files.remove(&file.name)?;
+        }
+        Ok(message.map(MessageId::new))
+    }
+
+    /// Notes a video's first frame couldn't be had, so it isn't tried
+    /// again.
+    pub(crate) async fn preview_failed(&self, id: AttachmentId) -> Result<(), StorageError> {
+        sqlx::query(
+            "UPDATE attachments SET preview = 'failed' WHERE id = ? AND preview = 'wanted'",
+        )
+        .bind(id.get())
+        .execute(&self.app)
+        .await
+        .map_err(database_error)?;
+        Ok(())
     }
 
     /// A stored attachment as its message describes it.
@@ -160,13 +246,15 @@ impl Database {
     /// attachments that were downloading, to download again.
     pub(crate) async fn check_files(&self) -> Result<Vec<AttachmentId>, StorageError> {
         self.try_remove_deleted_files().await?;
-        let kept: HashSet<String> =
-            sqlx::query_scalar("SELECT file FROM attachments WHERE file IS NOT NULL")
-                .fetch_all(&self.app)
-                .await
-                .map_err(database_error)?
-                .into_iter()
-                .collect();
+        let kept: HashSet<String> = sqlx::query_scalar(
+            "SELECT file FROM attachments WHERE file IS NOT NULL
+             UNION SELECT preview_file FROM attachments WHERE preview_file IS NOT NULL",
+        )
+        .fetch_all(&self.app)
+        .await
+        .map_err(database_error)?
+        .into_iter()
+        .collect();
         let on_disk: HashSet<String> = self.files.list()?.into_iter().collect();
         for name in on_disk.difference(&kept) {
             self.files.remove(name)?;
@@ -176,6 +264,14 @@ impl Database {
             sqlx::query(
                 "UPDATE attachments SET state = 'remote', file = NULL, file_key = NULL
                  WHERE file = ?",
+            )
+            .bind(name)
+            .execute(&self.app)
+            .await
+            .map_err(database_error)?;
+            sqlx::query(
+                "UPDATE attachments SET preview = 'wanted', preview_file = NULL, preview_key = NULL
+                 WHERE preview_file = ?",
             )
             .bind(name)
             .execute(&self.app)
@@ -206,12 +302,13 @@ pub(super) async fn insert_attachments(
             continue;
         };
         sqlx::query(
-            "INSERT INTO attachments (message_id, position, pointer, state)
-             VALUES (?, ?, ?, 'remote')",
+            "INSERT INTO attachments (message_id, position, pointer, state, preview)
+             VALUES (?, ?, ?, 'remote', ?)",
         )
         .bind(message.get())
         .bind(position as i64)
         .bind(remote.as_bytes())
+        .bind(attachment.is_video().then_some("wanted"))
         .execute(&mut *tx)
         .await
         .map_err(database_error)?;
@@ -219,7 +316,7 @@ pub(super) async fn insert_attachments(
     Ok(())
 }
 
-/// Fills in the IDs and state of `message`'s attachments.
+/// Fills in the IDs, state and previews of `message`'s attachments.
 pub(super) async fn resolve_attachments(
     conn: &mut sqlx::SqliteConnection,
     message: &mut Message,
@@ -230,19 +327,20 @@ pub(super) async fn resolve_attachments(
     if attachments.is_empty() {
         return Ok(());
     }
-    let rows: Vec<(i64, i64, String)> =
-        sqlx::query_as("SELECT id, position, state FROM attachments WHERE message_id = ?")
+    let rows: Vec<(i64, i64, String, Option<String>)> =
+        sqlx::query_as("SELECT id, position, state, preview FROM attachments WHERE message_id = ?")
             .bind(message.id.get())
             .fetch_all(&mut *conn)
             .await
             .map_err(database_error)?;
-    for (id, position, state) in rows {
+    for (id, position, state, preview) in rows {
         let attachment = usize::try_from(position)
             .ok()
             .and_then(|position| attachments.get_mut(position));
         if let Some(attachment) = attachment {
             attachment.id = Some(AttachmentId::new(id));
             attachment.state = parse_state(&state)?;
+            attachment.has_preview = preview.as_deref() == Some("ready");
         }
     }
     Ok(())
@@ -256,6 +354,7 @@ pub(super) fn without_remotes(content: &Content) -> Content {
         for attachment in attachments.iter_mut() {
             attachment.remote = None;
             attachment.state = AttachmentState::Unavailable;
+            attachment.has_preview = false;
         }
     }
     content
@@ -607,5 +706,90 @@ mod tests {
                 AttachmentState::Remote
             ]
         );
+    }
+
+    fn video(name: &str) -> Attachment {
+        Attachment {
+            kind: AttachmentKind::Video,
+            ..remote(name)
+        }
+    }
+
+    #[tokio::test]
+    async fn downloaded_videos_want_a_first_frame() {
+        let (_dir, db) = db().await;
+        let content = with_attachments("", vec![video("v"), remote("i")]);
+        let added = incoming(&db, 1, &content).await;
+        let (video, image) = (id(&added, 0), id(&added, 1));
+
+        assert!(
+            db.pending_previews().await.unwrap().is_empty(),
+            "not downloaded"
+        );
+        download(&db, &added, b"mp4").await;
+        db.start_download(image).await.unwrap().unwrap();
+        let file = db.files().store(b"jpg".to_vec()).await.unwrap();
+        db.finish_download(image, file).await.unwrap();
+
+        assert_eq!(db.pending_previews().await.unwrap(), [video]);
+        assert!(db.preview_wanted(video).await.unwrap());
+        assert!(!db.preview_wanted(image).await.unwrap());
+        assert_eq!(db.preview_contents(video).await.unwrap(), None);
+
+        let frame = db.files().store(b"png".to_vec()).await.unwrap();
+        assert_eq!(db.set_preview(video, frame).await.unwrap(), Some(added.id));
+
+        let shown = db.message(added.id).await.unwrap().unwrap();
+        assert!(attachments(&shown)[0].has_preview);
+        assert!(!attachments(&shown)[1].has_preview);
+        assert_eq!(
+            db.preview_contents(video).await.unwrap().as_deref(),
+            Some(b"png".as_slice())
+        );
+        assert!(db.pending_previews().await.unwrap().is_empty());
+        // Not wanted any more: the copy goes.
+        let again = db.files().store(b"png".to_vec()).await.unwrap();
+        assert_eq!(db.set_preview(video, again).await.unwrap(), None);
+        assert_eq!(files_on_disk(&db).await, 3);
+    }
+
+    #[tokio::test]
+    async fn failed_frames_arent_tried_again() {
+        let (_dir, db) = db().await;
+        let added = incoming(&db, 1, &with_attachments("", vec![video("v")])).await;
+        download(&db, &added, b"mp4").await;
+
+        db.preview_failed(id(&added, 0)).await.unwrap();
+
+        assert!(db.pending_previews().await.unwrap().is_empty());
+        let shown = db.message(added.id).await.unwrap().unwrap();
+        assert!(!attachments(&shown)[0].has_preview);
+    }
+
+    #[tokio::test]
+    async fn frames_go_with_their_video_and_come_back_if_missing() {
+        let (_dir, db) = db().await;
+        let content = with_attachments("", vec![video("v")]);
+        let added = incoming(&db, 1, &content).await;
+        download(&db, &added, b"mp4").await;
+        let frame = db.files().store(b"png".to_vec()).await.unwrap();
+        let name = frame.name.clone();
+        db.set_preview(id(&added, 0), frame).await.unwrap();
+
+        db.files.remove(&name).unwrap();
+        db.check_files().await.unwrap();
+        assert_eq!(db.pending_previews().await.unwrap(), [id(&added, 0)]);
+
+        let frame = db.files().store(b"png".to_vec()).await.unwrap();
+        db.set_preview(id(&added, 0), frame).await.unwrap();
+        assert_eq!(files_on_disk(&db).await, 2);
+        db.delete_messages(&[MessageRef {
+            chat: ChatRef::Contact(peer(1)),
+            author: Some(peer(1)),
+            sent_at: at(1),
+        }])
+        .await
+        .unwrap();
+        assert_eq!(files_on_disk(&db).await, 0);
     }
 }

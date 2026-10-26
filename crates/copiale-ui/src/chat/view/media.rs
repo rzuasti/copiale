@@ -103,6 +103,9 @@ impl ChatView {
         let video = shown(attachment) == Some(Shown::Video);
         let picture = match (video, attachment.state, attachment.id) {
             (false, AttachmentState::Ready, Some(id)) => self.thumbnail(id),
+            (true, AttachmentState::Ready, Some(id)) if attachment.has_preview => {
+                self.video_frame(id)
+            }
             _ => None,
         };
         let undrawable = picture.is_none()
@@ -234,6 +237,17 @@ impl ChatView {
     }
 
     fn picture(&self, id: AttachmentId, use_: Use) -> Option<Picture> {
+        self.load(id, use_, Command::LoadAttachment(id))
+    }
+
+    /// A video's first frame, as its thumbnail.
+    fn video_frame(&self, id: AttachmentId) -> Option<Picture> {
+        self.load(id, Use::Thumbnail, Command::LoadPreview(id))
+    }
+
+    /// The picture for `id` and `use_`, sending `command` to load it
+    /// unless it's loading.
+    fn load(&self, id: AttachmentId, use_: Use, command: Command) -> Option<Picture> {
         let mut pictures = self.pictures.borrow_mut();
         match pictures.get(id, use_) {
             Some(Slot::Ready(picture)) => Some(picture),
@@ -243,7 +257,7 @@ impl ChatView {
                 pictures.want(id, use_);
                 // One load serves every use waiting.
                 if first {
-                    self.core.send(Command::LoadAttachment(id));
+                    self.core.send(command);
                 }
                 None
             }

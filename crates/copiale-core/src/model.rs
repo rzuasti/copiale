@@ -365,6 +365,10 @@ pub struct Attachment {
     pub id: Option<AttachmentId>,
     #[serde(skip)]
     pub state: AttachmentState,
+    /// A video whose first frame is here
+    /// ([`Command::LoadPreview`](crate::Command::LoadPreview)).
+    #[serde(skip)]
+    pub has_preview: bool,
     /// Where to download it from; set only on its way into storage.
     #[serde(skip)]
     pub remote: Option<RemoteAttachment>,
@@ -382,8 +386,18 @@ impl Attachment {
             blurhash: None,
             id: None,
             state: AttachmentState::Unavailable,
+            has_preview: false,
             remote: None,
         }
+    }
+
+    /// A video, by kind or content type: Signal sends GIFs as videos.
+    pub fn is_video(&self) -> bool {
+        self.kind == AttachmentKind::Video
+            || self
+                .content_type
+                .as_deref()
+                .is_some_and(|kind| kind.starts_with("video/"))
     }
 }
 

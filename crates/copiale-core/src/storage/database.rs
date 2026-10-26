@@ -441,6 +441,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn downloaded_videos_want_a_frame_after_migrating() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, pool) = plain(dir.path()).await;
+        let before = migrator()
+            .migrations
+            .iter()
+            .position(|migration| migration.version == 20261031120000)
+            .unwrap();
+        migrate(&pool, Some(before)).await;
+        sqlx::query("INSERT INTO conversations (id, peer) VALUES (1, x'07')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let content = r#"{"text":{"body":"","attachments":[
+            {"kind":"video"},{"kind":"gif","content_type":"video/mp4"},{"kind":"image"}]}}"#;
+        sqlx::query(
+            "INSERT INTO messages
+                 (id, conversation_id, outgoing, author, sent_at, received_at, body, content)
+             VALUES (1, 1, 0, x'07', 1, 1, '', ?)",
+        )
+        .bind(content)
+        .execute(&pool)
+        .await
+        .unwrap();
+        for position in 0..3 {
+            sqlx::query(
+                "INSERT INTO attachments (message_id, position, pointer, state)
+                 VALUES (1, ?, x'00', 'ready')",
+            )
+            .bind(position)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        migrate(&pool, None).await;
+
+        let previews: Vec<Option<String>> =
+            sqlx::query_scalar("SELECT preview FROM attachments ORDER BY position")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            previews,
+            [Some("wanted".into()), Some("wanted".into()), None]
+        );
+        pool.close().await;
+        store.close().await;
+    }
+
+    #[tokio::test]
     async fn file_has_no_plaintext_header() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.db");
