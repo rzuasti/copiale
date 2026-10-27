@@ -35,8 +35,12 @@ mode and the accent colour can be changed, unlike an unactivated Windows.
 - **Install**: quickget's answer file, without its product key (the
   evaluation brings its own), with activation and guest access to the share
   added. Windows restarts a few times and signs in as `Quickemu` (password
-  `quickemu`). Shut it down when it reaches the desktop; the next `start`
-  boots from the disk.
+  `quickemu`). The screen can stay black for several minutes in setup's
+  first stage; the disk image grows meanwhile. Shut it down when it reaches
+  the desktop; the next `start` boots from the disk. An install stopped
+  before the desktop can't resume: `delete`, then `create`.
+- **Drivers**: quickget's virtio download can get a bot check page instead
+  of the ISO, leaving setup with no disks; `create` downloads it again then.
 
 ## Test a CI build
 
@@ -45,15 +49,19 @@ mode and the accent colour can be changed, unlike an unactivated Windows.
    runtime; kept 30 days); `check` runs fmt, clippy and the tests.
 2. `fetch [run-id]`: the given run's build, or the latest finished run's,
    into the share, with the branch and commit in `copiale.txt`.
-3. `start`: the SPICE console (`remote-viewer`). In the guest, open
-   `\\10.0.2.4\qemu` and run `copiale.exe`, or copy it to the desktop first if
-   Windows warns about files on the network.
+3. `start`: the SPICE console (`remote-viewer`). In the guest, copy
+   `copiale.exe` from `\\10.0.2.4\qemu` to the desktop and run it there:
+   QEMU's Samba lists the share but refuses Windows' DFS paths to its files.
+4. Logs: run it from PowerShell on the desktop, e.g.
+   `$env:COPIALE_LOG = "copiale_core=debug"; .\copiale.exe`.
 
 ## Known limits
 
 - No GPU in the guest (software rendering): frame timing means nothing, and
   transparency effects may be off.
 - x86_64 hosts only.
+- The guest's resolution follows the window; for larger text, set
+  Settings → System → Display → Scale in Windows.
 - When the evaluation runs out: `slmgr /rearm` in an administrator prompt
   (then restart), or recreate the VM: `delete` (keeps the ISO), then
   `create`.

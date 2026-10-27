@@ -10,6 +10,7 @@
 GITHUB_REPO=rzuasti/copiale
 EVAL_PAGE=https://www.microsoft.com/en-us/evalcenter/download-windows-11-enterprise
 EVAL_HOST=https://software-static.download.prss.microsoft.com/
+VIRTIO_URL=https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/stable-virtio/virtio-win.iso
 STATE=${XDG_STATE_HOME:-$HOME/.local/state}/copiale/windows-vm
 # Its name decides how quickget treats it: Windows, unattended.
 ISO_NAME=windows-11-enterprise-eval.iso
@@ -50,6 +51,20 @@ download_iso() {
   say "Downloading ${target##*/}"
   curl -fL --proto =https -C - -o "$ISO.part" "$target"
   mv "$ISO.part" "$ISO"
+}
+
+# The virtio drivers (disk, network) unless quickget got them: its browser
+# user agent can get a bot check page instead.
+fetch_virtio() {
+  local iso=$VM/virtio-win.iso url
+  [ "$(head -c 32774 "$iso" | tail -c 5)" != CD001 ] || return 0
+  say "Downloading the virtio drivers"
+  # Redirects to the release over http://; it's served over https too.
+  url=$(curl -fsIL -o /dev/null -w '%{url_effective}' "$VIRTIO_URL")
+  url=https://${url#http*://}
+  [[ $url == https://fedorapeople.org/* ]] || die "unexpected virtio drivers URL: $url"
+  curl -fL --proto =https -o "$iso.part" "$url"
+  mv "$iso.part" "$iso"
 }
 
 # quickget's answer file, for evaluation media: no product key (Pro's
@@ -93,6 +108,7 @@ create() {
     [ -f "$VM/$ISO_NAME" ] && mv "$VM/$ISO_NAME" "$ISO"
     die "quickget failed; run windows-vm delete, then create again"
   }
+  fetch_virtio
   patch_unattended
   cat >>"$CONF" <<EOF
 disk_size="64G"
