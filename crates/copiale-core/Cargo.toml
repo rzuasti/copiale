@@ -44,6 +44,7 @@ zeroize.workspace = true
 libc.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+libsqlite3-sys = { workspace = true, features = ["bundled-sqlcipher-vendored-openssl"] }
 windows-sys = { workspace = true, features = ["Win32_System_ErrorReporting", "Win32_System_Memory"] }
 
 [dev-dependencies]

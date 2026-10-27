@@ -34,12 +34,20 @@
     homeManagerModules = self.homeModules;
 
     # `nix run .#release -- <version>`; see docs/release-macos.md.
-    apps = forEachSystem (system: {
-      release = {
-        type = "app";
-        program = nixpkgs.lib.getExe (pkgsBySystem.${system}.callPackage ./nix/release.nix {});
-      };
-    });
+    # `nix run .#windows-vm -- <command>`; see docs/windows-vm.md.
+    apps = forEachSystem (system:
+      {
+        release = {
+          type = "app";
+          program = nixpkgs.lib.getExe (pkgsBySystem.${system}.callPackage ./nix/release.nix {});
+        };
+      }
+      // nixpkgs.lib.optionalAttrs (system == "x86_64-linux") {
+        windows-vm = {
+          type = "app";
+          program = nixpkgs.lib.getExe (pkgsBySystem.${system}.callPackage ./nix/windows-vm.nix {});
+        };
+      });
 
     checks = forEachLinuxSystem (system: let
       pkgs = pkgsBySystem.${system};
