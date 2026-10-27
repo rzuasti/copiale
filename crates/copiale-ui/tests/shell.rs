@@ -25,8 +25,7 @@ use copiale_ui::theme::{
 };
 use copiale_ui::tray::{self, Tray, TrayAction, TrayState};
 use copiale_ui::{
-    APP_ID, CoreSink, Quit, Request, Shell, VideoPlayback, main_window, main_window_options,
-    titlebar,
+    APP_ID, CoreSink, Quit, Request, Shell, main_window, main_window_options, titlebar,
 };
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::test::TestWindowExt as _;
@@ -3285,7 +3284,7 @@ fn fake_player() -> copiale_core::video::VideoHelper {
 fn videos_play_in_the_viewer(cx: &mut TestAppContext) {
     let ui = Ui::open(cx);
     cx.update(|cx| {
-        cx.set_global(VideoPlayback {
+        cx.set_global(copiale_ui::VideoPlayback {
             helper: fake_player(),
             sound: false,
         })
