@@ -34,6 +34,20 @@ jobs:
         run: cargo clippy --keep-going --all-targets --all-features -- -D warnings
       - name: Test
         run: cargo test --workspace --no-fail-fast
+      # Temporary (#28): why copiale-core's tests are slow on Windows.
+      - name: Timed core tests
+        if: always()
+        run: |
+          Get-MpComputerStatus | Select-Object RealTimeProtectionEnabled, AntivirusEnabled
+          $env:RUSTC_BOOTSTRAP = "1"
+          cargo test -p copiale-core --lib --test actor -- -Z unstable-options --report-time
+      - name: Timed core tests without Defender
+        if: always()
+        run: |
+          Add-MpPreference -ExclusionPath $env:TEMP, "$PWD\target"
+          Get-MpPreference | Select-Object -ExpandProperty ExclusionPath
+          $env:RUSTC_BOOTSTRAP = "1"
+          cargo test -p copiale-core --lib --test actor -- -Z unstable-options --report-time
 
   build:
     runs-on: windows-latest

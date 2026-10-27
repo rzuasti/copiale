@@ -357,14 +357,18 @@ mod tests {
 
     #[test]
     fn only_lists_of_file_uris_paste_as_files() {
-        assert_eq!(
-            file_uris("file:///home/a/b%20c.jpg\r\nfile:///tmp/x.pdf\n"),
-            [
-                PathBuf::from("/home/a/b c.jpg"),
-                PathBuf::from("/tmp/x.pdf")
-            ]
+        #[cfg(unix)]
+        let (text, paths) = (
+            "file:///home/a/b%20c.jpg\r\nfile:///tmp/x.pdf\n",
+            ["/home/a/b c.jpg", "/tmp/x.pdf"],
         );
-        assert!(file_uris("file:///tmp/x.pdf\nand some text").is_empty());
+        #[cfg(windows)]
+        let (text, paths) = (
+            "file:///C:/Users/a/b%20c.jpg\r\nfile:///D:/x.pdf\n",
+            [r"C:\Users\a\b c.jpg", r"D:\x.pdf"],
+        );
+        assert_eq!(file_uris(text), paths.map(PathBuf::from));
+        assert!(file_uris(&format!("{text}and some text")).is_empty());
         assert!(file_uris("/etc/passwd").is_empty());
         assert!(file_uris("https://example.com/a.jpg").is_empty());
         assert!(file_uris("").is_empty());
