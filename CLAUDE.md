@@ -147,9 +147,12 @@ went unsolved until 2011.
     mirror's `release` environment (`v*` tags only). Releases:
     `nix run .#release -- <version>` (`docs/release-macos.md`); its
     changelog section is approved by the user before it's committed.
-  - Windows: MSIX or winget. `windows.yml` on the mirror checks and builds
+  - Windows: signed MSIX downloaded from Codeberg Releases (no Microsoft
+    Store), signed through SignPath Foundation (Certum Open Source
+    certificate if declined); updates through an `.appinstaller` on
+    Codeberg Pages (#100). `windows.yml` on the mirror checks and builds
     `copiale.exe` on demand (static C runtime); tried in a Windows 11
-    evaluation VM, `nix run .#windows-vm` (x86_64-linux;
+    evaluation VM only, `nix run .#windows-vm` (x86_64-linux;
     `docs/windows-vm.md`).
 
 ## Code style

@@ -1,15 +1,18 @@
 //! Named pipes share one machine-wide namespace any local user can create
-//! names in: the pipe is named after this user's SID, only they may open it,
-//! and requests go only to a server running as them.
+//! names in: the pipe is named after this user's SID and the instance dir,
+//! only they may open it, and requests go only to a server running as them.
 
 use std::io;
+use std::os::windows::ffi::OsStrExt as _;
 use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
+use std::path::Path;
 use std::ptr;
 
 use interprocess::local_socket::prelude::*;
 use interprocess::local_socket::{GenericNamespaced, ListenerOptions, Name, Stream};
 use interprocess::os::windows::local_socket::ListenerOptionsExt as _;
 use interprocess::os::windows::security_descriptor::SecurityDescriptor;
+use sha2::{Digest as _, Sha256};
 use widestring::{U16CStr, U16CString};
 use windows_sys::Win32::Foundation::{HANDLE, LocalFree};
 use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
@@ -20,11 +23,24 @@ use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 
-/// The pipe's name, one per user.
-pub fn name() -> io::Result<Name<'static>> {
-    format!("{}-{}", copiale_core::APP_ID, own_sid()?)
+/// The pipe's name, one per user and instance dir.
+pub fn name(dir: &Path) -> io::Result<Name<'static>> {
+    pipe_name(&own_sid()?, dir)
         .to_ns_name::<GenericNamespaced>()
         .map(Name::into_owned)
+}
+
+fn pipe_name(sid: &str, dir: &Path) -> String {
+    let path: Vec<u8> = dir
+        .as_os_str()
+        .encode_wide()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    let hash: String = Sha256::digest(path)[..8]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!("{}-{sid}-{hash}", copiale_core::APP_ID)
 }
 
 /// Makes this user the pipe's owner and the only one allowed to open it.
@@ -126,8 +142,21 @@ impl TokenUserInfo {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
+    use super::pipe_name;
+
     #[test]
     fn the_pipe_is_named_after_the_user() {
         assert!(super::own_sid().unwrap().starts_with("S-1-5-"));
+    }
+
+    #[test]
+    fn each_dir_has_its_own_pipe() {
+        let a = Path::new(r"C:\Users\a\AppData\Local\Copiale");
+        let b = Path::new(r"C:\Users\a\AppData\Local\Other");
+        assert_eq!(pipe_name("S-1-5-21", a), pipe_name("S-1-5-21", a));
+        assert_ne!(pipe_name("S-1-5-21", a), pipe_name("S-1-5-21", b));
+        assert_ne!(pipe_name("S-1-5-21", a), pipe_name("S-1-5-22", a));
     }
 }

@@ -194,8 +194,8 @@ fn name(dir: &Path) -> io::Result<Name<'static>> {
 }
 
 #[cfg(windows)]
-fn name(_: &Path) -> io::Result<Name<'static>> {
-    windows::name()
+fn name(dir: &Path) -> io::Result<Name<'static>> {
+    windows::name(dir)
 }
 
 #[cfg(test)]
@@ -266,8 +266,12 @@ mod tests {
         let Claim::First(first) = claim(dir.path()).unwrap() else {
             panic!("first claim");
         };
-        // A crashed instance leaves its socket file but not its lock.
+        // A crashed instance leaves its socket file but not its lock;
+        // Windows closes its pipe.
+        #[cfg(unix)]
         std::mem::forget(first.listener);
+        #[cfg(windows)]
+        drop(first.listener);
         let _spawning = crate::spawn_guard();
         drop(first._lock);
 
