@@ -1,6 +1,11 @@
 //! Copiale: a fast, minimalist native desktop client for Signal.
 
+// No console window beside Copiale's own.
+#![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
+
 mod cli;
+#[cfg(windows)]
+mod console;
 mod instance;
 #[cfg(unix)]
 mod signals;
@@ -62,6 +67,8 @@ fn main() -> ExitCode {
             return video::run_play();
         }
     }
+    #[cfg(windows)]
+    console::attach();
     copiale_core::logging::init();
     copiale_core::hardening::init();
 
@@ -96,6 +103,15 @@ fn main() -> ExitCode {
     if cli == Cli::Quit {
         eprintln!("Copiale isn't running.");
         return ExitCode::SUCCESS;
+    }
+    #[cfg(windows)]
+    {
+        console::detach();
+        if instance.is_some()
+            && let Err(error) = copiale_core::logging::log_to_file(&dir.join("copiale.log"))
+        {
+            tracing::warn!(%error, "can't write the log file");
+        }
     }
 
     let Some(paths) = StoragePaths::platform() else {

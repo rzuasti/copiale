@@ -116,7 +116,8 @@ went unsolved until 2011.
     left in memory are listed in `docs/security.md`.
   - Never log message content, phone numbers or keys; log redacted
     identifiers only (`ServiceId`, `PhoneNumber`, `GroupId`), shown as
-    per-run tags (the journal may keep stderr). Dependency logs are capped
+    per-run tags (the journal may keep stderr; Windows writes a log file,
+    `logging::log_to_file`). Dependency logs are capped
     at `warn` (libsignal-protocol's off), panics log their location only,
     and all output is scrubbed of UUIDs, long hex runs, byte lists and
     phone numbers (`copiale_core::logging`).

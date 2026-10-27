@@ -439,13 +439,15 @@ crates/
   D-Bus service (Linux) and WinRT toasts (Windows); `mac-usernotifications`
   for UNUserNotificationCenter (macOS, bundled app only). Replacing and
   closing work on Linux and macOS; Windows waits for #28.
-- Logging (`copiale_core::logging`): `tracing` to stderr only, never to
-  disk.
+- Logging (`copiale_core::logging`): `tracing` to stderr; on Windows,
+  where a GUI program's stderr goes nowhere, the running instance also
+  writes `copiale.log` beside its lock (the previous run's kept as
+  `copiale.log.old`, 8 MiB a run).
   - `COPIALE_LOG` sets the filter; default `info` for Copiale, `warn` for
     dependencies (`error` for `zbus`, which warns about missing D-Bus
     services on minimal desktops).
-  - Logs go to stderr only, but the systemd journal may keep them: they
-    must not identify contacts.
+  - The systemd journal may keep stderr, and Windows keeps a log file:
+    logs must not identify contacts.
   - Dependencies are capped at `warn` regardless: presage and libsignal log
     message contents at `debug`.
   - Panics log their location only; string-literal messages are kept.

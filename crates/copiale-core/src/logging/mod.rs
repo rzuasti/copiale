@@ -1,8 +1,9 @@
 //! Logging to stderr with `tracing`.
 //!
-//! Copiale writes no log files, but stderr may still be kept: the systemd
-//! journal stores it when Copiale starts from a desktop session, often
-//! readable by `adm` or `wheel` members. So logs must not identify contacts.
+//! Stderr may be kept: the systemd journal stores it when Copiale starts
+//! from a desktop session, often readable by `adm` or `wheel` members. On
+//! Windows, where it goes nowhere, the running instance also writes a log
+//! file ([`log_to_file`]). So logs must not identify contacts.
 //!
 //! - `COPIALE_LOG` sets the filter (`EnvFilter` syntax), default
 //!   [`DEFAULT_FILTER`].
@@ -24,6 +25,7 @@
 //! UUIDs, long hex runs and phone numbers, which dependencies do print,
 //! replacing them with their tags.
 
+mod file;
 mod scrub;
 
 use std::fmt;
@@ -38,6 +40,8 @@ use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::layer::{self, Filter, SubscriberExt as _};
 use tracing_subscriber::util::SubscriberInitExt as _;
 use tracing_subscriber::{Layer as _, Registry};
+
+pub use file::{MAX_LOG_FILE, log_to_file};
 
 pub const FILTER_ENV: &str = "COPIALE_LOG";
 pub const UNSAFE_ENV: &str = "COPIALE_UNSAFE_LOG";
@@ -54,7 +58,7 @@ pub fn init() {
         unsafe_log: std::env::var(UNSAFE_ENV).is_ok_and(|value| value == "1"),
     };
     // Also routes `log` records into tracing.
-    let installed = subscriber(&options, std::io::stderr).try_init().is_ok();
+    let installed = subscriber(&options, file::Output).try_init().is_ok();
     if !installed {
         return;
     }
@@ -153,6 +157,8 @@ where
             || (*metadata.level() <= Level::WARN && !target.starts_with("libsignal_protocol"))
     });
     let layer = tracing_subscriber::fmt::layer()
+        // Colours would show as escape codes in the log file.
+        .with_ansi(cfg!(not(windows)))
         .with_writer(scrub::Scrubbing(writer))
         .with_filter(filter)
         .with_filter(cap)
