@@ -348,11 +348,13 @@ impl Database {
         Ok(())
     }
 
-    /// Groups not fetched since ends were tracked, so maybe ended unseen.
+    /// Groups not fetched since ends were tracked, so maybe ended unseen;
+    /// oldest first.
     pub(crate) async fn groups_unchecked(&self) -> Result<Vec<GroupMasterKey>, StorageError> {
         let keys: Vec<Vec<u8>> = sqlx::query_scalar(
             "SELECT group_master_key FROM conversations
-             WHERE group_master_key IS NOT NULL AND group_end_checked = 0 AND group_ended = 0",
+             WHERE group_master_key IS NOT NULL AND group_end_checked = 0 AND group_ended = 0
+             ORDER BY id",
         )
         .fetch_all(&self.app)
         .await

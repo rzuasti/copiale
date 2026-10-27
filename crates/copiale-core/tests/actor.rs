@@ -129,11 +129,25 @@ async fn expect_disconnected(events: &mut Events, retry_in: Duration) {
     assert_eq!(actual, retry_in);
 }
 
+/// How long tests wait for the core; ample for slow CI runners, as only
+/// failing tests wait it out.
+const WAIT: Duration = Duration::from_secs(30);
+
 async fn next_event(events: &mut Events) -> Event {
-    tokio::time::timeout(Duration::from_secs(5), events.recv())
+    tokio::time::timeout(WAIT, events.recv())
         .await
-        .expect("event within 5 s")
+        .expect("event in time")
         .expect("events still open")
+}
+
+/// The next event, skipping `chat`'s summaries.
+async fn next_event_past(events: &mut Events, chat: ConversationId) -> Event {
+    loop {
+        match next_event(events).await {
+            Event::ConversationUpdated(summary) if summary.id == chat => {}
+            event => return event,
+        }
+    }
 }
 
 async fn expect(events: &mut Events, expected: Event) {
@@ -1011,9 +1025,9 @@ async fn skip_disconnects(events: &mut Events) -> Event {
 /// Waits until `done` holds for the network, for what the core does after
 /// the events a test awaits.
 async fn until(running: &Running, done: impl Fn(&FakeNetwork) -> bool) {
-    tokio::time::timeout(Duration::from_secs(5), running.network.wait_until(done))
+    tokio::time::timeout(WAIT, running.network.wait_until(done))
         .await
-        .expect("network state within 5 s");
+        .expect("network state in time");
 }
 
 async fn sync(running: &mut Running) {
@@ -2825,15 +2839,16 @@ async fn groups_ended_unseen_are_found_once_connected() {
             }
         }
     }
-    let ended = chats[0];
+    let ended = chats[1];
     stop(running).await;
 
-    // Group 1 was ended meanwhile; group 2 wasn't.
+    // Group 2 was ended meanwhile; group 1 wasn't. Groups are checked in
+    // order, so once group 2's end shows, group 1's check is stored too.
     let start_again = || {
         start_with(dir.path(), &secrets, true, fast(), |network| {
             network.set_server_group(group_key(1), named_dev_group(3));
             network.set_server_group(group_key(2), named_dev_group(3));
-            network.end_group(group_key(1));
+            network.end_group(group_key(2));
         })
     };
     let mut running = start_again();
@@ -4938,8 +4953,14 @@ async fn groups_are_requests_unless_an_accepted_contact_added_us() {
     message_added(&mut running.events).await;
     let by_alice = conversation_updated(&mut running.events).await;
     running.network.deliver(added(2, 2));
-    message_added(&mut running.events).await;
-    let by_bob = conversation_updated(&mut running.events).await;
+    // The first group's background refresh may report at any point.
+    let events = &mut running.events;
+    let Event::MessageAdded(_) = next_event_past(events, by_alice.id).await else {
+        panic!("expected MessageAdded");
+    };
+    let Event::ConversationUpdated(by_bob) = next_event_past(events, by_alice.id).await else {
+        panic!("expected ConversationUpdated");
+    };
 
     assert_eq!(by_alice.state, ChatState::Accepted);
     assert_eq!(by_bob.state, ChatState::Request);

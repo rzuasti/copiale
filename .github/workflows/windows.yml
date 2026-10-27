@@ -33,25 +33,11 @@ jobs:
       - name: Lint
         run: cargo clippy --keep-going --all-targets --all-features -- -D warnings
       - name: Test
+        env:
+          # Tests' databases flush to disk often: 6 ms a flush on C:, 0.2 ms on D:.
+          TMP: ${{ runner.temp }}
+          TEMP: ${{ runner.temp }}
         run: cargo test --workspace --no-fail-fast
-      # Temporary (#28): flush-to-disk latency, which tests' migrations pay.
-      - name: Flush latency
-        if: always()
-        run: |
-          foreach ($dir in $env:TEMP, $env:RUNNER_TEMP) {
-            $path = Join-Path $dir "flush.bin"
-            $file = [System.IO.FileStream]::new($path, "Create", "ReadWrite", "None", 4096)
-            $bytes = [byte[]]::new(4096)
-            $watch = [System.Diagnostics.Stopwatch]::StartNew()
-            for ($i = 0; $i -lt 200; $i++) {
-              $file.Write($bytes, 0, $bytes.Length)
-              $file.Flush($true)
-            }
-            $watch.Stop()
-            $file.Dispose()
-            Remove-Item $path
-            "{0}: {1:N2} ms per flush" -f $dir, ($watch.Elapsed.TotalMilliseconds / 200)
-          }
 
   build:
     runs-on: windows-latest
