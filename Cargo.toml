@@ -115,3 +115,11 @@ libsqlite3-sys = { git = "https://github.com/whisperfish/rusqlite", rev = "2a42b
 # Argon2id is unusably slow unoptimized; tests derive keys.
 [profile.dev.package.argon2]
 opt-level = 3
+
+# Unoptimized, bindgen overflows Windows' 1 MiB main thread stack making
+# FFmpeg's bindings (build scripts run unoptimized, release builds too).
+[profile.dev.package.bindgen]
+opt-level = 3
+
+[profile.release.package.bindgen]
+opt-level = 3
