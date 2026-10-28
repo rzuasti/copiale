@@ -109,6 +109,8 @@ pub fn run(
         cx.on_app_quit({
             let core = core.clone();
             move |_| {
+                // Also on logging off or shutting down Windows (`WM_ENDSESSION`).
+                tracing::info!("shutting down the core");
                 core.shutdown();
                 async {}
             }
