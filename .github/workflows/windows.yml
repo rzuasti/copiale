@@ -12,6 +12,9 @@ permissions:
 env:
   # Keep in step with rustc from nixpkgs in flake.lock.
   RUST_VERSION: "1.98.1"
+  # protoc for libsignal/presage; keep in step with protobuf from nixpkgs.
+  PROTOC_VERSION: "36.2"
+  PROTOC_SHA256: f0c128dc0d8492eceece83bb459a4c0e316764b929ffbf1aa416357fd644edd3
   CARGO_TERM_COLOR: always
   # Vendored OpenSSL (SQLCipher) needs Strawberry Perl, not Git's.
   OPENSSL_SRC_PERL: C:\Strawberry\perl\bin\perl.exe
@@ -26,7 +29,13 @@ jobs:
           rustup toolchain install $env:RUST_VERSION --profile minimal --component clippy,rustfmt
           rustup default $env:RUST_VERSION
       - name: Build tools
-        run: choco install protoc --no-progress -y # protoc for libsignal/presage
+        run: |
+          $zip = "$env:RUNNER_TEMP\protoc.zip"
+          $url = "https://github.com/protocolbuffers/protobuf/releases/download/v$env:PROTOC_VERSION/protoc-$env:PROTOC_VERSION-win64.zip"
+          Invoke-WebRequest $url -OutFile $zip -MaximumRetryCount 3 -RetryIntervalSec 10
+          if ((Get-FileHash $zip -Algorithm SHA256).Hash -ne $env:PROTOC_SHA256) { throw "protoc checksum mismatch" }
+          Expand-Archive $zip "$env:RUNNER_TEMP\protoc"
+          "PROTOC=$env:RUNNER_TEMP\protoc\bin\protoc.exe" >> $env:GITHUB_ENV
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Format
         run: cargo fmt --all --check
@@ -54,7 +63,13 @@ jobs:
           rustup toolchain install $env:RUST_VERSION --profile minimal
           rustup default $env:RUST_VERSION
       - name: Build tools
-        run: choco install protoc --no-progress -y
+        run: |
+          $zip = "$env:RUNNER_TEMP\protoc.zip"
+          $url = "https://github.com/protocolbuffers/protobuf/releases/download/v$env:PROTOC_VERSION/protoc-$env:PROTOC_VERSION-win64.zip"
+          Invoke-WebRequest $url -OutFile $zip -MaximumRetryCount 3 -RetryIntervalSec 10
+          if ((Get-FileHash $zip -Algorithm SHA256).Hash -ne $env:PROTOC_SHA256) { throw "protoc checksum mismatch" }
+          Expand-Archive $zip "$env:RUNNER_TEMP\protoc"
+          "PROTOC=$env:RUNNER_TEMP\protoc\bin\protoc.exe" >> $env:GITHUB_ENV
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Build
         run: cargo build --release --locked -p copiale
