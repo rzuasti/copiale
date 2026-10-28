@@ -5,6 +5,7 @@
 //!   syscalls, and no executable memory; anything else fails with `ENOSYS`.
 //! - macOS: resource limits, then the system's pure computation sandbox
 //!   profile: no files, network or other processes.
+//! - Windows: not yet (#94), so the helper refuses to decode.
 
 use std::io;
 
@@ -16,6 +17,7 @@ pub enum Mode {
     Play,
 }
 
+#[cfg(unix)]
 impl Mode {
     /// Seconds of CPU before the kernel ends it.
     fn max_cpu_seconds(self) -> u64 {
@@ -32,6 +34,7 @@ pub fn enter(mode: Mode) -> io::Result<()> {
 }
 
 /// Limits CPU time and open files; on Linux, memory too.
+#[cfg(unix)]
 fn limit_resources(mode: Mode) -> io::Result<()> {
     let limit = |resource, value: u64| -> io::Result<()> {
         let limit = libc::rlimit {
@@ -181,7 +184,18 @@ mod imp {
     }
 }
 
-#[cfg(test)]
+#[cfg(windows)]
+mod imp {
+    use std::io;
+
+    use super::Mode;
+
+    pub fn enter(_: Mode) -> io::Result<()> {
+        Err(io::Error::other("no sandbox on Windows yet (#94)"))
+    }
+}
+
+#[cfg(all(test, unix))]
 mod tests {
     use std::process::Command;
 

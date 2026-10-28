@@ -18,7 +18,7 @@ tracing.workspace = true
 libc.workspace = true
 signal-hook.workspace = true
 
-[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+[target.'cfg(any(target_os = "linux", target_os = "macos", windows))'.dependencies]
 ffmpeg-next.workspace = true
 image.workspace = true
 

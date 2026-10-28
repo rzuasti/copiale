@@ -9,7 +9,7 @@ mod console;
 mod instance;
 #[cfg(unix)]
 mod signals;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 mod video;
 
 use std::process::ExitCode;
@@ -55,7 +55,7 @@ fn video_helper() -> Option<VideoHelper> {
 
 fn main() -> ExitCode {
     // Before anything else, as little as possible runs before its sandbox.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     {
         let video_mode = |flag| std::env::args_os().skip(1).eq([flag]);
         if video_mode(copiale_core::video::FRAME_FLAG) {

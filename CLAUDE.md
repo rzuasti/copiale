@@ -140,7 +140,8 @@ went unsolved until 2011.
     - Flatpak, AUR.
   - FFmpeg (videos): minimal builds only, never system-wide
     extras: `nix/ffmpeg.nix` on Linux, a static build per architecture on
-    macOS (`packaging/macos/ffmpeg.sh`, pinned and checksummed).
+    macOS (`packaging/macos/ffmpeg.sh`, pinned and checksummed), and the
+    same for Windows with MSVC (`packaging/windows/ffmpeg.sh`, in CI).
   - macOS: notarized universal `.dmg` (macOS 14+), built, signed and
     notarized by GitHub Actions on the mirror (github.com/rzuasti/copiale):
     `macos.yml` builds and attests `main` on demand, `macos-release.yml`

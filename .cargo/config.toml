@@ -1,0 +1,4 @@
+# Windows: the C runtime linked in, so there's no Visual C++ runtime to
+# install; FFmpeg is built to match (packaging/windows/ffmpeg.sh).
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static"]

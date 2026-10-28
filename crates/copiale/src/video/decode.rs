@@ -11,6 +11,11 @@ use ffmpeg_next::software::scaling;
 use ffmpeg_next::{Dictionary, media};
 use image::{ImageFormat, RgbaImage};
 
+// Static FFmpeg's avutil gets random numbers from CNG.
+#[cfg(windows)]
+#[link(name = "bcrypt")]
+unsafe extern "system" {}
+
 /// Containers FFmpeg may probe.
 const FORMATS: &str = "mov,mp4,m4a,3gp,3g2,mj2";
 /// Video decoders FFmpeg may open.
