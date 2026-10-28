@@ -5,6 +5,7 @@
 #[cfg(windows)]
 mod toast;
 
+#[cfg(unix)]
 use futures::StreamExt as _;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 
