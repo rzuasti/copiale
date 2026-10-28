@@ -88,9 +88,10 @@ went unsolved until 2011.
     viewer (`copiale --video-play`, frames and sound streamed back) come
     from a child process sandboxed before it reads the video (Linux
     seccomp, threads only when playing; macOS pure computation profile;
-    no Windows yet, #94), decoding only MOV/MP4 with H.264, HEVC, VP9 (and
-    AV1 on Linux), and AAC sound, through FFmpeg, in software
-    (`crates/copiale/src/video`, `copiale_core::video`).
+    Windows created in its own AppContainer profile, removed with the
+    account's data, a job and mitigations), decoding only MOV/MP4 with
+    H.264, HEVC, VP9 (and AV1 on Linux), and AAC sound, through FFmpeg,
+    in software (`crates/copiale/src/video`, `copiale_core::video`).
   - Message requests: a chat the other side wrote in is a request until
     accepted (here, on the phone, in Storage Service, or by replying);
     requests send no read receipts or typing and notify without name or

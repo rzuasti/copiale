@@ -23,7 +23,7 @@ Scope, UI design, architecture and work items for the first usable release.
   e.g. `[sticker] open on your phone`, above any caption.
 - Received attachments (after the MVP, #87): images and GIFs drawn above
   the caption, albums as a grid of up to four; videos as their first
-  frame once downloaded (Linux and macOS), before that their blurred
+  frame once downloaded, before that their blurred
   preview, with `▶`, played with sound in the viewer; other files as
   cards: a page icon with the file's type (`PDF`), the name, then
   `size · type · download/save`.

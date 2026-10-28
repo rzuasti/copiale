@@ -88,13 +88,21 @@ Downloaded and sent attachments live outside the database, in
   memory without execution and exiting, plus threads (never processes)
   when playing; on macOS the pure computation sandbox profile (no files,
   network or other processes), with the signed app's hardened runtime
-  refusing executable memory. It gets no environment and no stderr. A
-  first frame is killed after 30 s; playback ends with the viewer.
+  refusing executable memory. A Windows process can't confine itself, so
+  the app creates it confined, and it refuses to decode otherwise: an
+  AppContainer of its own without capabilities (no network, nor files or
+  registry beyond what's open to all apps; it can write only its own
+  folder under `%LOCALAPPDATA%\Packages` and registry key, removed with
+  the account's data), a job (one process, 2 GiB, CPU time limits, no other
+  windows, clipboard or system settings) and mitigations (no executable
+  memory or child processes, Microsoft-signed DLLs only, System32's
+  first). It gets no environment (on Windows, the paths an AppContainer
+  needs) and no stderr. A first frame is killed after 30 s; playback ends
+  with the viewer.
   Decoding is in software: the GPU would need driver access the sandbox
-  refuses. Only MOV/MP4 with H.264, HEVC, VP9 or AV1, and AAC sound, is
-  opened. The app checks what comes back (frame sizes, sample counts)
-  and plays the sound itself. Windows has no such sandbox yet, so no
-  previews or playback there (#94). Frames are stored encrypted like
+  refuses. Only MOV/MP4 with H.264, HEVC, VP9 or AV1 (Linux only), and
+  AAC sound, is opened. The app checks what comes back (frame sizes, sample counts)
+  and plays the sound itself. Frames are stored encrypted like
   attachments and go with them; played video lives only in memory.
 - **Sending**: a file is read only once picked, dropped or pasted (pasted
   text counts only if every line is a `file://` URI), then copied in

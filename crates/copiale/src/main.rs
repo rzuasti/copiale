@@ -35,8 +35,8 @@ fn spawn_guard() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// This binary as the video helper, where it can sandbox itself.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+/// This binary as the video helper, where it's sandboxed.
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 fn video_helper() -> Option<VideoHelper> {
     match std::env::current_exe() {
         Ok(program) => Some(VideoHelper::new(program)),
@@ -47,8 +47,8 @@ fn video_helper() -> Option<VideoHelper> {
     }
 }
 
-/// No sandbox for the video helper here yet (#94).
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+/// No sandbox for the video helper here.
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn video_helper() -> Option<VideoHelper> {
     None
 }
