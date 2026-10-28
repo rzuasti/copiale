@@ -1,6 +1,9 @@
 //! Desktop notifications: the freedesktop D-Bus service on Linux and the
-//! BSDs and WinRT toasts on Windows, through notify-rust;
-//! UNUserNotificationCenter on macOS, which needs the app bundle.
+//! BSDs, through notify-rust; UNUserNotificationCenter on macOS, which
+//! needs the app bundle; WinRT toasts on Windows.
+
+#[cfg(windows)]
+mod toast;
 
 use futures::StreamExt as _;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
@@ -42,39 +45,31 @@ impl Notifier for DesktopNotifier {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn notification(notice: &crate::chat::Notice) -> notify_rust::Notification {
     let mut notification = notify_rust::Notification::new();
     notification
         .appname("Copiale")
         .summary(&notice.title)
         .body(&escape(&notice.body))
-        .action("default", "Open");
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
+        .action("default", "Open")
+        .hint(notify_rust::Hint::DesktopEntry(crate::APP_ID.into()))
+        .hint(notify_rust::Hint::Category("im.received".into()));
+    if notice.quiet {
         notification
-            .hint(notify_rust::Hint::DesktopEntry(crate::APP_ID.into()))
-            .hint(notify_rust::Hint::Category("im.received".into()));
-        if notice.quiet {
-            notification
-                .urgency(notify_rust::Urgency::Low)
-                .hint(notify_rust::Hint::SuppressSound(true));
-        }
+            .urgency(notify_rust::Urgency::Low)
+            .hint(notify_rust::Hint::SuppressSound(true));
     }
     notification
 }
 
 /// Message text as plain text: freedesktop servers may read the body as
 /// markup.
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn escape(text: &str) -> String {
-    if cfg!(all(unix, not(target_os = "macos"))) {
-        text.replace('&', "&amp;")
-            .replace('<', "&lt;")
-            .replace('>', "&gt;")
-    } else {
-        text.into()
-    }
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 /// Shows, replaces and closes notifications by key, and reports clicks.
@@ -242,8 +237,8 @@ fn serve(mut requests: UnboundedReceiver<NoticeAction>, clicks: UnboundedSender<
     });
 }
 
-/// The notification request's identifier for `key`.
-#[cfg(target_os = "macos")]
+/// The notification's identifier for `key` (a toast's tag on Windows).
+#[cfg(any(target_os = "macos", windows))]
 fn identifier(key: NoticeKey) -> String {
     match key {
         NoticeKey::Chat(conversation) => format!("chat-{}", conversation.get()),
@@ -251,32 +246,68 @@ fn identifier(key: NoticeKey) -> String {
     }
 }
 
-/// Shows notifications and reports clicks; replacing and closing them
-/// await the Windows checks (#28).
-#[cfg(not(unix))]
-fn serve(mut requests: UnboundedReceiver<NoticeAction>, clicks: UnboundedSender<NoticeKey>) {
-    futures::executor::block_on(async move {
-        while let Some(action) = requests.next().await {
-            let NoticeAction::Show(notice) = action else {
-                continue;
-            };
-            let clicks = clicks.clone();
-            std::thread::spawn(move || match notification(&notice).show() {
-                Ok(handle) => handle.wait_for_action(|action| {
-                    if action != "__closed" {
-                        clicks.unbounded_send(notice.key).ok();
-                    }
-                }),
-                Err(error) => tracing::warn!(%error, "showing a notification failed"),
-            });
-        }
-    });
+#[cfg(windows)]
+use toast::serve;
+
+/// A toast's XML: the notice's title and body, silent if quiet.
+#[cfg(any(windows, test))]
+fn toast_xml(notice: &crate::chat::Notice) -> String {
+    let audio = if notice.quiet {
+        r#"<audio silent="true"/>"#
+    } else {
+        ""
+    };
+    format!(
+        r#"<toast><visual><binding template="ToastGeneric"><text>{}</text><text>{}</text></binding></visual>{audio}</toast>"#,
+        xml_text(&notice.title),
+        xml_text(&notice.body),
+    )
 }
 
-#[cfg(all(test, unix, not(target_os = "macos")))]
+/// `text` as XML character data, without the characters XML can't hold.
+#[cfg(any(windows, test))]
+fn xml_text(text: &str) -> String {
+    text.chars()
+        .filter(|&c| {
+            matches!(c, '\t' | '\n' | '\r' | ' '..='\u{d7ff}' | '\u{e000}'..='\u{fffd}')
+                || c >= '\u{10000}'
+        })
+        .collect::<String>()
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chat::Notice;
 
+    fn notice(title: &str, body: &str, quiet: bool) -> Notice {
+        Notice {
+            key: NoticeKey::Backlog,
+            title: title.into(),
+            body: body.into(),
+            quiet,
+        }
+    }
+
+    #[test]
+    fn toasts_hold_plain_text() {
+        assert_eq!(
+            toast_xml(&notice("A&B", "<b>hi</b>\u{1}\u{fffe} 👋\n", false)),
+            "<toast><visual><binding template=\"ToastGeneric\"><text>A&amp;B</text>\
+             <text>&lt;b&gt;hi&lt;/b&gt; 👋\n</text></binding></visual></toast>"
+        );
+    }
+
+    #[test]
+    fn quiet_toasts_are_silent() {
+        assert!(toast_xml(&notice("a", "b", true)).ends_with(r#"<audio silent="true"/></toast>"#));
+        assert!(!toast_xml(&notice("a", "b", false)).contains("<audio"));
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn bodies_are_plain_text() {
         assert_eq!(

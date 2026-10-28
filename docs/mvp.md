@@ -436,9 +436,10 @@ crates/
   `ok` or `error`.
 - Tray: `tray-icon`, with `ksni` (D-Bus, no GTK) on Linux.
 - Notifications, on their own thread: `notify-rust` for the freedesktop
-  D-Bus service (Linux) and WinRT toasts (Windows); `mac-usernotifications`
-  for UNUserNotificationCenter (macOS, bundled app only). Replacing and
-  closing work on Linux and macOS; Windows waits for #28.
+  D-Bus service (Linux); `mac-usernotifications` for
+  UNUserNotificationCenter (macOS, bundled app only); WinRT toasts through
+  the `windows` crate (Windows), tagged by chat to replace and close them,
+  from PowerShell's app ID until packaged (#100).
 - Logging (`copiale_core::logging`): `tracing` to stderr; on Windows,
   where a GUI program's stderr goes nowhere, the running instance also
   writes `copiale.log` beside its lock (the previous run's kept as

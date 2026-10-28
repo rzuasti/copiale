@@ -93,6 +93,8 @@ url = "2.5"
 uuid = "1"
 # Same version as interprocess uses; its security descriptors take one.
 widestring = "1.2"
+# Toasts (WinRT); same version as GPUI's.
+windows = "0.62"
 # Same version as keyring's Windows store.
 windows-sys = "0.61"
 zeroize = "1"
