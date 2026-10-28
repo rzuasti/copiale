@@ -6,13 +6,12 @@
 
 use std::collections::VecDeque;
 use std::io::{Read, Write};
-use std::process::Child;
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use super::VideoHelper;
 use super::protocol::{self, AudioFormat, Control, Message, Reader, Start};
+use super::{Child, VideoHelper};
 
 /// Frames kept ahead, in bytes; at least [`MIN_FRAMES`].
 const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
@@ -150,9 +149,7 @@ impl Player {
             None => None,
         };
         let audio = output.as_ref().map(|(_, format)| *format);
-        let mut child = helper.spawn_player()?;
-        let stdin = child.stdin.take().ok_or_else(|| missing("stdin"))?;
-        let stdout = child.stdout.take().ok_or_else(|| missing("stdout"))?;
+        let (child, stdin, stdout) = helper.spawn_player()?;
         let mut player = Self::connect(shared, stdout, stdin, audio, video);
         player.child = Some(child);
         player._output = output.map(|(stream, _)| stream);
@@ -326,9 +323,8 @@ impl Drop for Player {
         self.controls = None;
         self.shared.lock().closed = true;
         self.shared.room.notify_all();
-        if let Some(mut child) = self.child.take() {
-            child.kill().ok();
-            std::thread::spawn(move || child.wait().ok());
+        if let Some(child) = self.child.take() {
+            super::stop(child);
         }
     }
 }
@@ -506,10 +502,6 @@ where
         |error| tracing::warn!(%error, "sound output failed"),
         None,
     )
-}
-
-fn missing(what: &str) -> std::io::Error {
-    std::io::Error::other(format!("no {what} for the video helper"))
 }
 
 #[cfg(test)]

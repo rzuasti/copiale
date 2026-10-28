@@ -45,7 +45,20 @@ libc.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 libsqlite3-sys = { workspace = true, features = ["bundled-sqlcipher-vendored-openssl"] }
-windows-sys = { workspace = true, features = ["Win32_System_ErrorReporting", "Win32_System_Memory"] }
+windows-sys = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_Security_Isolation",
+  "Win32_Storage_FileSystem",
+  "Win32_System_ErrorReporting",
+  "Win32_System_JobObjects",
+  "Win32_System_Memory",
+  "Win32_System_Pipes",
+  "Win32_System_SystemInformation",
+  "Win32_System_Threading",
+  "Win32_System_WindowsProgramming",
+] }
 
 [dev-dependencies]
 copiale-testkit.workspace = true

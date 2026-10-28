@@ -5,7 +5,9 @@
 //!   syscalls, and no executable memory; anything else fails with `ENOSYS`.
 //! - macOS: resource limits, then the system's pure computation sandbox
 //!   profile: no files, network or other processes.
-//! - Windows: not yet (#94), so the helper refuses to decode.
+//! - Windows: created sandboxed by the app (`copiale_core::video`), as a
+//!   process can't confine itself there: an AppContainer, a job and
+//!   mitigations. This checks it was.
 
 use std::io;
 
@@ -187,11 +189,79 @@ mod imp {
 #[cfg(windows)]
 mod imp {
     use std::io;
+    use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
 
     use super::Mode;
+    use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TokenIsAppContainer};
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentProcess, GetProcessMitigationPolicy, OpenProcessToken, ProcessDynamicCodePolicy,
+    };
 
+    /// Refuses unless created sandboxed.
     pub fn enter(_: Mode) -> io::Result<()> {
-        Err(io::Error::other("no sandbox on Windows yet (#94)"))
+        if !in_app_container()? {
+            return Err(io::Error::other("not in an AppContainer"));
+        }
+        if !dynamic_code_prohibited()? {
+            return Err(io::Error::other("dynamic code allowed"));
+        }
+        Ok(())
+    }
+
+    fn in_app_container() -> io::Result<bool> {
+        let mut token = std::ptr::null_mut();
+        // SAFETY: this process's pseudo handle and a valid out-pointer.
+        check(unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) })?;
+        // SAFETY: a new handle we own.
+        let token = unsafe { OwnedHandle::from_raw_handle(token) };
+        let (mut is, mut length) = (0u32, 0u32);
+        // SAFETY: a `u32` for a `u32` class.
+        check(unsafe {
+            GetTokenInformation(
+                token.as_raw_handle(),
+                TokenIsAppContainer,
+                (&raw mut is).cast(),
+                size_of::<u32>() as u32,
+                &mut length,
+            )
+        })?;
+        Ok(is != 0)
+    }
+
+    /// Set only as the app created this process, with the other
+    /// mitigations.
+    fn dynamic_code_prohibited() -> io::Result<bool> {
+        // `PROCESS_MITIGATION_DYNAMIC_CODE_POLICY`'s flags; the first is
+        // `ProhibitDynamicCode`.
+        let mut flags = 0u32;
+        // SAFETY: a `u32` for the policy's flags.
+        check(unsafe {
+            GetProcessMitigationPolicy(
+                GetCurrentProcess(),
+                ProcessDynamicCodePolicy,
+                (&raw mut flags).cast(),
+                size_of::<u32>(),
+            )
+        })?;
+        Ok(flags & 1 != 0)
+    }
+
+    fn check(result: windows_sys::core::BOOL) -> io::Result<()> {
+        match result {
+            0 => Err(io::Error::last_os_error()),
+            _ => Ok(()),
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::Mode;
+
+        #[test]
+        fn unsandboxed_it_refuses() {
+            assert!(super::enter(Mode::Frame).is_err());
+            assert!(super::enter(Mode::Play).is_err());
+        }
     }
 }
 

@@ -1,5 +1,5 @@
 //! The app runs this binary's sandboxed video helper.
-#![cfg(any(target_os = "linux", target_os = "macos"))]
+#![cfg(any(target_os = "linux", target_os = "macos", windows))]
 
 use std::time::{Duration, Instant};
 

@@ -48,7 +48,7 @@ impl Core {
             match blocking(move || storage.wipe(&*secrets)).await {
                 Ok(wiped) => {
                     tracing::info!("unlinked");
-                    self.key_left(wiped);
+                    self.wiped(wiped);
                 }
                 // Opens what's left; the user can try again.
                 Err(error) => self.emit(Event::DatabaseError(error.to_string())),
@@ -63,7 +63,13 @@ impl Core {
         self.events.send(event).ok();
     }
 
-    fn key_left(&self, wiped: Wiped) {
+    /// Removes the video sandbox's profile too; reports a key left behind.
+    fn wiped(&self, wiped: Wiped) {
+        if let Some(helper) = &self.options.video_helper
+            && let Err(error) = helper.remove_sandbox()
+        {
+            tracing::warn!(%error, "can't remove the video sandbox");
+        }
         if let Wiped::KeyLeft(error) = wiped {
             self.emit(Event::KeyNotRemoved(error));
         }
@@ -153,7 +159,7 @@ impl Core {
                     let (storage, secrets) = (self.storage.clone(), self.secrets.clone());
                     match blocking(move || storage.wipe(&*secrets)).await {
                         Ok(wiped) => {
-                            self.key_left(wiped);
+                            self.wiped(wiped);
                             return Step::Restart;
                         }
                         Err(error) => self.emit(Event::StorageFailed(failure(error))),
