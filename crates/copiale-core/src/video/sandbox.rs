@@ -9,7 +9,8 @@
 //! - Mitigations: no dynamic code or child processes; only
 //!   Microsoft-signed DLLs, System32's first, none remote or low-integrity;
 //!   no extension point DLLs or non-system fonts.
-//! - Inherits only its pipes, no environment; runs in System32.
+//! - Inherits only its pipes, and of the environment only the paths
+//!   AppContainers are given their own of; runs in System32.
 
 use std::ffi::OsStr;
 use std::fs::File;
@@ -95,8 +96,13 @@ const MITIGATIONS: u64 = HEAP_TERMINATE
 /// Held while a helper's pipe ends are inheritable, so no other helper
 /// starting meanwhile gets them.
 static SPAWNING: Mutex<()> = Mutex::new(());
+/// Held while making a profile: made at once, they fail.
+static PROFILES: Mutex<()> = Mutex::new(());
 /// The program was made readable from the AppContainer.
 static GRANTED: AtomicBool = AtomicBool::new(false);
+/// Passed on: process creation points the app data and temporary
+/// directories into the AppContainer's own, failing without them. Sorted.
+const ENVIRONMENT: &[&str] = &["LOCALAPPDATA", "SystemRoot", "TEMP", "TMP", "USERPROFILE"];
 
 /// A sandboxed helper; killed when dropped.
 pub struct Process {
@@ -201,7 +207,7 @@ fn create(
     startup.lpAttributeList = attributes.as_ptr();
     let application = wide(program);
     let mut command_line = command_line(program.as_os_str(), args);
-    let environment = [0u16; 2];
+    let environment = environment();
     let directory = system_directory()?;
     let mut created = PROCESS_INFORMATION::default();
     // SAFETY: NUL-terminated strings, an empty environment block, and an
@@ -233,6 +239,7 @@ struct AppContainer(PSID);
 impl AppContainer {
     /// Creates `profile`, without capabilities, unless it exists.
     fn create(profile: &str) -> io::Result<Self> {
+        let _making = PROFILES.lock().unwrap_or_else(PoisonError::into_inner);
         let name = wide(profile);
         let display = wide("Copiale video decoder");
         let mut sid = std::ptr::null_mut();
@@ -444,6 +451,24 @@ fn inheritable(handle: &OwnedHandle) -> io::Result<()> {
     })
 }
 
+/// [`ENVIRONMENT`]'s variables that are set, as an environment block.
+fn environment() -> Vec<u16> {
+    let mut block = Vec::new();
+    for name in ENVIRONMENT {
+        if let Some(value) = std::env::var_os(name) {
+            block.extend(OsStr::new(name).encode_wide());
+            block.push(u16::from(b'='));
+            block.extend(value.encode_wide());
+            block.push(0);
+        }
+    }
+    if block.is_empty() {
+        block.push(0);
+    }
+    block.push(0);
+    block
+}
+
 fn system_directory() -> io::Result<Vec<u16>> {
     let mut buffer = vec![0u16; 512];
     // SAFETY: a buffer of that length.
@@ -547,7 +572,8 @@ mod tests {
 
     use super::*;
 
-    /// Marks the sandboxed copy of the test binary: it gets no environment.
+    /// Marks the sandboxed copy of the test binary: it gets no environment
+    /// variable to tell.
     const CHILD: &str = "copiale-sandboxed-child";
     const OTHER_PROGRAM: &str = r"C:\Windows\System32\whoami.exe";
 

@@ -52,8 +52,9 @@ impl VideoHelper {
         }
     }
 
-    /// `video`'s first frame as a PNG. The helper gets no environment and
-    /// no stderr, and is killed past [`TIMEOUT`].
+    /// `video`'s first frame as a PNG. The helper gets no environment
+    /// (on Windows, paths only; `sandbox`) and no stderr, and is killed past
+    /// [`TIMEOUT`].
     pub async fn first_frame(&self, video: Vec<u8>) -> std::io::Result<Vec<u8>> {
         let (success, frame) = tokio::time::timeout(TIMEOUT, self.run_frame(video))
             .await
