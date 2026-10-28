@@ -58,7 +58,6 @@ fn start(dir: &Path, secrets: &MemorySecretStore, linked: bool) -> Running {
     start_with(dir, secrets, linked, fast(), |_| {})
 }
 
-/// `script` prepares the network before the core starts using it.
 /// The core's logs, shown with a failing test's output: its thread
 /// inherits the test's output capture.
 fn log_to_test_output() {
@@ -69,6 +68,7 @@ fn log_to_test_output() {
     subscriber(&options, TestWriter::new()).try_init().ok();
 }
 
+/// `script` prepares the network before the core starts using it.
 fn start_with(
     dir: &Path,
     secrets: &MemorySecretStore,
@@ -1308,7 +1308,12 @@ async fn messages_received_before_losing_the_connection_are_stored() {
 async fn messages_received_before_quitting_are_stored() {
     let dir = tempfile::tempdir().unwrap();
     let secrets = MemorySecretStore::default();
-    let mut running = start(dir.path(), &secrets, true);
+    // Storing the backlog takes over the default 10 s on slow disks.
+    let options = CoreOptions {
+        drain_timeout: Duration::from_secs(120),
+        ..fast()
+    };
+    let mut running = start_with(dir.path(), &secrets, true, options, |_| {});
     expect_ready(&mut running.events).await;
     expect(&mut running.events, Event::Connected).await;
     deliver_backlog(&running.network);
