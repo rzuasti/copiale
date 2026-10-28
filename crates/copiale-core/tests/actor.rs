@@ -5,6 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use copiale_core::logging::{Options, subscriber};
 use copiale_core::storage::{KdfParams, Passphrase, Storage, StoragePaths};
 use copiale_core::{
     Account, AccountSettings, Attachment, AttachmentId, AttachmentKind, AttachmentSource,
@@ -24,6 +25,8 @@ use copiale_testkit::{
 };
 use futures::FutureExt as _;
 use tempfile::TempDir;
+use tracing_subscriber::fmt::TestWriter;
+use tracing_subscriber::util::SubscriberInitExt as _;
 
 const CHEAP_KDF: KdfParams = KdfParams {
     memory_kib: 64,
@@ -56,6 +59,16 @@ fn start(dir: &Path, secrets: &MemorySecretStore, linked: bool) -> Running {
 }
 
 /// `script` prepares the network before the core starts using it.
+/// The core's logs, shown with a failing test's output: its thread
+/// inherits the test's output capture.
+fn log_to_test_output() {
+    let options = Options {
+        filter: "warn,copiale_core=debug".into(),
+        unsafe_log: false,
+    };
+    subscriber(&options, TestWriter::new()).try_init().ok();
+}
+
 fn start_with(
     dir: &Path,
     secrets: &MemorySecretStore,
@@ -63,6 +76,7 @@ fn start_with(
     options: CoreOptions,
     script: impl FnOnce(&FakeNetwork),
 ) -> Running {
+    log_to_test_output();
     let (backend, network) = fake_backend();
     script(&network);
     let (linker, phone) = fake_linker(backend);
