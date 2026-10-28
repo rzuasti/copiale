@@ -33,11 +33,14 @@ jobs:
       - name: Lint
         run: cargo clippy --keep-going --all-targets --all-features -- -D warnings
       - name: Test
-        env:
-          # Tests' databases flush to disk often: 6 ms a flush on C:, 0.2 ms on D:.
-          TMP: ${{ runner.temp }}
-          TEMP: ${{ runner.temp }}
         run: cargo test --workspace --no-fail-fast
+      # Temporary (#28): where opening a database takes its time.
+      - name: Database open timing
+        if: always()
+        run: |
+          foreach ($run in 1..3) {
+            cargo test -p copiale-core --lib open_phases -- --ignored --nocapture 2>&1 | Select-String TIMING
+          }
 
   build:
     runs-on: windows-latest
