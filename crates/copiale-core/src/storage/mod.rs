@@ -52,9 +52,10 @@ impl StoragePaths {
         }
     }
 
-    /// Platform data dir, e.g. `~/.local/share/copiale` on Linux.
+    /// Platform local data dir, e.g. `~/.local/share/copiale` on Linux; on
+    /// Windows not the roaming one, as the keychain key doesn't roam.
     pub fn platform() -> Option<Self> {
-        Some(Self::in_dir(crate::dirs::project_dirs()?.data_dir()))
+        Some(Self::in_dir(crate::dirs::project_dirs()?.data_local_dir()))
     }
 
     fn dir(&self) -> &Path {
@@ -240,5 +241,17 @@ impl Storage {
     pub async fn open(&self, key: &DatabaseKey) -> Result<Database, StorageError> {
         crate::create_private_dir(self.paths.dir())?;
         Database::open(&self.paths.database, key).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_database_stays_on_this_machine() {
+        let dirs = crate::dirs::project_dirs().unwrap();
+        let paths = StoragePaths::platform().unwrap();
+        assert_eq!(paths.dir(), dirs.data_local_dir());
     }
 }

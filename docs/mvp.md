@@ -408,8 +408,9 @@ crates/
   in `copiale.key` next to the database, which also marks passphrase mode.
   New passphrases need 8 characters and a zxcvbn score of 4 (over 10^10
   guesses).
-- Files: `copiale.db` and `copiale.key` in the platform data dir
-  (`~/.local/share/copiale` on Linux), restricted to the user.
+- Files: `copiale.db` and `copiale.key` in the platform local data dir
+  (`~/.local/share/copiale` on Linux; on Windows `%LOCALAPPDATA%`, not
+  roaming), restricted to the user.
 - Messages live in Copiale's tables only, with edits, deletes and expiry
   applied. presage's own message saving (`thread_messages`) is turned off by
   a delegating `Store` wrapper.

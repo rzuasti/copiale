@@ -52,8 +52,9 @@ mode and the accent colour can be changed, unlike an unactivated Windows.
 3. `start`: the SPICE console (`remote-viewer`). In the guest, copy
    `copiale.exe` from `\\10.0.2.4\qemu` to the desktop and run it there:
    QEMU's Samba lists the share but refuses Windows' DFS paths to its files.
-4. Logs: in `%LOCALAPPDATA%\korba\Copiale\data\copiale.log` (the previous
-   run's in `copiale.log.old`); follow with
+4. Logs: in `%LOCALAPPDATA%\korba\Copiale\data\copiale.log`, beside the
+   database and attachments (the previous run's in `copiale.log.old`);
+   follow with
    `Get-Content -Wait $env:LOCALAPPDATA\korba\Copiale\data\copiale.log`.
    Set the filter from PowerShell, e.g.
    `$env:COPIALE_LOG = "copiale_core=debug"; .\copiale.exe`.

@@ -160,6 +160,13 @@ fn open(cx: &mut App) {
         if follow {
             theme::follow_window(window, cx);
         }
+        // Removed by us, not destroyed by `WM_CLOSE`: GPUI's drop destroys
+        // it again.
+        #[cfg(windows)]
+        window.on_window_should_close(cx, |_, cx| {
+            cx.spawn(async |cx| cx.update(hide)).detach();
+            false
+        });
         shell
     });
     match opened {

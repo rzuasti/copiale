@@ -3013,6 +3013,17 @@ fn hidden_windows_keep_chats_running(cx: &mut TestAppContext) {
     assert_eq!(draft, "half a thought!");
 }
 
+#[cfg(windows)]
+#[gpui_kit::test]
+fn closing_from_the_system_leaves_removing_to_the_app(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+
+    let closed = VisualTestContext::from_window(ui.window(), cx).simulate_close();
+    assert!(!closed, "not destroyed by the system");
+    assert!(!ui.sync_window(cx), "closed");
+    assert!(request(&ui, show(), cx), "reopened");
+}
+
 #[gpui_kit::test]
 fn hidden_starts_open_no_window_until_asked(cx: &mut TestAppContext) {
     let options = main_window::Options {
