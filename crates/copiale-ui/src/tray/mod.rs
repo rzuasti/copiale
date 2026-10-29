@@ -1,6 +1,8 @@
 //! The tray icon: shows and hides the window, quits, and marks unread
 //! chats.
 
+#[cfg(windows)]
+mod close;
 mod icon;
 
 use std::rc::Rc;
@@ -86,6 +88,8 @@ impl SystemTray {
             .build()?;
 
         let (actions, received) = unbounded();
+        #[cfg(windows)]
+        close::quit_on_close(icon.window_handle(), actions.clone());
         let clicks = actions.clone();
         TrayIconEvent::set_event_handler(Some(move |event| {
             if let TrayIconEvent::Click {
