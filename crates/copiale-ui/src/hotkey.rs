@@ -255,7 +255,7 @@ mod platform {
             (hotkey.ctrl, Modifiers::CONTROL),
             (hotkey.alt, Modifiers::ALT),
             (hotkey.shift, Modifiers::SHIFT),
-            (hotkey.super_key, Modifiers::SUPER),
+            (hotkey.super_key, Modifiers::META),
         ]
         .into_iter()
         .filter(|(on, _)| *on)
