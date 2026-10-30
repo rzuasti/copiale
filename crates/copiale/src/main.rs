@@ -9,6 +9,8 @@ mod console;
 mod instance;
 #[cfg(unix)]
 mod signals;
+#[cfg(windows)]
+mod startup;
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
 mod video;
 
@@ -78,6 +80,11 @@ fn main() -> ExitCode {
             eprintln!("Unknown argument: {arg}\n\n{USAGE}");
             return ExitCode::from(2);
         }
+    };
+    #[cfg(windows)]
+    let cli = match cli {
+        Cli::Start if startup::at_login() => Cli::Hidden,
+        cli => cli,
     };
     match cli {
         Cli::Help => {

@@ -46,8 +46,9 @@ mode and the accent colour can be changed, unlike an unactivated Windows.
 
 1. Run `windows.yml` (`gh workflow run windows.yml -R rzuasti/copiale --ref
    <branch>`). Its `build` job uploads `copiale.exe` (statically linked C
-   runtime; kept 30 days); `check` runs fmt, clippy and the tests.
-2. `fetch [run-id]`: the given run's build, or the latest finished run's,
+   runtime) and an unsigned `copiale.msix`, kept 30 days; `check` runs fmt,
+   clippy and the tests.
+2. `fetch [run-id]`: the given run's builds, or the latest finished run's,
    into the share, with the branch and commit in `copiale.txt`.
 3. `start`: the SPICE console (`remote-viewer`). In the guest, copy
    `copiale.exe` from `\\10.0.2.4\qemu` to the desktop and run it there:
@@ -58,6 +59,23 @@ mode and the accent colour can be changed, unlike an unactivated Windows.
    `Get-Content -Wait $env:LOCALAPPDATA\korba\Copiale\data\copiale.log`.
    Set the filter from PowerShell, e.g.
    `$env:COPIALE_LOG = "copiale_core=debug"; .\copiale.exe`.
+
+## Test the package
+
+Packaged, Copiale has an identity of its own (toasts, startup task), and
+Windows redirects its AppData and HKCU writes. To try `copiale.msix`, copy it
+to the desktop, then in an administrator PowerShell:
+
+```powershell
+Get-AppxPackage -AllUsers page.codeberg.korba.Copiale | Remove-AppxPackage -AllUsers
+Add-AppxPackage -Path $HOME\Desktop\copiale.msix -AllowUnsigned
+```
+
+Unsigned packages install only from an administrator prompt, for all users,
+and their publisher carries a special OID, so they never upgrade to or from a
+signed one. The first line also removes the previous test's data. Start it from
+the Start menu, or as `copiale` from a terminal. Its data and logs are in
+`%LOCALAPPDATA%\Packages\page.codeberg.korba.Copiale_*\LocalCache\Local\korba\Copiale\data`.
 
 ## Known limits
 

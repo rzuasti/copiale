@@ -145,10 +145,11 @@ fetch() {
   trap 'rm -rf "$tmp"' EXIT
   say "Downloading run $run"
   gh run download "$run" -R "$GITHUB_REPO" --name copiale.exe --dir "$tmp"
-  mv -f "$tmp/copiale.exe" "$SHARE/copiale.exe"
+  gh run download "$run" -R "$GITHUB_REPO" --name copiale.msix --dir "$tmp"
+  mv -f "$tmp/copiale.exe" "$tmp/copiale.msix" "$SHARE/"
   gh run view "$run" -R "$GITHUB_REPO" --json headBranch,headSha \
     --jq '"Built from \(.headBranch) \(.headSha[:10])"' >"$SHARE/copiale.txt"
-  say "$(cat "$SHARE/copiale.txt"): \\\\10.0.2.4\\qemu\\copiale.exe"
+  say "$(cat "$SHARE/copiale.txt"): \\\\10.0.2.4\\qemu\\copiale.exe and copiale.msix"
 }
 
 delete() {

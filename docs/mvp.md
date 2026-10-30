@@ -419,7 +419,8 @@ crates/
   guesses).
 - Files: `copiale.db` and `copiale.key` in the platform local data dir
   (`~/.local/share/copiale` on Linux; on Windows `%LOCALAPPDATA%`, not
-  roaming), restricted to the user.
+  roaming, redirected into the package's own folder under MSIX, so
+  uninstalling deletes them), restricted to the user.
 - Messages live in Copiale's tables only, with edits, deletes and expiry
   applied. presage's own message saving (`thread_messages`) is turned off by
   a delegating `Store` wrapper.
