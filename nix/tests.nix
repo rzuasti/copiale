@@ -18,6 +18,7 @@
       integer = setting.max;
       float = setting.min;
       font = "Inter";
+      hotkey = "Ctrl+Alt+Space";
     }
     .${setting.type};
   full =
