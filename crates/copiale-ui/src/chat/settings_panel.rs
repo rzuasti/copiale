@@ -5,12 +5,13 @@ use std::ops::Range;
 
 use copiale_core::Account;
 use copiale_core::config::{
-    Choice, Config, Density, MessageStyle, NotificationContent, Setting, ThemeName, TimeFormat,
-    TimestampVisibility, Typography, WindowConfig,
+    Choice, Config, Density, Hotkey, MessageStyle, NotificationContent, Setting, ThemeName,
+    TimeFormat, TimestampVisibility, Typography, WindowConfig,
 };
 
 use crate::capture;
 use crate::fuzzy::fuzzy_match;
+use crate::hotkey::{self, Recorded};
 use crate::theme::{self, Theme};
 
 /// Most fonts the font picker lists.
@@ -61,6 +62,7 @@ pub enum Field {
     Opacity,
     Blur,
     CaptureProtection,
+    Hotkey,
     NotificationContent,
     ReadReceipts,
     TypingIndicators,
@@ -69,7 +71,7 @@ pub enum Field {
 }
 
 /// All rows, in order.
-pub const FIELDS: [Field; 20] = [
+pub const FIELDS: [Field; 21] = [
     Field::Theme,
     Field::UiFont,
     Field::MonoFont,
@@ -85,6 +87,7 @@ pub const FIELDS: [Field; 20] = [
     Field::Opacity,
     Field::Blur,
     Field::CaptureProtection,
+    Field::Hotkey,
     Field::NotificationContent,
     Field::ReadReceipts,
     Field::TypingIndicators,
@@ -104,6 +107,8 @@ pub enum Value {
     Toggle(bool),
     /// Picked from a list; `None`: the built-in default.
     Pick(Option<String>),
+    /// Recorded; `None`: none.
+    Keys(Option<Hotkey>),
     /// Read-only: set on the phone.
     Info(String),
     /// Something `Enter` does, not a value.
@@ -115,6 +120,8 @@ pub enum Value {
 pub enum Activation {
     Change(Setting),
     Pick(Picking),
+    /// Record a hotkey.
+    Record,
     /// Ask before unlinking and wiping.
     ConfirmUnlink,
     Nothing,
@@ -164,7 +171,7 @@ impl Field {
                 Section::Layout
             }
             Self::Emoticons => Section::Composer,
-            Self::Opacity | Self::Blur | Self::CaptureProtection => Section::Window,
+            Self::Opacity | Self::Blur | Self::CaptureProtection | Self::Hotkey => Section::Window,
             Self::NotificationContent => Section::Notifications,
             Self::ReadReceipts | Self::TypingIndicators => Section::Privacy,
             Self::DeviceName | Self::Unlink => Section::Account,
@@ -188,6 +195,7 @@ impl Field {
             Self::Opacity => "Opacity",
             Self::Blur => "Blur",
             Self::CaptureProtection => "Capture protection",
+            Self::Hotkey => "Global hotkey",
             Self::NotificationContent => "Show in notifications",
             Self::ReadReceipts => "Read receipts",
             Self::TypingIndicators => "Typing indicators",
@@ -201,6 +209,7 @@ impl Field {
         match self {
             Self::ReadReceipts | Self::TypingIndicators | Self::DeviceName => true,
             Self::CaptureProtection => !capture::SUPPORTED,
+            Self::Hotkey => !hotkey::SUPPORTED,
             _ => false,
         }
     }
@@ -216,6 +225,8 @@ impl Field {
                 Some("hides from screenshots and shares")
             }
             Self::CaptureProtection => Some(capture::unsupported_hint()),
+            Self::Hotkey if hotkey::SUPPORTED => Some("shows or hides Copiale from any app"),
+            Self::Hotkey => Some("bind copiale --toggle to a key instead"),
             Self::Avatars => Some("in the chat list"),
             Self::Emoticons => Some(":) becomes 🙂 as you type"),
             Self::Theme => Some("custom ones in the config file"),
@@ -264,6 +275,8 @@ impl Field {
                 Value::Toggle(config.window.capture_protection)
             }
             Self::CaptureProtection => Value::Info("n/a".into()),
+            Self::Hotkey if hotkey::SUPPORTED => Value::Keys(config.window.hotkey),
+            Self::Hotkey => Value::Info("n/a".into()),
             Self::NotificationContent => choice(config.notifications.content),
             Self::ReadReceipts => on_phone(account.map(|a| a.settings.read_receipts)),
             Self::TypingIndicators => on_phone(account.map(|a| a.settings.typing_indicators)),
@@ -328,6 +341,7 @@ impl Field {
             | Self::TypingIndicators
             | Self::DeviceName
             | Self::CaptureProtection
+            | Self::Hotkey
             | Self::Unlink => return None,
         };
         Some(setting)
@@ -354,6 +368,7 @@ impl Field {
             Self::Avatars | Self::Emoticons | Self::Blur | Self::CaptureProtection => self
                 .step(config, 1)
                 .map_or(Activation::Nothing, Activation::Change),
+            Self::Hotkey if hotkey::SUPPORTED => Activation::Record,
             Self::Unlink => Activation::ConfirmUnlink,
             _ => Activation::Nothing,
         }
@@ -416,6 +431,8 @@ pub struct SettingsPanel {
     picker: Option<SettingPicker>,
     /// Asking whether to unlink and wipe.
     confirming_unlink: bool,
+    /// Recording a hotkey: `None`, or why the last keys can't be one.
+    recording: Option<Option<String>>,
 }
 
 /// Picks a font or theme, previewing as it goes.
@@ -502,6 +519,43 @@ impl SettingsPanel {
 
     pub fn confirming_unlink(&self) -> bool {
         self.confirming_unlink
+    }
+
+    pub fn start_recording(&mut self) {
+        self.recording = Some(None);
+    }
+
+    pub fn recording(&self) -> bool {
+        self.recording.is_some()
+    }
+
+    /// Why the last keys recorded can't be a hotkey.
+    pub fn recording_problem(&self) -> Option<&str> {
+        self.recording.as_ref()?.as_deref()
+    }
+
+    /// Takes a keystroke while recording; the setting it makes, if any.
+    /// Recording ends unless it waits for more.
+    pub fn record(&mut self, recorded: Recorded) -> Option<Setting> {
+        let setting = match recorded {
+            Recorded::Set(hotkey) => Setting::Hotkey(Some(hotkey)),
+            Recorded::Clear => Setting::Hotkey(None),
+            Recorded::Cancel => {
+                self.recording = None;
+                return None;
+            }
+            Recorded::Pending => return None,
+            Recorded::Invalid(problem) => {
+                self.recording = Some(Some(problem));
+                return None;
+            }
+        };
+        self.recording = None;
+        Some(setting)
+    }
+
+    pub fn stop_recording(&mut self) {
+        self.recording = None;
     }
 
     pub fn picker(&self) -> Option<&SettingPicker> {
@@ -617,6 +671,10 @@ mod tests {
                 settings.extend(theme::listed().into_iter().map(Setting::Theme));
                 settings.push(Setting::Theme(ThemeName::Custom));
             }
+            Activation::Record => {
+                settings.push(Setting::Hotkey("Ctrl+Alt+Space".parse().ok()));
+                settings.push(Setting::Hotkey(None));
+            }
             Activation::ConfirmUnlink | Activation::Nothing => {}
         }
         settings
@@ -643,6 +701,9 @@ mod tests {
         let mut all = Setting::KEYS.to_vec();
         if !capture::SUPPORTED {
             all.retain(|key| *key != Setting::CaptureProtection(true).key());
+        }
+        if !hotkey::SUPPORTED {
+            all.retain(|key| *key != Setting::Hotkey(None).key());
         }
         keys.sort();
         all.sort();
@@ -815,6 +876,48 @@ mod tests {
             assert_eq!(field.step(&config, 1), None);
             assert_eq!(field.activate(&config), Activation::Nothing);
         }
+    }
+
+    #[test]
+    fn hotkey_records_only_where_supported() {
+        let mut config = Config::default();
+        config.window.hotkey = "Ctrl+Alt+Space".parse().ok();
+        let field = Field::Hotkey;
+        assert_eq!(field.read_only(), !hotkey::SUPPORTED);
+        assert_eq!(field.step(&config, 1), None);
+        if hotkey::SUPPORTED {
+            assert_eq!(
+                field.value(&config, None),
+                Value::Keys(config.window.hotkey)
+            );
+            assert_eq!(field.activate(&config), Activation::Record);
+        } else {
+            assert_eq!(field.value(&config, None), Value::Info("n/a".into()));
+            assert_eq!(field.activate(&config), Activation::Nothing);
+        }
+    }
+
+    #[test]
+    fn recording_waits_for_usable_keys() {
+        let hotkey: Hotkey = "Super+K".parse().unwrap();
+        let mut panel = SettingsPanel::default();
+        panel.start_recording();
+        assert!(panel.recording());
+        assert_eq!(panel.record(Recorded::Pending), None);
+        assert_eq!(panel.record(Recorded::Invalid("no".into())), None);
+        assert_eq!(panel.recording_problem(), Some("no"));
+        assert_eq!(
+            panel.record(Recorded::Set(hotkey)),
+            Some(Setting::Hotkey(Some(hotkey)))
+        );
+        assert!(!panel.recording());
+
+        panel.start_recording();
+        assert_eq!(panel.recording_problem(), None);
+        assert_eq!(panel.record(Recorded::Clear), Some(Setting::Hotkey(None)));
+        panel.start_recording();
+        assert_eq!(panel.record(Recorded::Cancel), None);
+        assert!(!panel.recording());
     }
 
     #[test]

@@ -254,6 +254,10 @@ pub struct ChatView {
     picker_scroll: ScrollHandle,
     /// Held while asking whether to unlink.
     confirm_focus: FocusHandle,
+    /// Held while recording a hotkey.
+    recorder_focus: FocusHandle,
+    /// Takes keystrokes before key bindings while recording a hotkey.
+    recorder: Option<Subscription>,
     /// Held while a safety number shows.
     identity_focus: FocusHandle,
     /// Held while asking whether to open a link.
@@ -410,6 +414,8 @@ impl ChatView {
             settings_scroll: ScrollHandle::new(),
             picker_scroll: ScrollHandle::new(),
             confirm_focus: cx.focus_handle(),
+            recorder_focus: cx.focus_handle(),
+            recorder: None,
             identity_focus: cx.focus_handle(),
             link_focus: cx.focus_handle(),
             viewer_focus: cx.focus_handle(),
@@ -957,6 +963,7 @@ impl ChatView {
     fn open_settings(&mut self, _: &OpenSettings, window: &mut Window, cx: &mut Context<Self>) {
         self.chat.open_overlay(Overlay::Settings);
         self.close_picker(false, cx);
+        self.stop_recording(cx);
         self.settings_panel.reset();
         self.settings_scroll.scroll_to_item(0);
         Self::ready_query(&self.inputs().settings, window, cx);
@@ -993,6 +1000,7 @@ impl ChatView {
             self.viewer_closed(cx);
         }
         self.close_picker(false, cx);
+        self.stop_recording(cx);
         self.chat.close_overlay();
         self.restore_focus(window, cx);
         cx.notify();

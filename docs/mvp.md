@@ -51,7 +51,7 @@ Scope, UI design, architecture and work items for the first usable release.
 - Message history transfer: chats start empty at link time.
 - Group management. New groups (name and members) can be created.
 - Base16 import, accent override.
-- Global hotkey, notification quick reply.
+- Notification quick reply.
 - Multiple accounts.
 - CI.
 
@@ -209,7 +209,15 @@ Scope, UI design, architecture and work items for the first usable release.
     once (e.g. at login); does nothing if already running.
 - `copiale --check-config [FILE]` lists problems in `FILE`, or in the
   config in effect, and fails if there are any; runs without an instance.
-- Users bind `--toggle` to a key in their compositor/WM or OS.
+- Global hotkey, doing what `--toggle` does:
+  - Windows and macOS: `window.hotkey` (off by default), registered by the
+    app (`global-hotkey`: `RegisterHotKey`, Carbon `RegisterEventHotKey`).
+    Keys by position on a US layout on macOS.
+  - Settings: `Enter` on the row records the next keys pressed, before key
+    bindings see them; `Backspace` clears it, `Esc` cancels. Needs Ctrl, Alt
+    or Super, except on function keys. The old hotkey is let go while
+    recording. A hotkey another app holds shows under the row.
+  - Linux: users bind `--toggle` to a key in their compositor/WM.
 - Notification click opens the window on that chat; on macOS, so does the
   Dock icon.
 - Tray icon (placeholder artwork until there's an app icon):
@@ -295,6 +303,7 @@ convert_emoticons = true  # :) becomes 🙂 as you type
 opacity = 1.0             # background, 0.5-1.0
 blur = false              # compositor-dependent
 capture_protection = false # Windows, macOS; see docs/security.md
+# hotkey = "Ctrl+Alt+Space" # Windows, macOS: shows or hides from any app
 
 [notifications]
 content = "name"          # off | name | message

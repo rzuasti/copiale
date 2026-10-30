@@ -9,10 +9,12 @@
 
 mod edit;
 mod file;
+mod hotkey;
 mod parse;
 mod schema;
 
 pub use file::{ConfigEvent, ConfigFile, ConfigSync};
+pub use hotkey::Hotkey;
 pub use schema::{
     Appearance, Choice, Composer, Config, Density, KindInfo, Layout, MessageStyle,
     NotificationContent, Notifications, Setting, SettingInfo, ThemeName, TimeFormat,

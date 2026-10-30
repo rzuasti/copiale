@@ -133,6 +133,7 @@ keep = \"me\"
             Setting::LineHeight(1.25),
             Setting::Opacity(0.9),
             Setting::MonoFont(Some("Iosevka".into())),
+            Setting::Hotkey("Super+Shift+K".parse().ok()),
         ];
         let loaded = parse(&apply("", &settings).unwrap());
         assert_eq!(loaded.warnings, vec![]);
@@ -143,6 +144,10 @@ keep = \"me\"
             loaded.config.typography.mono_font.as_deref(),
             Some("Iosevka")
         );
+        assert_eq!(
+            loaded.config.window.hotkey.map(|hotkey| hotkey.to_string()),
+            Some("Shift+Super+K".into())
+        );
     }
 
     #[test]
@@ -150,6 +155,10 @@ keep = \"me\"
         let result = apply("", &[Setting::Opacity(0.2)]);
         assert!(
             matches!(result, Err(ConfigError::Invalid { setting, .. }) if setting == "window.opacity")
+        );
+        let result = apply("", &[Setting::Hotkey("Shift+K".parse().ok())]);
+        assert!(
+            matches!(result, Err(ConfigError::Invalid { setting, .. }) if setting == "window.hotkey")
         );
     }
 

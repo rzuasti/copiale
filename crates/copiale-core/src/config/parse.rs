@@ -203,6 +203,7 @@ mod tests {
             opacity = 0.85
             blur = true
             capture_protection = true
+            hotkey = "ctrl+alt+space"
 
             [notifications]
             content = "off"
@@ -229,6 +230,14 @@ mod tests {
         assert_eq!(config.window.opacity, 0.85);
         assert!(config.window.blur);
         assert!(config.window.capture_protection);
+        assert_eq!(
+            config
+                .window
+                .hotkey
+                .map(|hotkey| hotkey.to_string())
+                .as_deref(),
+            Some("Ctrl+Alt+Space")
+        );
         assert_eq!(config.notifications.content, NotificationContent::Off);
     }
 
@@ -303,6 +312,25 @@ mod tests {
                 "layout.avatars: expected true or false, got 1; using false",
             ]
         );
+    }
+
+    #[test]
+    fn hotkey_warnings_say_why() {
+        let loaded = parse("[window]\nhotkey = \"Ctrl+Foo\"\n");
+        assert_eq!(
+            loaded.warnings[0].to_string(),
+            "window.hotkey: expected keys such as \"Ctrl+Alt+Space\", got \"Ctrl+Foo\"; using none"
+        );
+        let loaded = parse("[window]\nhotkey = \"Shift+A\"\n");
+        assert_eq!(
+            loaded.warnings[0].to_string(),
+            "window.hotkey: needs Ctrl, Alt or Super, except on function keys; using none"
+        );
+        assert_eq!(loaded.config.window.hotkey, None);
+
+        let loaded = parse("[window]\nhotkey = \"\"\n");
+        assert_eq!(loaded.warnings, vec![]);
+        assert_eq!(loaded.config.window.hotkey, None);
     }
 
     #[test]

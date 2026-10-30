@@ -23,6 +23,7 @@ fn schema() -> Value {
                 KindInfo::Integer => ("integer", None),
                 KindInfo::Float => ("float", None),
                 KindInfo::Font => ("font", None),
+                KindInfo::Hotkey => ("hotkey", None),
             };
             entry["type"] = kind.into();
             if let Some(choices) = choices {

@@ -4,6 +4,7 @@ mod capture;
 pub mod chat;
 mod drawer;
 mod fuzzy;
+pub mod hotkey;
 mod icons;
 mod kinetic;
 pub mod main_window;
@@ -156,6 +157,8 @@ pub fn run(
             }
             Err(error) => tracing::warn!(%error, "no tray icon"),
         }
+        #[cfg(any(windows, target_os = "macos"))]
+        hotkey::install(cx);
         if hidden {
             main_window::start_hidden(cx);
         } else {

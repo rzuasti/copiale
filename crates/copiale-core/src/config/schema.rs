@@ -4,6 +4,7 @@ use std::ops::RangeInclusive;
 
 use toml_edit::Value;
 
+use super::hotkey::Hotkey;
 use super::parse::Reader;
 
 /// All settings in `config.toml`.
@@ -90,6 +91,8 @@ pub struct WindowConfig {
     pub blur: bool,
     /// Hidden from screenshots and screen shares, where the OS allows.
     pub capture_protection: bool,
+    /// Shows or hides the window from anywhere, where the OS allows.
+    pub hotkey: Option<Hotkey>,
 }
 
 impl WindowConfig {
@@ -102,6 +105,7 @@ impl Default for WindowConfig {
             opacity: 1.0,
             blur: false,
             capture_protection: false,
+            hotkey: None,
         }
     }
 }
@@ -203,10 +207,9 @@ choice!(
 /// `Config` field, whose path is also its TOML table and key. Numbers give
 /// their range.
 macro_rules! settings {
-    (@check $v:ident) => {{
-        let _ = $v;
-        Ok(())
-    }};
+    (@check $v:ident) => {
+        Kind::check($v)
+    };
     (@check $v:ident $range:expr) => {
         in_range($v, &$range)
     };
@@ -328,6 +331,10 @@ settings! {
     /// Hides the window from screenshots and screen shares; Windows and
     /// macOS only.
     CaptureProtection(bool): window.capture_protection,
+    /// Keys that show the window and focus the composer from any app, or
+    /// hide it if focused, such as `Ctrl+Alt+Space`; Windows and macOS
+    /// only.
+    Hotkey(Option<Hotkey>): window.hotkey,
     /// What notifications show: nothing, the sender's name, or the message
     /// too.
     NotificationContent(NotificationContent): notifications.content,
@@ -355,6 +362,8 @@ pub enum KindInfo {
     Float,
     /// A font name.
     Font,
+    /// Keys such as `Ctrl+Alt+Space`.
+    Hotkey,
 }
 
 /// Doc comment lines as one paragraph.
@@ -391,6 +400,11 @@ pub(crate) trait Kind: Clone {
 
     /// As a warning names the fallback.
     fn describe(&self) -> String;
+
+    /// Error message if the value can't be used.
+    fn check(&self) -> Result<(), String> {
+        Ok(())
+    }
 
     /// As stored after a round trip through the file.
     fn normalized(self) -> Self {
@@ -516,6 +530,36 @@ impl Kind for Option<String> {
 
     fn normalized(self) -> Self {
         self.filter(|font| !font.is_empty())
+    }
+}
+
+/// `None` or empty means none.
+impl Kind for Option<Hotkey> {
+    fn expected() -> String {
+        "keys such as \"Ctrl+Alt+Space\"".into()
+    }
+
+    fn info() -> KindInfo {
+        KindInfo::Hotkey
+    }
+
+    fn from_toml(value: &Value) -> Option<Self> {
+        match value.as_str()?.trim() {
+            "" => Some(None),
+            text => text.parse().ok().map(Some),
+        }
+    }
+
+    fn to_toml(&self) -> Option<Value> {
+        self.map(|hotkey| hotkey.to_string().into())
+    }
+
+    fn describe(&self) -> String {
+        self.map_or_else(|| "none".into(), |hotkey| hotkey.to_string())
+    }
+
+    fn check(&self) -> Result<(), String> {
+        self.as_ref().map_or(Ok(()), Hotkey::check)
     }
 }
 

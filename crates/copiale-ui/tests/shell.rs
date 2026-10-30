@@ -5,7 +5,8 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use copiale_core::config::{
-    Config, ConfigFile, Density, MessageStyle, NotificationContent, Setting, ThemeName, TimeFormat,
+    Config, ConfigFile, Density, Hotkey, MessageStyle, NotificationContent, Setting, ThemeName,
+    TimeFormat,
 };
 use copiale_core::{
     Account, AccountSettings, Attachment, AttachmentId, AttachmentKind, AttachmentSource,
@@ -17,6 +18,7 @@ use copiale_core::{
 use copiale_ui::chat::{
     COMPACT_BELOW, ChatView, Compose, Field, Layout, Notice, NoticeAction, NoticeKey, Overlay,
 };
+use copiale_ui::hotkey::{self, Registrar};
 use copiale_ui::notifier::Notifier;
 use copiale_ui::onboarding::Screen;
 use copiale_ui::settings::{self, Settings};
@@ -2316,10 +2318,74 @@ fn settings_mirror_the_account(cx: &mut TestAppContext) {
         Some(account)
     );
     open_settings(&ui, "account", cx);
-    assert!(ui.shows(("setting", 18u64), cx));
+    assert!(ui.shows(("setting", 19u64), cx));
     ui.press("right", cx);
     ui.press("enter", cx);
     assert_eq!(config(cx), Config::default());
+}
+
+/// Keeps the hotkeys registered.
+struct FakeRegistrar(Rc<RefCell<Vec<Hotkey>>>);
+
+impl Registrar for FakeRegistrar {
+    fn register(&mut self, hotkey: Hotkey) -> Result<(), String> {
+        self.0.borrow_mut().push(hotkey);
+        Ok(())
+    }
+
+    fn unregister(&mut self, hotkey: Hotkey) {
+        self.0.borrow_mut().retain(|kept| *kept != hotkey);
+    }
+}
+
+#[gpui_kit::test]
+fn hotkey_is_recorded_before_key_bindings(cx: &mut TestAppContext) {
+    let ui = Ui::ready(cx);
+    ui.open_alice(cx);
+    let registered = Rc::new(RefCell::new(Vec::new()));
+    let registrar = FakeRegistrar(registered.clone());
+    cx.update(|cx| hotkey::install_with(Box::new(registrar), cx));
+    open_settings(&ui, "hotkey", cx);
+    assert_eq!(
+        chat_view(&ui, cx, |view| view.settings_panel().selected()),
+        Some(Field::Hotkey)
+    );
+    if !hotkey::SUPPORTED {
+        ui.press("enter", cx);
+        assert!(!ui.shows("hotkey-recorder", cx));
+        return;
+    }
+
+    ui.press("enter", cx);
+    assert!(ui.shows("hotkey-recorder", cx));
+    ui.press("shift-a", cx);
+    assert!(ui.shows("recording-problem", cx));
+    ui.press("ctrl-alt-space", cx);
+    let hotkey: Hotkey = "Ctrl+Alt+Space".parse().unwrap();
+    assert_eq!(config(cx).window.hotkey, Some(hotkey));
+    assert!(ui.shows("settings-list", cx));
+    assert_eq!(*registered.borrow(), [hotkey]);
+
+    // Recording lets go of the hotkey; `Esc` cancels it, not settings.
+    ui.press("enter", cx);
+    assert!(registered.borrow().is_empty());
+    ui.press("escape", cx);
+    assert!(ui.shows("settings-list", cx));
+    assert_eq!(*registered.borrow(), [hotkey]);
+
+    ui.press("enter", cx);
+    ui.press("backspace", cx);
+    assert_eq!(config(cx).window.hotkey, None);
+    assert!(registered.borrow().is_empty());
+
+    // Closing settings mid-recording takes the hotkey back.
+    cx.update(|cx| settings::change(Setting::Hotkey(Some(hotkey)), cx));
+    ui.press("enter", cx);
+    ui.click("settings-backdrop", cx);
+    assert!(!ui.shows("settings", cx));
+    assert_eq!(*registered.borrow(), [hotkey]);
+    ui.press("escape", cx);
+    assert!(!ui.shows("settings", cx));
 }
 
 #[gpui_kit::test]

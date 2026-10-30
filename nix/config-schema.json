@@ -157,6 +157,12 @@
       "default": false
     },
     {
+      "table": "window",
+      "key": "hotkey",
+      "description": "Keys that show the window and focus the composer from any app, or hide it if focused, such as `Ctrl+Alt+Space`; Windows and macOS only.",
+      "type": "hotkey"
+    },
+    {
       "table": "notifications",
       "key": "content",
       "description": "What notifications show: nothing, the sender's name, or the message too.",

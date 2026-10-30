@@ -2,15 +2,17 @@
 
 use copiale_core::config;
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
+use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, Context, Entity, Hsla, InteractiveElement as _, IntoElement, ParentElement as _,
-    Pixels, SharedString, StatefulInteractiveElement as _, Styled as _, StyledText,
-    TestSupportExt as _, Window, div, px, rems,
+    AnyElement, Context, Entity, Hsla, InteractiveElement as _, IntoElement, Keystroke,
+    ParentElement as _, Pixels, SharedString, StatefulInteractiveElement as _, Styled as _,
+    StyledText, TestSupportExt as _, Window, div, px, rems,
 };
 
 use crate::chat::settings_panel::{Activation, FIELDS, Field, FontRole, Picking, Section, Value};
+use crate::hotkey;
 use crate::settings::{self, Settings};
 use crate::theme::{ActivePalette as _, InstalledFonts};
 
@@ -48,6 +50,7 @@ impl ChatView {
         match field.activate(Settings::get(cx)) {
             Activation::Change(setting) => settings::change(setting, cx),
             Activation::Pick(picking) => self.open_picker(picking, window, cx),
+            Activation::Record => self.start_recording(window, cx),
             Activation::ConfirmUnlink => {
                 self.settings_panel.confirm_unlink();
                 // Neither button: `Enter` alone can't wipe.
@@ -55,6 +58,57 @@ impl ChatView {
             }
             Activation::Nothing => {}
         }
+        cx.notify();
+    }
+
+    /// Records the next keys pressed as the hotkey, before key bindings
+    /// see them.
+    fn start_recording(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings_panel.start_recording();
+        hotkey::pause(true, cx);
+        window.focus(&self.recorder_focus, cx);
+        let view = cx.entity().downgrade();
+        self.recorder = Some(cx.intercept_keystrokes(move |event, window, cx| {
+            let Some(view) = view.upgrade() else {
+                return;
+            };
+            if !view.read(cx).settings_panel.recording() {
+                return;
+            }
+            cx.stop_propagation();
+            view.update(cx, |view, cx| {
+                view.record_keystroke(&event.keystroke, window, cx)
+            });
+        }));
+    }
+
+    fn record_keystroke(
+        &mut self,
+        keystroke: &Keystroke,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(setting) = self.settings_panel.record(hotkey::record(keystroke)) {
+            settings::change(setting, cx);
+        }
+        if !self.settings_panel.recording() {
+            self.stop_recording(cx);
+            Self::focus_input(&self.inputs().settings, window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Ends recording, if under way, and takes the hotkey back.
+    pub(super) fn stop_recording(&mut self, cx: &mut Context<Self>) {
+        self.settings_panel.stop_recording();
+        if self.recorder.take().is_some() {
+            hotkey::pause(false, cx);
+        }
+    }
+
+    fn cancel_recording(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.stop_recording(cx);
+        Self::focus_input(&self.inputs().settings, window, cx);
         cx.notify();
     }
 
@@ -186,6 +240,9 @@ impl ChatView {
         if self.settings_panel.confirming_unlink() {
             return self.render_unlink_confirm(cx);
         }
+        if self.settings_panel.recording() {
+            return self.render_recorder(cx);
+        }
         let config = Settings::get(cx).clone();
         let mono = cx.theme().mono_font_family.clone();
         let muted = cx.palette().text_muted;
@@ -293,6 +350,10 @@ impl ChatView {
         let (accent, muted) = (palette.accent, palette.text_muted);
         let mono = cx.theme().mono_font_family.clone();
         let read_only = field.read_only();
+        let problem = field.problem(config).or_else(|| {
+            let registered = (field == Field::Hotkey).then(|| hotkey::problem(cx));
+            registered.flatten().map(str::to_owned)
+        });
         let value =
             match field.value(config, self.account.as_ref()) {
                 Value::Choice { options, selected } => {
@@ -368,6 +429,23 @@ impl ChatView {
                     }))
                     .test_support()
                     .into_any_element(),
+                Value::Keys(keys) => div()
+                    .id(("setting-keys", n))
+                    .cursor_pointer()
+                    .when(keys.is_some(), |el| el.text_color(palette.text))
+                    .child(match (keys, selected) {
+                        (Some(keys), true) => {
+                            format!("{} ↵", Kbd::format(&hotkey::keystroke(keys)))
+                        }
+                        (Some(keys), false) => Kbd::format(&hotkey::keystroke(keys)),
+                        (None, true) => "none ↵".into(),
+                        (None, false) => "none".into(),
+                    })
+                    .on_click(cx.listener(move |view, _, window, cx| {
+                        view.activate_setting(field, window, cx)
+                    }))
+                    .test_support()
+                    .into_any_element(),
                 Value::Info(text) => div()
                     .max_w(px(220.))
                     .truncate()
@@ -413,7 +491,7 @@ impl ChatView {
                             .hint()
                             .map(|hint| div().text_xs().text_color(muted).child(hint)),
                     )
-                    .children(field.problem(config).map(|problem| {
+                    .children(problem.map(|problem| {
                         div()
                             .id(("setting-problem", n))
                             .text_xs()
@@ -432,6 +510,57 @@ impl ChatView {
             )
             .test_support()
             .into_any_element()
+    }
+
+    /// Asks for the hotkey's keys; `record_keystroke` takes them.
+    fn render_recorder(&self, cx: &mut Context<Self>) -> gpui_kit::Div {
+        let palette = cx.palette();
+        let muted = palette.text_muted;
+        let mono = cx.theme().mono_font_family.clone();
+        let current = Settings::get(cx).window.hotkey.map_or_else(
+            || "none".into(),
+            |keys| Kbd::format(&hotkey::keystroke(keys)),
+        );
+        let problem = self.settings_panel.recording_problem().map(|problem| {
+            div()
+                .id("recording-problem")
+                .text_xs()
+                .text_color(palette.danger)
+                .child(problem.to_owned())
+                .test_support()
+        });
+        let recorder =
+            v_flex()
+                .id("hotkey-recorder")
+                .track_focus(&self.recorder_focus)
+                .p_4()
+                .gap_2()
+                .child(div().text_lg().child("Press the new global hotkey"))
+                .child(div().text_sm().text_color(muted).child(format!(
+                    "Shows or hides Copiale from any app. Now: {current}"
+                )))
+                .children(problem)
+                .child(
+                    h_flex()
+                        .gap_3()
+                        .font_family(mono)
+                        .text_xs()
+                        .text_color(muted)
+                        .child(div().flex_1().child("⌫ none"))
+                        .child(
+                            div()
+                                .id("cancel-recording")
+                                .cursor_pointer()
+                                .text_color(palette.action)
+                                .child("esc cancel")
+                                .on_click(cx.listener(|view, _, window, cx| {
+                                    view.cancel_recording(window, cx)
+                                }))
+                                .test_support(),
+                        ),
+                )
+                .test_support();
+        div().child(recorder)
     }
 
     /// Fonts or themes to pick from, previewed as the highlight moves.

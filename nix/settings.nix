@@ -21,6 +21,8 @@
         then types.numbers.between setting.min setting.max
         else types.number;
       font = types.str;
+      # Checked by the app, as `copiale --check-config` does.
+      hotkey = types.str;
     }
     .${setting.type};
 

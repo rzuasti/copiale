@@ -24,6 +24,9 @@ unicode-segmentation.workspace = true
 url.workspace = true
 zxcvbn.workspace = true
 
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+global-hotkey.workspace = true
+
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true, features = ["ApplicationModel", "Data_Xml_Dom", "Foundation", "UI_Notifications"] }
 windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
@@ -41,6 +44,7 @@ fontconfig.workspace = true
 
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }
+keyboard-types.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 ttf-parser.workspace = true
