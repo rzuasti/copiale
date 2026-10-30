@@ -51,7 +51,8 @@ each one once its patches are merged and the pin is updated.
     at `0ffcbfa`.
   - `patches/libsignal-service-dme-log.patch`. Decryption error messages
     were logged as lossy UTF-8, leaking the sender's ratchet public key;
-    their length is logged instead. Not upstream yet.
+    their length is logged instead.
+    Upstream PR: [whisperfish/libsignal-service-rs#498](https://github.com/whisperfish/libsignal-service-rs/pull/498).
 - **Used via:** `[patch."https://github.com/whisperfish/libsignal-service-rs"]`
   in the root `Cargo.toml`.
 
