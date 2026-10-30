@@ -149,6 +149,8 @@ went unsolved until 2011.
     `windows.yml` on the mirror checks and builds `copiale.exe` on demand
     (static C runtime); tried in a Windows 11 evaluation VM only,
     `nix run .#windows-vm` (x86_64-linux; `docs/windows-vm.md`).
+  - The mirror isn't synced from Codeberg: before a macOS or Windows build,
+    push `main` (and tags) to the `github` remote by hand.
 
 ## Code style
 
