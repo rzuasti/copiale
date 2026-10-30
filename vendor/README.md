@@ -49,6 +49,9 @@ each one once its patches are merged and the pin is updated.
     Upstream PR, three hunks applied by hand:
     [whisperfish/libsignal-service-rs#391](https://github.com/whisperfish/libsignal-service-rs/pull/391)
     at `0ffcbfa`.
+  - `patches/libsignal-service-dme-log.patch`. Decryption error messages
+    were logged as lossy UTF-8, leaking the sender's ratchet public key;
+    their length is logged instead. Not upstream yet.
 - **Used via:** `[patch."https://github.com/whisperfish/libsignal-service-rs"]`
   in the root `Cargo.toml`.
 

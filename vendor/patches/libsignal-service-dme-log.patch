@@ -1,0 +1,32 @@
+From 98f0482de61a1cf28fded3543ea6e55b57a2529f Mon Sep 17 00:00:00 2001
+From: Ricardo Zuasti <rzuasti@pm.me>
+Date: Fri, 30 Oct 2026 08:03:25 -0400
+Subject: [PATCH] fix(cipher): log a decryption error message's length, not its
+ bytes
+
+The message was logged as lossy UTF-8, which leaks the sender's ratchet
+public key into logs; its length is enough to tell one arrived.
+
+Assisted-by: Claude Opus 5.5
+---
+ src/cipher.rs | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/src/cipher.rs b/src/cipher.rs
+index ab291bf92..5c55eadae 100644
+--- a/src/cipher.rs
++++ b/src/cipher.rs
+@@ -170,8 +170,8 @@ where
+                 };
+                 tracing::warn!(
+                     ?envelope,
+-                    "Received a decryption error message: {}.",
+-                    String::from_utf8_lossy(dme)
++                    len = dme.len(),
++                    "Received a decryption error message."
+                 );
+             }
+ 
+-- 
+2.56.0
+
