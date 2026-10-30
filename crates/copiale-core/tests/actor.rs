@@ -2793,18 +2793,13 @@ async fn ended_groups_take_nothing_more() {
     running.network.set_group(group_key(1), named_dev_group(3));
     let (message, summary) = receive_in_group(&mut running, group_ref(1, 3), 1, 100).await;
     assert!(!summary.ended);
-    flush(&mut running).await;
+    // The message's group refresh; reading revision 4 instead would drop the
+    // end as old.
+    conversation_updated(&mut running.events).await;
 
     running.network.set_group(group_key(1), named_dev_group(4));
     running.network.deliver(group_change(4, GroupUpdate::Ended));
-    // The first message's group refresh may still update the conversation.
-    let line = loop {
-        match next_event(&mut running.events).await {
-            Event::MessageAdded(line) => break line,
-            Event::ConversationUpdated(_) => {}
-            other => panic!("expected MessageAdded, got {other:?}"),
-        }
-    };
+    let line = message_added(&mut running.events).await;
     assert_eq!(
         line.content,
         Content::GroupChanged(vec![GroupUpdate::Ended])
