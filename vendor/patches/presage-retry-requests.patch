@@ -1,7 +1,7 @@
 From 8b2e2f9d0502b29c855eb57ac8b7c74df6329541 Mon Sep 17 00:00:00 2001
 From: Ricardo Zuasti <rzuasti@pm.me>
 Date: Mon, 19 Oct 2026 10:28:46 -0400
-Subject: [PATCH 1/2] feat: send and answer retry requests
+Subject: [PATCH 1/3] feat: send and answer retry requests
 
 Needs libsignal-service's retry request support.
 
@@ -395,7 +395,7 @@ index fcdbf4dbf..1c178a0d2 100644
 From 32d58929e06fb5cc8da43303bd8c752167212c4a Mon Sep 17 00:00:00 2001
 From: Ricardo Zuasti <rzuasti@pm.me>
 Date: Mon, 19 Oct 2026 19:17:07 -0400
-Subject: [PATCH 2/2] feat: devices each sent message went to
+Subject: [PATCH 2/3] feat: devices each sent message went to
 
 SentContent::recipients lists the devices of each recipient that got the
 message, from libsignal-service's SentMessage::devices, so clients answer
@@ -469,3 +469,39 @@ index 1c178a0d2..ea3db1ae9 100644
 -- 
 2.55.0
 
+From 12f04ad4d665bb9bc7f4d6fb8ee07a80014015ef Mon Sep 17 00:00:00 2001
+From: Ricardo Zuasti <rzuasti@pm.me>
+Date: Fri, 30 Oct 2026 17:49:11 -0400
+Subject: [PATCH 3/3] fix: no sealed sender for retry requests to ourselves
+
+Retry requests, resends and null messages to our own account went sealed
+when the store had our profile key. The server then can't tell which of
+our devices sent them, so it wants a copy for this device too: every
+attempt failed with mismatched devices, fetching a pre-key for this
+device each time, until the retries ran out.
+---
+ src/manager/registered.rs | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/src/manager/registered.rs b/src/manager/registered.rs
+index 94ca612..315c4d2 100644
+--- a/src/manager/registered.rs
++++ b/src/manager/registered.rs
+@@ -1583,11 +1583,16 @@ impl<S: Store> Manager<S, Registered> {
+             .await
+     }
+ 
+-    /// Sealed sender access to `recipient`, if we have their profile key.
++    /// Sealed sender access to `recipient`, if we have their profile key; never to ourselves:
++    /// the server can't tell which of our devices sent it, so it would want a copy for this
++    /// device too, and the send fails with mismatched devices.
+     async fn unidentified_access(
+         &self,
+         recipient: &ServiceId,
+     ) -> Result<Option<UnidentifiedAccess>, Error<S::Error>> {
++        if *recipient == ServiceId::from(self.state.data.service_ids.aci()) {
++            return Ok(None);
++        }
+         let Some(profile_key) = self.store.profile_key(recipient).await? else {
+             return Ok(None);
+         };

@@ -10,7 +10,7 @@ use crate::backend::Resendable;
 use crate::model::{Content, Destination, GroupId, Message, ServiceId, Timestamp};
 
 impl Database {
-    /// Stores a placeholder for `sender`'s message sent at `sent_at` that
+    /// Stores `placeholder` for `sender`'s message sent at `sent_at` that
     /// couldn't be decrypted: in `group` if it's known with them in it,
     /// else in the 1:1 conversation. `None` if the message is already
     /// stored.
@@ -19,6 +19,7 @@ impl Database {
         sender: ServiceId,
         group: Option<GroupId>,
         sent_at: Timestamp,
+        placeholder: &Content,
         now: Timestamp,
     ) -> Result<Option<Message>, StorageError> {
         let mut tx = self.begin_write().await?;
@@ -57,7 +58,7 @@ impl Database {
             Some(sender),
             None,
             sent_at,
-            &Content::Undecryptable,
+            placeholder,
             None,
             None,
             now,
@@ -75,13 +76,14 @@ impl Database {
         sent_at: Timestamp,
     ) -> Result<Vec<Removed>, StorageError> {
         let rows: Vec<RemovedRow> = sqlx::query_as(concat!(
-            "DELETE FROM messages WHERE author = ? AND sent_at = ? AND content = ?
+            "DELETE FROM messages WHERE author = ? AND sent_at = ? AND content IN (?, ?)
              RETURNING ",
             removed_columns!()
         ))
         .bind(author.uuid().as_bytes().as_slice())
         .bind(millis(sent_at))
         .bind(placeholder_json()?)
+        .bind(content_json(&Content::UndecryptableSync)?)
         .fetch_all(&self.app)
         .await
         .map_err(database_error)?;
@@ -167,8 +169,11 @@ impl Database {
 }
 
 pub(super) fn placeholder_json() -> Result<String, StorageError> {
-    serde_json::to_string(&Content::Undecryptable)
-        .map_err(|error| StorageError::Database(error.to_string()))
+    content_json(&Content::Undecryptable)
+}
+
+fn content_json(content: &Content) -> Result<String, StorageError> {
+    serde_json::to_string(content).map_err(|error| StorageError::Database(error.to_string()))
 }
 
 #[cfg(test)]
@@ -224,17 +229,29 @@ mod tests {
         let group = group_with(&db, key, 1).await;
 
         let in_group = db
-            .add_placeholder(peer(1), Some(key.id()), at(10), at(50))
+            .add_placeholder(
+                peer(1),
+                Some(key.id()),
+                at(10),
+                &Content::Undecryptable,
+                at(50),
+            )
             .await
             .unwrap()
             .unwrap();
         let not_member = db
-            .add_placeholder(peer(2), Some(key.id()), at(11), at(50))
+            .add_placeholder(
+                peer(2),
+                Some(key.id()),
+                at(11),
+                &Content::Undecryptable,
+                at(50),
+            )
             .await
             .unwrap()
             .unwrap();
         let direct = db
-            .add_placeholder(peer(1), None, at(12), at(50))
+            .add_placeholder(peer(1), None, at(12), &Content::Undecryptable, at(50))
             .await
             .unwrap()
             .unwrap();
@@ -268,9 +285,15 @@ mod tests {
         .await
         .unwrap();
 
-        let stored = db.add_placeholder(peer(1), None, at(10), at(50)).await;
-        let first = db.add_placeholder(peer(1), None, at(11), at(50)).await;
-        let repeat = db.add_placeholder(peer(1), None, at(11), at(50)).await;
+        let stored = db
+            .add_placeholder(peer(1), None, at(10), &Content::Undecryptable, at(50))
+            .await;
+        let first = db
+            .add_placeholder(peer(1), None, at(11), &Content::Undecryptable, at(50))
+            .await;
+        let repeat = db
+            .add_placeholder(peer(1), None, at(11), &Content::Undecryptable, at(50))
+            .await;
 
         assert_eq!(stored.unwrap(), None);
         assert!(first.unwrap().is_some());
@@ -282,11 +305,11 @@ mod tests {
     async fn arriving_messages_take_their_placeholders() {
         let (_dir, db) = db().await;
         let placeholder = db
-            .add_placeholder(peer(1), None, at(10), at(50))
+            .add_placeholder(peer(1), None, at(10), &Content::Undecryptable, at(50))
             .await
             .unwrap()
             .unwrap();
-        db.add_placeholder(peer(1), None, at(11), at(50))
+        db.add_placeholder(peer(1), None, at(11), &Content::Undecryptable, at(50))
             .await
             .unwrap();
 
@@ -305,9 +328,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sync_placeholders_are_taken_too() {
+        let (_dir, db) = db().await;
+        let placeholder = db
+            .add_placeholder(peer(1), None, at(10), &Content::UndecryptableSync, at(50))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let taken = db.take_placeholders(peer(1), at(10)).await.unwrap();
+
+        assert_eq!(placeholder.content, Content::UndecryptableSync);
+        assert!(placeholder.read);
+        assert_eq!(taken, [removed_of(&placeholder)]);
+        db.close().await;
+    }
+
+    #[tokio::test]
     async fn changes_wait_for_the_message_behind_a_placeholder() {
         let (_dir, db) = db().await;
-        db.add_placeholder(peer(1), None, at(10), at(50))
+        db.add_placeholder(peer(1), None, at(10), &Content::Undecryptable, at(50))
             .await
             .unwrap();
         let edit = MessageChange {

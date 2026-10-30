@@ -4113,7 +4113,7 @@ async fn few_retry_requests_go_to_one_device() {
 }
 
 #[tokio::test]
-async fn retry_requests_pause_while_rate_limited() {
+async fn retry_requests_wait_while_rate_limited() {
     let clock = ManualClock::new(Timestamp::from_millis(NOW));
     let (_dir, mut running) = ready_at(&clock).await;
     running
@@ -4126,27 +4126,34 @@ async fn retry_requests_pause_while_rate_limited() {
     running.network.deliver(undecryptable(1, 100, None, false));
     flush(&mut running).await;
     running.network.deliver(undecryptable(2, 101, None, false));
+    running.network.deliver(undecryptable(2, 101, None, false));
     flush(&mut running).await;
     assert_eq!(running.network.retry_requests().len(), 1);
 
     clock.advance(Duration::from_secs(600));
+    until(&running, |network| network.retry_requests().len() == 3).await;
     running.network.deliver(undecryptable(2, 102, None, false));
     flush(&mut running).await;
     assert_eq!(
         running.network.retry_requests(),
-        [(service_id(1), retry(100)), (service_id(2), retry(102))]
+        [
+            (service_id(1), retry(100)),
+            (service_id(1), retry(100)),
+            (service_id(2), retry(101)),
+            (service_id(2), retry(102)),
+        ]
     );
     stop(running).await;
 }
 
 #[tokio::test]
-async fn hidden_and_own_undecryptable_content_gets_no_placeholder() {
+async fn hidden_undecryptable_content_gets_no_placeholder() {
     let (_dir, mut running) = ready().await;
 
     running.network.deliver(undecryptable(1, 100, None, false));
     running
         .network
-        .deliver(undecryptable(OWN_ID, 101, None, true));
+        .deliver(undecryptable(OWN_ID, 101, None, false));
     let events = flush(&mut running).await;
 
     assert_eq!(events, []);
@@ -4158,6 +4165,43 @@ async fn hidden_and_own_undecryptable_content_gets_no_placeholder() {
             (service_id(OWN_ID), retry(101))
         ]
     );
+    stop(running).await;
+}
+
+#[tokio::test]
+async fn undecryptable_syncs_show_in_note_to_self_until_resent() {
+    let (_dir, mut running) = ready().await;
+    let group = Some(GroupId::new([7; 32]));
+
+    running
+        .network
+        .deliver(undecryptable(OWN_ID, 101, group, true));
+
+    let placeholder = message_added(&mut running.events).await;
+    assert_eq!(placeholder.content, Content::UndecryptableSync);
+    assert!(placeholder.read);
+    let summary = conversation_updated(&mut running.events).await;
+    assert_eq!(summary.peer, Peer::Contact(service_id(OWN_ID)));
+    until(&running, |network| network.retry_requests().len() == 1).await;
+
+    running.network.deliver(Incoming::Sent(SentMessage {
+        destination: Destination::Contact(service_id(2)),
+        timestamp: Timestamp::from_millis(101),
+        content: Content::text("from my phone"),
+        expire_timer: None,
+    }));
+
+    assert_eq!(
+        next_event(&mut running.events).await,
+        Event::MessageRemoved {
+            conversation: placeholder.conversation,
+            id: placeholder.id,
+        }
+    );
+    conversation_updated(&mut running.events).await;
+    let resent = message_added(&mut running.events).await;
+    assert_eq!(resent.content, Content::text("from my phone"));
+    assert_ne!(resent.conversation, placeholder.conversation);
     stop(running).await;
 }
 

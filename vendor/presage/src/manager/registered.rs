@@ -2294,11 +2294,16 @@ impl<S: Store> Manager<S, Registered> {
             .await
     }
 
-    /// Sealed sender access to `recipient`, if we have their profile key.
+    /// Sealed sender access to `recipient`, if we have their profile key; never to ourselves:
+    /// the server can't tell which of our devices sent it, so it would want a copy for this
+    /// device too, and the send fails with mismatched devices.
     async fn unidentified_access(
         &self,
         recipient: &ServiceId,
     ) -> Result<Option<UnidentifiedAccess>, Error<S::Error>> {
+        if *recipient == ServiceId::from(self.state.data.service_ids.aci()) {
+            return Ok(None);
+        }
         let Some(profile_key) = self.store.profile_key(recipient).await? else {
             return Ok(None);
         };

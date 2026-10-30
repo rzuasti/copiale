@@ -1,7 +1,7 @@
 //! Serving a linked account: keeps a connection open, stores messages and
 //! answers queries.
 
-use std::cell::Cell;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -19,13 +19,12 @@ use super::groups::{Groups, Update};
 use super::outbox::{Outbox, Outcome, Sent};
 use super::previews::{self, Made, Previews};
 use super::probe::{Check, Probe};
-use super::retries::Limiter;
+use super::retries::{Limiter, Paused, PendingRetry};
 use super::run::{Core, ignored};
 use super::uploads::{self, Uploads};
 use super::{Command, DELETE_WINDOW, EDIT_WINDOW, Event, MAX_GROUP_MEMBERS, MAX_SENT_EDITS};
 use crate::backend::{
-    Ack, BackendError, CreatedGroup, Incoming, RetryRequest, SignalBackend, StoredChats,
-    Undecryptable,
+    Ack, BackendError, CreatedGroup, Incoming, SignalBackend, StoredChats, Undecryptable,
 };
 use crate::clock::Clock;
 use crate::model::{
@@ -76,9 +75,11 @@ struct Session<'a, B> {
     /// Retry requests we sent, and answered.
     retries_sent: Limiter,
     retries_answered: Limiter,
-    /// No retry requests go out before this, after the server rate limited
-    /// one; set by the requests running in the background.
-    retries_paused_until: Rc<Cell<Option<Timestamp>>>,
+    /// Retry requests held back by a rate limit; requests running in the
+    /// background pause them, and wake the loop to send them after.
+    retries_paused: Rc<RefCell<Paused>>,
+    retries_limited_tx: UnboundedSender<()>,
+    retries_limited_rx: UnboundedReceiver<()>,
     /// When we last told each conversation we're typing.
     typing_sent: HashMap<ConversationId, Instant>,
     next_expiry: Option<Timestamp>,
@@ -130,6 +131,7 @@ impl<'a, B: SignalBackend> Session<'a, B> {
         let (contacts_asked_tx, contacts_asked_rx) = unbounded_channel();
         let (stored_tx, stored_rx) = unbounded_channel();
         let (ends_checked_tx, ends_checked_rx) = unbounded_channel();
+        let (retries_limited_tx, retries_limited_rx) = unbounded_channel();
         let options = &core.options;
         Self {
             device_name: backend.device_name(),
@@ -142,7 +144,9 @@ impl<'a, B: SignalBackend> Session<'a, B> {
             groups: Groups::new(),
             retries_sent: Limiter::new(RETRY_WINDOW, MAX_RETRY_REQUESTS_PER_DEVICE),
             retries_answered: Limiter::new(RETRY_WINDOW, MAX_RETRIES_ANSWERED_PER_DEVICE),
-            retries_paused_until: Rc::default(),
+            retries_paused: Rc::default(),
+            retries_limited_tx,
+            retries_limited_rx,
             typing_sent: HashMap::new(),
             next_expiry: None,
             contacts_wanted: false,
@@ -248,6 +252,10 @@ impl<'a, B: SignalBackend> Session<'a, B> {
             }
             let wait = self.retry_at.unwrap_or_else(Instant::now);
             let drain_wait = self.drain_by.unwrap_or_else(Instant::now);
+            let (retries_until, retries_waiting) = {
+                let paused = self.retries_paused.borrow();
+                (paused.until, !paused.waiting.is_empty())
+            };
             let served = tokio::select! {
                 command = self.core.commands.recv(), if !self.stopping => self.command(command).await,
                 result = maybe(&mut self.connecting) => {
@@ -286,6 +294,11 @@ impl<'a, B: SignalBackend> Session<'a, B> {
                 }
                 Some((key, result)) = self.ends_checked_rx.recv() => {
                     self.end_checked(key, result).await;
+                    None
+                }
+                Some(()) = self.retries_limited_rx.recv() => None,
+                () = due(&*self.core.options.clock, retries_until), if retries_waiting => {
+                    self.send_waiting_retries();
                     None
                 }
                 check = self.probe.next() => self.probe_check(check).await,
@@ -1435,19 +1448,30 @@ impl<'a, B: SignalBackend> Session<'a, B> {
             device = failure.device,
             "a message couldn't be decrypted"
         );
-        self.ask_resend(
-            failure.sender,
-            failure.device,
-            failure.sent_at,
-            failure.retry,
-        );
-        // Our other devices send syncs, which have no chat of their own.
-        if !failure.shown || failure.sender == self.backend.own_id() {
+        self.ask_resend(PendingRetry {
+            sender: failure.sender,
+            device: failure.device,
+            sent_at: failure.sent_at,
+            retry: failure.retry,
+        });
+        if !failure.shown {
             return;
         }
+        // Our other devices send syncs, which have no chat of their own.
+        let (group, placeholder) = if failure.sender == self.backend.own_id() {
+            (None, Content::UndecryptableSync)
+        } else {
+            (failure.group, Content::Undecryptable)
+        };
         match self
             .db
-            .add_placeholder(failure.sender, failure.group, failure.sent_at, self.now())
+            .add_placeholder(
+                failure.sender,
+                group,
+                failure.sent_at,
+                &placeholder,
+                self.now(),
+            )
             .await
         {
             Ok(Some(message)) => {
@@ -1460,30 +1484,33 @@ impl<'a, B: SignalBackend> Session<'a, B> {
         }
     }
 
-    /// Asks for a message to be sent again, unless asked already, too often,
-    /// or the server rate limited us lately.
-    fn ask_resend(
-        &mut self,
-        sender: ServiceId,
-        device: u32,
-        sent_at: Timestamp,
-        retry: RetryRequest,
-    ) {
-        if self
-            .retries_paused_until
-            .get()
-            .is_some_and(|until| self.now() < until)
-        {
-            return tracing::debug!("retry requests paused while rate limited");
-        }
-        if !self
-            .retries_sent
-            .allow(sender, device, sent_at, Instant::now())
-        {
+    /// Asks for a message to be sent again, unless asked already or too
+    /// often; it waits while the server rate limits us.
+    fn ask_resend(&mut self, request: PendingRetry) {
+        if !self.retries_sent.allow(
+            request.sender,
+            request.device,
+            request.sent_at,
+            Instant::now(),
+        ) {
             return tracing::debug!("retry request already sent, or too many");
         }
-        let send = self.backend.send_retry_request(sender, retry);
-        let paused_until = self.retries_paused_until.clone();
+        let mut paused = self.retries_paused.borrow_mut();
+        if paused.at(self.now()) {
+            return paused.wait(request);
+        }
+        drop(paused);
+        self.send_retry_request(request);
+    }
+
+    /// Sends a retry request in the background; if rate limited, it pauses
+    /// them and waits.
+    fn send_retry_request(&mut self, request: PendingRetry) {
+        let send = self
+            .backend
+            .send_retry_request(request.sender, request.retry.clone());
+        let paused = self.retries_paused.clone();
+        let limited = self.retries_limited_tx.clone();
         let clock = self.core.options.clock.clone();
         tokio::task::spawn_local(async move {
             match send.await {
@@ -1492,18 +1519,33 @@ impl<'a, B: SignalBackend> Session<'a, B> {
                     let wait = error.retry_after().unwrap_or(RATE_LIMIT_PAUSE);
                     let wait_ms = u64::try_from(wait.as_millis()).unwrap_or(u64::MAX);
                     let until = clock.now().as_millis().saturating_add(wait_ms);
-                    let until = Timestamp::from_millis(until);
-                    if paused_until.get().is_none_or(|paused| paused < until) {
+                    let mut paused = paused.borrow_mut();
+                    if paused.extend(Timestamp::from_millis(until)) {
                         tracing::info!(
                             seconds = wait.as_secs(),
                             "retry requests rate limited; paused"
                         );
-                        paused_until.set(Some(until));
                     }
+                    paused.wait(request);
+                    let _ = limited.send(());
                 }
                 Err(error) => tracing::info!(%error, "sending a retry request failed"),
             }
         });
+    }
+
+    /// Sends the retry requests that waited, once the pause is over.
+    fn send_waiting_retries(&mut self) {
+        let mut paused = self.retries_paused.borrow_mut();
+        if paused.at(self.now()) {
+            return;
+        }
+        let waiting = paused.waiting.take();
+        drop(paused);
+        tracing::info!(count = waiting.len(), "sending retry requests that waited");
+        for request in waiting {
+            self.send_retry_request(request);
+        }
     }
 
     /// Resends our message that `sender`'s `device` couldn't decrypt, if
@@ -2316,12 +2358,12 @@ impl<'a, B: SignalBackend> Session<'a, B> {
             tracing::debug!("expired message not stored");
             return;
         }
-        // It replaces the placeholder shown while it couldn't be decrypted.
-        if let Some(author) = author {
-            match self.db.take_placeholders(author, sent_at).await {
-                Ok(placeholders) => self.removed(placeholders).await,
-                Err(error) => self.database_error(error),
-            }
+        // It replaces the placeholder shown while it couldn't be decrypted;
+        // ours, from another device, had it in Note to Self.
+        let placeholder_author = author.unwrap_or_else(|| self.backend.own_id());
+        match self.db.take_placeholders(placeholder_author, sent_at).await {
+            Ok(placeholders) => self.removed(placeholders).await,
+            Err(error) => self.database_error(error),
         }
         let added = self
             .db

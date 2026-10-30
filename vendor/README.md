@@ -55,6 +55,10 @@ each one once its patches are merged and the pin is updated.
     Upstream: merged as `ba60565`
     ([whisperfish/libsignal-service-rs#498](https://github.com/whisperfish/libsignal-service-rs/pull/498));
     drop it once presage pins a revision with it.
+  - `patches/libsignal-service-unusable-sessions.patch`. A session archived
+    after a retry request, or stale, failed to encrypt and was deleted with
+    its earlier states before trying again; a send now starts a new session
+    over it, as when none is stored. Not upstream yet.
 - **Used via:** `[patch."https://github.com/whisperfish/libsignal-service-rs"]`
   in the root `Cargo.toml`.
 
@@ -81,7 +85,9 @@ libsignal-service git hash back to `nix/package.nix`.
     return what went out and the devices it reached (`SentContent`), to
     resend with
     `Manager::resend_content`; `Manager::send_null_message` starts a new
-    session. Not upstream yet.
+    session. None of them go sealed to our own account: the server would
+    want a copy for the sending device too, failing every attempt with
+    mismatched devices. Not upstream yet.
   - `patches/presage-refresh-group.patch`. `Manager::refresh_group`
     fetches and stores a group's state whatever revision is stored, to
     check a sender missing from it before dropping their message.

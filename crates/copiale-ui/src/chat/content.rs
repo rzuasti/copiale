@@ -58,9 +58,10 @@ pub fn placeholders(content: &Content) -> Vec<String> {
         }
         Content::Deleted => vec!["this message was deleted".into()],
         Content::Undecryptable => vec!["this message couldn't be decrypted".into()],
-        Content::GroupChanged(_) | Content::TimerChanged(_) | Content::SafetyNumberChanged => {
-            Vec::new()
-        }
+        Content::GroupChanged(_)
+        | Content::TimerChanged(_)
+        | Content::SafetyNumberChanged
+        | Content::UndecryptableSync => Vec::new(),
     }
 }
 
@@ -171,6 +172,9 @@ pub fn system_lines(
             .collect(),
         Content::TimerChanged(seconds) => vec![timer_line(*seconds, actor)],
         Content::SafetyNumberChanged => vec![format!("your safety number with {actor} changed")],
+        Content::UndecryptableSync => {
+            vec!["a message sent from another of your devices couldn't be decrypted".into()]
+        }
         _ => Vec::new(),
     }
 }
@@ -352,6 +356,11 @@ mod tests {
             placeholders(&Content::Undecryptable),
             ["this message couldn't be decrypted"]
         );
+        assert_eq!(
+            system_lines(&Content::UndecryptableSync, "you", named),
+            ["a message sent from another of your devices couldn't be decrypted"]
+        );
+        assert!(placeholders(&Content::UndecryptableSync).is_empty());
     }
 
     fn reply(author: Option<ServiceId>, text: &str, attachment: Option<AttachmentKind>) -> Content {

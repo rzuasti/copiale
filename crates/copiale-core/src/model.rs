@@ -180,6 +180,9 @@ pub enum Content {
     Deleted,
     /// Couldn't be decrypted; replaced if the sender resends it.
     Undecryptable,
+    /// Sent from another of our devices and couldn't be decrypted; shown in
+    /// Note to Self, and replaced if resent.
+    UndecryptableSync,
     /// The author's identity key, so their safety number, changed.
     SafetyNumberChanged,
 }
@@ -205,7 +208,10 @@ impl Content {
     pub fn is_system(&self) -> bool {
         matches!(
             self,
-            Self::GroupChanged(_) | Self::TimerChanged(_) | Self::SafetyNumberChanged
+            Self::GroupChanged(_)
+                | Self::TimerChanged(_)
+                | Self::SafetyNumberChanged
+                | Self::UndecryptableSync
         )
     }
 
@@ -239,6 +245,7 @@ impl fmt::Debug for Content {
             Self::TimerChanged(seconds) => f.debug_tuple("TimerChanged").field(seconds).finish(),
             Self::Deleted => f.write_str("Deleted"),
             Self::Undecryptable => f.write_str("Undecryptable"),
+            Self::UndecryptableSync => f.write_str("UndecryptableSync"),
             Self::SafetyNumberChanged => f.write_str("SafetyNumberChanged"),
         }
     }

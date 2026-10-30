@@ -1,0 +1,52 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ricardo Zuasti <rzuasti@pm.me>
+Date: Fri, 30 Oct 2026 17:48:44 -0400
+Subject: [PATCH] fix: start a new session when the stored one can't encrypt
+
+MessageSender only started a session when none was stored. A session
+archived after a retry request, or gone stale, made encrypting fail with
+SessionNotFound instead; the session was then deleted, with its earlier
+states, before trying again. Now such a session gets a new current state
+from a pre-key bundle, as when none is stored.
+---
+ src/sender.rs | 17 +++++++++++++----
+ 1 file changed, 13 insertions(+), 4 deletions(-)
+
+diff --git a/src/sender.rs b/src/sender.rs
+index dfac83f..4ee194f 100644
+--- a/src/sender.rs
++++ b/src/sender.rs
+@@ -5,7 +5,8 @@ use libsignal_core::{curve::CurveError, InvalidDeviceId};
+ use libsignal_protocol::{
+     process_prekey_bundle, Aci, DecryptionErrorMessage, DeviceId, IdentityKey,
+     IdentityKeyPair, PlaintextContent, Pni, ProtocolStore, SenderCertificate,
+-    SenderKeyStore, ServiceId, SessionNotFound, SignalProtocolError,
++    SenderKeyStore, ServiceId, SessionNotFound, SessionUsabilityRequirements,
++    SignalProtocolError,
+ };
+ use rand::{rng, CryptoRng, Rng};
+ use tracing::{debug, error, info, trace, warn};
+@@ -1167,12 +1168,20 @@ where
+ 
+         // establish a session with the recipient/device if necessary
+         // no need to establish a session with ourselves (and our own current device)
+-        if self
++        // an archived or stale session can't encrypt: start a new one, keeping the old states
++        let usable = self
+             .protocol_store
+             .load_session(&recipient_protocol_address)
+             .await?
+-            .is_none()
+-        {
++            .is_some_and(|session| {
++                session
++                    .has_usable_sender_chain(
++                        SystemTime::now(),
++                        SessionUsabilityRequirements::NotStale,
++                    )
++                    .unwrap_or(false)
++            });
++        if !usable {
+             info!(
+                 "establishing new session with {}",
+                 recipient_protocol_address

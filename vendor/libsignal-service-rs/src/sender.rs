@@ -5,7 +5,8 @@ use libsignal_core::{curve::CurveError, InvalidDeviceId};
 use libsignal_protocol::{
     process_prekey_bundle, Aci, DecryptionErrorMessage, DeviceId, IdentityKey,
     IdentityKeyPair, PlaintextContent, Pni, ProtocolStore, SenderCertificate,
-    SenderKeyStore, ServiceId, SessionNotFound, SignalProtocolError,
+    SenderKeyStore, ServiceId, SessionNotFound, SessionUsabilityRequirements,
+    SignalProtocolError,
 };
 use rand::{rng, CryptoRng, Rng};
 use tracing::{debug, error, info, trace, warn};
@@ -1167,12 +1168,20 @@ where
 
         // establish a session with the recipient/device if necessary
         // no need to establish a session with ourselves (and our own current device)
-        if self
+        // an archived or stale session can't encrypt: start a new one, keeping the old states
+        let usable = self
             .protocol_store
             .load_session(&recipient_protocol_address)
             .await?
-            .is_none()
-        {
+            .is_some_and(|session| {
+                session
+                    .has_usable_sender_chain(
+                        SystemTime::now(),
+                        SessionUsabilityRequirements::NotStale,
+                    )
+                    .unwrap_or(false)
+            });
+        if !usable {
             info!(
                 "establishing new session with {}",
                 recipient_protocol_address
