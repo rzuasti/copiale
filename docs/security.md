@@ -16,8 +16,10 @@ screen captures.
     `fs.suid_dumpable = 2` anyway.
   - Windows: the executable is excluded from Windows Error Reporting for
     the user (`WerAddExcludedApplication`), and reports still made leave
-    out the heap. Dumps an administrator enables through `LocalDumps` are
-    still written.
+    out the heap. Under MSIX the manifest exempts that registry key from
+    redirection (all of HKCU on Windows 10), or Windows would never see the
+    exclusion; it stays after uninstalling. Dumps an administrator enables
+    through `LocalDumps` are still written.
   - `COPIALE_UNSAFE_CORE_DUMPS=1` skips it, for debugging crashes. On
     Windows the exclusion stays in the registry; use `LocalDumps`.
 - **Database closed on every exit from the core**, panics included:

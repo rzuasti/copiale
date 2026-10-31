@@ -30,6 +30,18 @@ fn starts_at_login_only_if_enabled() {
 }
 
 #[test]
+fn crash_report_exclusion_reaches_the_real_registry() {
+    assert!(MANIFEST.contains(
+        r"<virtualization:ExcludedKey>HKEY_CURRENT_USER\Software\Microsoft\Windows\Windows Error Reporting\ExcludedApplications<"
+    ));
+    assert!(MANIFEST.contains("<desktop6:RegistryWriteVirtualization>disabled<"));
+    assert_eq!(
+        value(r#"<rescap:Capability Name="runFullTrust"/>"#, "Name"),
+        "unvirtualizedResources"
+    );
+}
+
+#[test]
 fn has_its_icons() {
     let logo = MANIFEST.split_once("<Logo>").unwrap().1;
     let logo = logo.split_once('<').unwrap().0;

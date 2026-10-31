@@ -5,8 +5,10 @@
   xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
   xmlns:uap3="http://schemas.microsoft.com/appx/manifest/uap/windows10/3"
   xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
+  xmlns:desktop6="http://schemas.microsoft.com/appx/manifest/desktop/windows10/6"
   xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
-  IgnorableNamespaces="uap uap3 desktop rescap">
+  xmlns:virtualization="http://schemas.microsoft.com/appx/manifest/virtualization/windows10"
+  IgnorableNamespaces="uap uap3 desktop desktop6 rescap virtualization">
   <Identity
     Name="page.codeberg.korba.Copiale"
     Publisher="CN=Copiale"
@@ -16,6 +18,15 @@
     <DisplayName>Copiale</DisplayName>
     <PublisherDisplayName>Ricardo Zuasti</PublisherDisplayName>
     <Logo>assets\StoreLogo.png</Logo>
+    <!-- Windows Error Reporting reads the real HKCU, so the exclusion must
+         reach it (copiale_core::hardening). Windows 11 uses the key below;
+         Windows 10 ignores it, and uses the switch for all of HKCU. -->
+    <desktop6:RegistryWriteVirtualization>disabled</desktop6:RegistryWriteVirtualization>
+    <virtualization:RegistryWriteVirtualization>
+      <virtualization:ExcludedKeys>
+        <virtualization:ExcludedKey>HKEY_CURRENT_USER\Software\Microsoft\Windows\Windows Error Reporting\ExcludedApplications</virtualization:ExcludedKey>
+      </virtualization:ExcludedKeys>
+    </virtualization:RegistryWriteVirtualization>
   </Properties>
   <Dependencies>
     <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.19041.0" MaxVersionTested="10.0.26100.0"/>
@@ -47,5 +58,6 @@
   </Applications>
   <Capabilities>
     <rescap:Capability Name="runFullTrust"/>
+    <rescap:Capability Name="unvirtualizedResources"/>
   </Capabilities>
 </Package>
