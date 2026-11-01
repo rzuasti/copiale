@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.3.0 - 2026-11-01
+
+Windows, and a global hotkey.
+
+- **Windows**: a first package for Windows 11 (x64), with notifications,
+  tray, video and start at login. It isn't signed yet, so it installs from
+  an administrator PowerShell, and it doesn't update on its own; see the
+  README.
+- **Global hotkey** on Windows and macOS: set `window.hotkey` in the settings
+  (off by default) to show or hide Copiale from any app. On Linux, keep
+  binding a key to `copiale --toggle`.
+- **Failed decryptions**: messages that couldn't be decrypted are recovered
+  more reliably, and requests held back by rate limits go out once the limit
+  ends. Messages from your other devices that couldn't be decrypted show as a
+  line in Note to Self until they're resent.
+
 ## 0.2.0 - 2026-10-26
 
 Attachments and new groups.
