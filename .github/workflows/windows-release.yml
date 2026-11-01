@@ -1,0 +1,60 @@
+# Prepares the Windows package for a release tag (#100): the attested one the
+# `main` run built for the tagged commit, unsigned until SignPath accepts the
+# project (docs/code-signing.md).
+name: Windows release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      id-token: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ github.ref_name }}
+    steps:
+      - name: Package
+        run: |
+          run=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow windows.yml --commit "$GITHUB_SHA" \
+            --event workflow_dispatch --branch main --status success --limit 1 --json databaseId --jq '.[0].databaseId')
+          if [ -z "$run" ]; then
+            echo "::error::No passing Windows run on main for $GITHUB_SHA"
+            exit 1
+          fi
+          gh run download "$run" --repo "$GITHUB_REPOSITORY" --name copiale.msix --dir built
+          gh attestation verify built/copiale.msix --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/windows.yml" \
+            --source-digest "$GITHUB_SHA" --source-ref refs/heads/main
+          packaged=$(unzip -p built/copiale.msix AppxManifest.xml | tr -s ' \r\n' ' ' |
+            grep -oP '<Identity\b[^>]*\sVersion="\K[0-9.]+')
+          # Pre-release tags (v1.2.3-rc.1) carry version 1.2.3.
+          case "${VERSION#v}" in
+            "${packaged%.0}" | "${packaged%.0}"-*) ;;
+            *)
+              echo "::error::Tag $VERSION, package version $packaged"
+              exit 1
+              ;;
+          esac
+          msix="Copiale-${VERSION#v}.msix"
+          mv built/copiale.msix "$msix"
+          sha256sum "$msix" >"$msix.sha256"
+          echo "MSIX=$msix" >>"$GITHUB_ENV"
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ env.MSIX }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: Copiale.msix
+          path: |
+            ${{ env.MSIX }}
+            ${{ env.MSIX }}.sha256
+          retention-days: 30

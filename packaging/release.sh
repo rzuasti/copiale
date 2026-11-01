@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Releases Copiale (#84): changelog, version bump, macOS CI, tag, signed .dmg
-# and a draft Codeberg release. Each step is skipped once done, so a failed
-# run resumes by running the same command again. See docs/release-macos.md.
+# Releases Copiale (#84): changelog, version bump, macOS and Windows CI, tag,
+# signed .dmg, .msix and a draft Codeberg release. Each step is skipped once
+# done, so a failed run resumes by running the same command again. See
+# docs/release.md.
 #
 #   release <version> [--approved]   --approved: release notes already approved
 #   release publish <version>
@@ -9,6 +10,7 @@
 CODEBERG_REPO=korba/copiale
 CODEBERG_API=https://codeberg.org/api/v1/repos/$CODEBERG_REPO
 GITHUB_REPO=rzuasti/copiale
+BUILD_WORKFLOWS=(macos.yml windows.yml)
 TOKEN_ENTRY=codeberg-release-token
 DRAFT_MARKER='<!-- Draft from git log: summarise, remove this line, run release again. -->'
 
@@ -153,18 +155,22 @@ push_main() {
   esac
 }
 
-# Starts macos.yml on GitHub's main unless it already ran for commit $1,
-# then follows that run.
+# Starts each build workflow on GitHub's main unless it already ran for
+# commit $1, then follows those runs.
 build() {
-  local runs
-  runs=$(gh run list -R "$GITHUB_REPO" --workflow macos.yml --event workflow_dispatch \
-    --branch main --commit "$1" --limit 1 --json databaseId --jq length)
-  if [ "$runs" = 0 ]; then
-    [ "$(gh api "repos/$GITHUB_REPO/commits/main" --jq .sha)" = "$1" ] || die "GitHub's main isn't $1"
-    say "Starting macos.yml"
-    gh workflow run macos.yml -R "$GITHUB_REPO" --ref main
-  fi
-  follow_run macos.yml --event workflow_dispatch --branch main --commit "$1" >/dev/null
+  local workflow runs
+  for workflow in "${BUILD_WORKFLOWS[@]}"; do
+    runs=$(gh run list -R "$GITHUB_REPO" --workflow "$workflow" --event workflow_dispatch \
+      --branch main --commit "$1" --limit 1 --json databaseId --jq length)
+    if [ "$runs" = 0 ]; then
+      [ "$(gh api "repos/$GITHUB_REPO/commits/main" --jq .sha)" = "$1" ] || die "GitHub's main isn't $1"
+      say "Starting $workflow"
+      gh workflow run "$workflow" -R "$GITHUB_REPO" --ref main
+    fi
+  done
+  for workflow in "${BUILD_WORKFLOWS[@]}"; do
+    follow_run "$workflow" --event workflow_dispatch --branch main --commit "$1" >/dev/null
+  done
 }
 
 # Follows the newest run of workflow $1 matching the `gh run list` filters
@@ -207,20 +213,25 @@ tag() {
   fi
 }
 
-# Downloads the signed .dmg of run $3 into target/dist/$1 and checks it was
-# built and signed from commit $2 by the release workflow.
-fetch_dmg() {
-  local dir=target/dist/$1 dmg=Copiale-$1.dmg
-  if [ ! -f "$dir/$dmg.sha256" ]; then
-    rm -rf "$dir"
-    gh run download "$3" -R "$GITHUB_REPO" --name Copiale.dmg --dir "$dir"
+# What a release of version $1 uploads.
+assets() {
+  printf '%s\n' "Copiale-$1.dmg" "Copiale-$1.dmg.sha256" "Copiale-$1.msix" "Copiale-$1.msix.sha256"
+}
+
+# Downloads the .$2 of run $4 (of workflow $3) into target/dist/$1 and checks
+# it came from commit $5 through that workflow.
+fetch_package() {
+  local dir=target/dist/$1 file=Copiale-$1.$2
+  if [ ! -f "$dir/$file.sha256" ]; then
+    rm -f "$dir/$file"
+    gh run download "$4" -R "$GITHUB_REPO" --name "Copiale.$2" --dir "$dir"
   fi
-  (cd "$dir" && sha256sum --check --quiet "$dmg.sha256") || die "$dir/$dmg: checksum mismatch"
-  gh attestation verify "$dir/$dmg" -R "$GITHUB_REPO" \
-    --signer-workflow "$GITHUB_REPO/.github/workflows/macos-release.yml" \
-    --source-digest "$2" --source-ref "refs/tags/v$1" --deny-self-hosted-runners >/dev/null ||
-    die "$dir/$dmg: attestation doesn't match v$1"
-  say "Verified $dir/$dmg"
+  (cd "$dir" && sha256sum --check --quiet "$file.sha256") || die "$dir/$file: checksum mismatch"
+  gh attestation verify "$dir/$file" -R "$GITHUB_REPO" \
+    --signer-workflow "$GITHUB_REPO/.github/workflows/$3" \
+    --source-digest "$5" --source-ref "refs/tags/v$1" --deny-self-hosted-runners >/dev/null ||
+    die "$dir/$file: attestation doesn't match v$1"
+  say "Verified $dir/$file"
 }
 
 load_token() {
@@ -240,25 +251,26 @@ release_id() {
   api GET "/releases?limit=50" | jq -r --arg tag "v$1" 'first(.[] | select(.tag_name == $tag) | .id) // empty'
 }
 
-# Creates the draft release for version $1, uploading the .dmg and checksum.
+# Creates the draft release for version $1, uploading its assets.
 draft_release() {
   local id body name existing
   id=$(release_id "$1")
   if [ -z "$id" ]; then
-    body=$(printf '%s\n\n%s\n' "$(changelog_section "$1")" \
-      "Verify the download: \`shasum -a 256 -c Copiale-$1.dmg.sha256\`; its provenance (built and signed by GitHub Actions from this tag): \`gh attestation verify Copiale-$1.dmg -R $GITHUB_REPO\`.")
+    body=$(printf '%s\n\n%s\n\n%s\n' "$(changelog_section "$1")" \
+      "Verify a download: \`shasum -a 256 -c Copiale-$1.dmg.sha256\`; its provenance (built by GitHub Actions from this tag): \`gh attestation verify Copiale-$1.dmg -R $GITHUB_REPO\`. The same goes for the \`.msix\`." \
+      "Windows: the \`.msix\` isn't signed yet, so it needs [these steps](https://codeberg.org/$CODEBERG_REPO#windows). [Code signing policy](https://codeberg.org/$CODEBERG_REPO/src/branch/main/docs/code-signing.md).")
     id=$(jq -n --arg tag "v$1" --arg name "Copiale $1" --arg body "$body" \
       '{tag_name: $tag, name: $name, body: $body, draft: true}' |
       api POST /releases -H 'Content-Type: application/json' --data @- | jq -r .id)
     say "Created the draft Codeberg release"
   fi
   existing=$(api GET "/releases/$id/assets" | jq -r '.[].name')
-  for name in "Copiale-$1.dmg" "Copiale-$1.dmg.sha256"; do
+  while read -r name; do
     if ! grep -qxF "$name" <<<"$existing"; then
       say "Uploading $name"
       api POST "/releases/$id/assets?name=$name" -F "attachment=@target/dist/$1/$name" >/dev/null
     fi
-  done
+  done < <(assets "$1")
 }
 
 publish() {
@@ -271,7 +283,8 @@ publish() {
     say "v$1 is already published"
     return
   fi
-  [ "$(jq '.assets | length' <<<"$release")" -ge 2 ] || die "the v$1 draft is missing its .dmg or checksum; run release $1 again"
+  [ "$(jq '.assets | length' <<<"$release")" -ge "$(assets "$1" | wc -l)" ] ||
+    die "the v$1 draft is missing a package or checksum; run release $1 again"
   api PATCH "/releases/$id" -H 'Content-Type: application/json' --data '{"draft": false}' >/dev/null
   say "Published https://codeberg.org/$CODEBERG_REPO/releases/tag/v$1"
 }
@@ -288,18 +301,20 @@ release() {
   build "$commit"
   tag "$1" "$commit"
   run=$(follow_run macos-release.yml --event push --branch "v$1" --commit "$commit")
-  fetch_dmg "$1" "$commit" "$run"
+  fetch_package "$1" dmg macos-release.yml "$run" "$commit"
+  run=$(follow_run windows-release.yml --event push --branch "v$1" --commit "$commit")
+  fetch_package "$1" msix windows-release.yml "$run" "$commit"
   load_token
   draft_release "$1"
   if have_tty; then
-    read -r -p "Smoke-tested target/dist/$1/Copiale-$1.dmg on the Mac? Publish? [y/N] " answer </dev/tty
+    read -r -p "Smoke-tested target/dist/$1 on the Mac and in the Windows VM? Publish? [y/N] " answer </dev/tty
     if [[ $answer == [yY]* ]]; then
       publish "$1"
       return
     fi
   fi
   say "Draft release ready: https://codeberg.org/$CODEBERG_REPO/releases"
-  say "After the Mac smoke test: nix run .#release -- publish $1"
+  say "After the smoke tests: nix run .#release -- publish $1"
 }
 
 main() {

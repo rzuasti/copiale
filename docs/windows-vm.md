@@ -75,7 +75,12 @@ Unsigned packages install only from an administrator prompt, for all users,
 and their publisher carries a special OID, so they never upgrade to or from a
 signed one. The first line also removes the previous test's data. Start it from
 the Start menu, or as `copiale` from a terminal. Its data and logs are in
-`%LOCALAPPDATA%\Packages\page.codeberg.korba.Copiale_*\LocalCache\Local\korba\Copiale\data`.
+`%LOCALAPPDATA%\Packages\page.codeberg.korba.Copiale_*\LocalCache\Local\korba\Copiale\data`,
+its `config.toml` under `LocalCache\Roaming\korba\Copiale\config`.
+
+Folders the plain `copiale.exe` left behind aren't redirected: the package uses
+them, and they outlive it. To test a clean install, first delete
+`%LOCALAPPDATA%\korba` and `%APPDATA%\korba`.
 
 ## Known limits
 

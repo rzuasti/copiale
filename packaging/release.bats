@@ -183,14 +183,14 @@ fake_gh() {
   [[ $output == *"run 42 failed"* ]]
 }
 
-@test "build starts macos.yml once, for GitHub's main only" {
+@test "build starts each workflow once, for GitHub's main only" {
   sleep() { :; }
   # Lists run 42 once started; GitHub's main is abc.
   gh() {
     case "$1 $2" in
       "run list")
         if [[ $* == *length* ]]; then
-          [ -f "$BATS_TEST_TMPDIR/started" ] && echo 1 || echo 0
+          grep -qs "$6" "$BATS_TEST_TMPDIR/started" && echo 1 || echo 0
         else
           echo 42
         fi
@@ -204,5 +204,40 @@ fake_gh() {
   [[ $output == *"GitHub's main isn't def"* ]]
   build abc
   build abc
-  [ "$(cat "$BATS_TEST_TMPDIR/started")" = "workflow run macos.yml -R rzuasti/copiale --ref main" ]
+  [ "$(cat "$BATS_TEST_TMPDIR/started")" = "$(printf '%s\n' \
+    "workflow run macos.yml -R rzuasti/copiale --ref main" \
+    "workflow run windows.yml -R rzuasti/copiale --ref main")" ]
+}
+
+@test "a package is checked against its workflow and tag" {
+  mkdir -p target/dist/0.2.0
+  cd target/dist/0.2.0
+  echo package >Copiale-0.2.0.msix
+  sha256sum Copiale-0.2.0.msix >Copiale-0.2.0.msix.sha256
+  cd - >/dev/null
+  gh() { echo "$*" >"$BATS_TEST_TMPDIR/gh"; }
+  fetch_package 0.2.0 msix windows-release.yml 42 abc
+  [[ $(cat "$BATS_TEST_TMPDIR/gh") == *"--signer-workflow rzuasti/copiale/.github/workflows/windows-release.yml"* ]]
+  [[ $(cat "$BATS_TEST_TMPDIR/gh") == *"--source-digest abc --source-ref refs/tags/v0.2.0"* ]]
+  echo tampered >target/dist/0.2.0/Copiale-0.2.0.msix
+  run fetch_package 0.2.0 msix windows-release.yml 42 abc
+  [ "$status" -eq 1 ]
+}
+
+@test "publishing needs every asset" {
+  load_token() { :; }
+  release_id() { echo 7; }
+  api() {
+    case "$1" in
+      GET) printf '{"draft": true, "assets": [%s]}' "$ASSETS" ;;
+      PATCH) touch "$BATS_TEST_TMPDIR/published" ;;
+    esac
+  }
+  ASSETS='{}, {}'
+  run publish 0.2.0
+  [ "$status" -eq 1 ]
+  [[ $output == *"missing a package or checksum"* ]]
+  ASSETS='{}, {}, {}, {}'
+  publish 0.2.0
+  [ -f "$BATS_TEST_TMPDIR/published" ]
 }

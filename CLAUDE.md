@@ -141,14 +141,17 @@ went unsolved until 2011.
     builds and attests `main` on demand, `macos-release.yml` signs that build
     for a `v*` tag. Signing secrets live only in the mirror's `release`
     environment (`v*` tags only). Releases: `nix run .#release -- <version>`
-    (`docs/release-macos.md`); its changelog section is approved by the user
+    (`docs/release.md`); its changelog section is approved by the user
     before it's committed.
-  - Windows: signed MSIX downloaded from Codeberg Releases (no Microsoft Store),
+  - Windows: MSIX downloaded from Codeberg Releases (no Microsoft Store),
+    unsigned for now (Windows 11, installed from an administrator prompt); to be
     signed through SignPath Foundation (Certum Open Source certificate if
-    declined); updates through an `.appinstaller` on Codeberg Pages (#100).
-    `windows.yml` on the mirror checks and builds `copiale.exe` on demand
-    (static C runtime); tried in a Windows 11 evaluation VM only,
-    `nix run .#windows-vm` (x86_64-linux; `docs/windows-vm.md`).
+    declined; `docs/code-signing.md`), with updates through an `.appinstaller`
+    on Codeberg Pages (#100). `windows.yml` on the mirror checks and builds
+    `copiale.exe` (static C runtime) and the attested package on demand,
+    `windows-release.yml` names that package for a `v*` tag. Tried in a
+    Windows 11 evaluation VM only, `nix run .#windows-vm` (x86_64-linux;
+    `docs/windows-vm.md`).
   - The mirror isn't synced from Codeberg: before a macOS or Windows build,
     push `main` (and tags) to the `github` remote by hand.
 

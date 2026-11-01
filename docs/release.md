@@ -7,8 +7,10 @@ nix run .#release -- 0.2.0
 ```
 
 GitHub Actions on the mirror (github.com/rzuasti/copiale) builds, signs and
-notarizes the macOS `.dmg`; nothing is signed locally. Each step is skipped
-once done, so after any failure, fix the cause and run the same command again.
+notarizes the macOS `.dmg` and builds the Windows `.msix` (unsigned until
+SignPath accepts the project: `code-signing.md`, #100); nothing is signed
+locally. Each step is skipped once done, so after any failure, fix the cause
+and run the same command again.
 
 ## Steps
 
@@ -22,23 +24,25 @@ once done, so after any failure, fix the cause and run the same command again.
    was approved elsewhere, e.g. with Claude); it becomes the release notes.
 3. **Release commit**: workspace version and `Cargo.lock` bumped, heading
    dated, committed as `Release vX.Y.Z`.
-4. **Push** `main` to Codeberg and GitHub, then start the `macos.yml` run
-   for the commit (it only runs on demand) and follow it (~25 min). A failed
-   run stops here: fix it, or rerun it
+4. **Push** `main` to Codeberg and GitHub, then start the `macos.yml` and
+   `windows.yml` runs for the commit (they only run on demand) and follow them
+   (~25 min each). A failed run stops here: fix it, or rerun it
    (`gh run rerun <id> --failed -R rzuasti/copiale`), then run again.
 5. **Tag** `vX.Y.Z` (annotated) and push it to both remotes. GitHub's
    `macos-release.yml` signs the app built for that commit, and signs and
    notarizes its `.dmg`; the command follows it. Apple sometimes sits on a
    submission for days, so the `notarize` job submits again every 2 hours;
    if it times out (6h), rerun it (`gh run rerun <id> --failed`) and run
-   again.
-6. **Verify**: the `.dmg` and checksum are downloaded to `target/dist/X.Y.Z/`;
-   the checksum and the attestation (`macos-release.yml`, the tag, the
-   commit, GitHub-hosted runner) are checked.
-7. **Draft release** on Codeberg with the changelog section, `.dmg` and
-   checksum.
-8. **Publish**: smoke test the `.dmg` on the Mac (#85), then answer the
-   prompt. Without a terminal, or to publish later:
+   again. `windows-release.yml` takes the package built for that commit and
+   names it for the release.
+6. **Verify**: the `.dmg`, `.msix` and checksums are downloaded to
+   `target/dist/X.Y.Z/`; the checksums and the attestations (the release
+   workflow, the tag, the commit, GitHub-hosted runner) are checked.
+7. **Draft release** on Codeberg with the changelog section, packages and
+   checksums.
+8. **Publish**: smoke test the `.dmg` on the Mac (#85) and the `.msix` in the
+   Windows VM (`windows-vm.md`), then answer the prompt. Without a terminal,
+   or to publish later:
    `nix run .#release -- publish 0.2.0`.
 
 Pushes ask for a YubiKey touch; a failed first try is retried once.

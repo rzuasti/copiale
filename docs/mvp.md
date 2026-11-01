@@ -255,7 +255,8 @@ Scope, UI design, architecture and work items for the first usable release.
 
 ### Settings
 
-`config.toml` in the platform config dir (`~/.config/copiale/` on Linux) is
+`config.toml` in the platform config dir (`~/.config/copiale/` on Linux; on
+Windows `%APPDATA%`, redirected into the package's own folder under MSIX) is
 the source of truth (`copiale_core::config`).
 
 - On Linux and BSDs, `copiale/config.toml` in each `$XDG_CONFIG_DIRS` dir

@@ -67,6 +67,32 @@ programs.copiale.settings = {
   Hyprland and sway run it only through a session manager such as UWSM.
 - Home Manager: a systemd user service bound to `graphical-session.target`.
 
+### Windows
+
+Requires Windows 11 (x64). Download `Copiale-<version>.msix` from
+[Releases](https://codeberg.org/korba/copiale/releases).
+
+Packages aren't signed yet ([code signing policy](docs/code-signing.md)), so
+double-clicking one won't install it. In an administrator PowerShell:
+
+```powershell
+Add-AppxPackage -Path $HOME\Downloads\Copiale-<version>.msix -AllowUnsigned
+```
+
+There are no automatic updates yet. To update, install the new package the
+same way. The first signed package won't replace an unsigned one: remove it
+first, then link again.
+
+To start Copiale at login, run it once, then turn it on in Settings → Apps →
+Startup. It starts hidden, in the tray.
+
+Copiale keeps its files in its package's folder, so uninstalling deletes your
+messages, attachments and settings; only the database key stays in Credential
+Manager, useless without the database. Your files are under
+`%LOCALAPPDATA%\Packages\page.codeberg.korba.Copiale_*\LocalCache`:
+`config.toml` in `Roaming\korba\Copiale\config`, logs in
+`Local\korba\Copiale\data`.
+
 ## License
 
 Copyright (C) 2026 Ricardo Zuasti

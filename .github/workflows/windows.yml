@@ -1,6 +1,7 @@
 # Windows build and tests; runs on the GitHub mirror (#97), on demand:
-# `gh workflow run windows.yml --ref main`. `nix run .#windows-vm -- fetch`
-# puts its build in the test VM (docs/windows-vm.md).
+# `gh workflow run windows.yml --ref main`, or the release command.
+# `nix run .#windows-vm -- fetch` puts its build in the test VM
+# (docs/windows-vm.md).
 name: Windows
 
 on:
@@ -72,8 +73,13 @@ jobs:
           RUST_BACKTRACE: "1"
         run: cargo test --workspace --no-fail-fast
 
+  # Its attested package is what a release ships (#100).
   build:
     runs-on: windows-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Rust
@@ -146,6 +152,9 @@ jobs:
           Add-AppxPackage -Path target\msix\copiale.msix -AllowUnsigned
           & "$env:LOCALAPPDATA\Microsoft\WindowsApps\copiale.exe" --help | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "the installed copiale --help failed" }
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: target/msix/copiale.msix
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: copiale.exe

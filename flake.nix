@@ -33,7 +33,7 @@
     homeModules.default = import ./nix/home-module.nix self;
     homeManagerModules = self.homeModules;
 
-    # `nix run .#release -- <version>`; see docs/release-macos.md.
+    # `nix run .#release -- <version>`; see docs/release.md.
     # `nix run .#windows-vm -- <command>`; see docs/windows-vm.md.
     apps = forEachSystem (system:
       {
@@ -65,7 +65,7 @@
           fileset = nixpkgs.lib.fileset.unions [./packaging/release.sh ./packaging/release.bats];
         };
       in
-        pkgs.runCommand "release-tests" {nativeBuildInputs = [pkgs.bats pkgs.git];} ''
+        pkgs.runCommand "release-tests" {nativeBuildInputs = [pkgs.bats pkgs.git pkgs.jq];} ''
           HOME=$TMPDIR bats ${src}/release.bats
           touch $out
         '';
