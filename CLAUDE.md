@@ -144,10 +144,10 @@ went unsolved until 2011.
     (`docs/release.md`); its changelog section is approved by the user
     before it's committed.
   - Windows: MSIX downloaded from Codeberg Releases (no Microsoft Store),
-    unsigned for now (Windows 11, installed from an administrator prompt); to be
-    signed with a Certum Open Source certificate (SignPath Foundation declined;
-    `docs/code-signing.md`), with updates through an `.appinstaller` on Codeberg
-    Pages (#100). `windows.yml` on the mirror checks and builds
+    unsigned (Windows 11, installed from an administrator prompt; no paid
+    certificates or services). SignPath Foundation declined it as too new: apply
+    again once it has more history, then updates through an `.appinstaller` on
+    Codeberg Pages (`docs/code-signing.md`, #100). `windows.yml` on the mirror checks and builds
     `copiale.exe` (static C runtime) and the attested package on demand,
     `windows-release.yml` names that package for a `v*` tag. Tried in a
     Windows 11 evaluation VM only, `nix run .#windows-vm` (x86_64-linux;
