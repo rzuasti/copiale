@@ -1,10 +1,6 @@
 # Code signing policy
 
-Windows packages aren't signed yet: Copiale is applying to SignPath
-Foundation. Once it's accepted, this applies to them:
-
-Free code signing provided by [SignPath.io](https://about.signpath.io),
-certificate by [SignPath Foundation](https://signpath.org).
+Windows packages aren't signed yet (#100).
 
 macOS builds are signed and notarized under the project's own Developer ID.
 
@@ -22,7 +18,7 @@ this project's own source is signed.
 - Approvers: [korba](https://codeberg.org/korba)
 
 An approver checks and approves each release by hand before it's signed. All
-members use multi-factor authentication for the repository and for SignPath.
+members use multi-factor authentication for the repository.
 
 ## Privacy
 

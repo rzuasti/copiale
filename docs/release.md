@@ -7,9 +7,8 @@ nix run .#release -- 0.2.0
 ```
 
 GitHub Actions on the mirror (github.com/rzuasti/copiale) builds, signs and
-notarizes the macOS `.dmg` and builds the Windows `.msix` (unsigned until
-SignPath accepts the project: `code-signing.md`, #100); nothing is signed
-locally. Each step is skipped once done, so after any failure, fix the cause
+notarizes the macOS `.dmg` and builds the Windows `.msix` (unsigned so far:
+`code-signing.md`, #100); nothing is signed locally. Each step is skipped once done, so after any failure, fix the cause
 and run the same command again.
 
 ## Steps

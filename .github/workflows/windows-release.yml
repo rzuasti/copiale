@@ -1,6 +1,6 @@
 # Prepares the Windows package for a release tag (#100): the attested one the
-# `main` run built for the tagged commit, unsigned until SignPath accepts the
-# project (docs/code-signing.md).
+# `main` run built for the tagged commit, unsigned so far
+# (docs/code-signing.md).
 name: Windows release
 
 on:

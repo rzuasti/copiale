@@ -145,9 +145,9 @@ went unsolved until 2011.
     before it's committed.
   - Windows: MSIX downloaded from Codeberg Releases (no Microsoft Store),
     unsigned for now (Windows 11, installed from an administrator prompt); to be
-    signed through SignPath Foundation (Certum Open Source certificate if
-    declined; `docs/code-signing.md`), with updates through an `.appinstaller`
-    on Codeberg Pages (#100). `windows.yml` on the mirror checks and builds
+    signed with a Certum Open Source certificate (SignPath Foundation declined;
+    `docs/code-signing.md`), with updates through an `.appinstaller` on Codeberg
+    Pages (#100). `windows.yml` on the mirror checks and builds
     `copiale.exe` (static C runtime) and the attested package on demand,
     `windows-release.yml` names that package for a `v*` tag. Tried in a
     Windows 11 evaluation VM only, `nix run .#windows-vm` (x86_64-linux;
